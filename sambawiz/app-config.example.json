@@ -1,0 +1,20 @@
+{
+  "checkpointsDir": "gs://your-bucket-name/path/to/checkpoints/",
+  "currentKubeconfig": "your-environment-name",
+  "kubeconfigs": {
+    "your-environment-name": {
+      "file": "kubeconfigs/your-environment.yaml",
+      "namespace": "default",
+      "uiDomain": "https://ui-your-environment.example.com/",
+      "apiDomain": "https://api-your-environment.example.com/",
+      "apiKey": "your-api-key-here"
+    },
+    "another-environment": {
+      "file": "kubeconfigs/another-environment.yaml",
+      "namespace": "default",
+      "uiDomain": "https://ui-another-environment.example.com/",
+      "apiDomain": "https://api-another-environment.example.com/",
+      "apiKey": "another-api-key-here"
+    }
+  }
+}
