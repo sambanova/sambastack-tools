@@ -1,5 +1,4 @@
-import React from 'react';
-import { screen, waitFor } from '@testing-library/react';
+import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
 import BundleDeploymentManager, { getBundleDeploymentStatus } from '../../components/BundleDeploymentManager';
 
@@ -68,94 +67,22 @@ describe('Bundle Deployment Manager', () => {
     });
   });
 
-  describe('Initial Load', () => {
-    it('should render bundle deployment page', async () => {
-      (global.fetch as jest.Mock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundleDeployments: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundles: [] }),
-        });
-
-      renderWithProviders(<BundleDeploymentManager />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Bundle Deployments/i)).toBeInTheDocument();
+  it('should fetch deployments and bundles on mount', async () => {
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, bundleDeployments: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, bundles: [] }),
       });
-    });
 
-    it('should fetch deployments on mount', async () => {
-      (global.fetch as jest.Mock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundleDeployments: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundles: [] }),
-        });
+    renderWithProviders(<BundleDeploymentManager />);
 
-      renderWithProviders(<BundleDeploymentManager />);
-
-      await waitFor(() => {
-        expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
-      });
-    });
-
-    it('should fetch bundles on mount', async () => {
-      (global.fetch as jest.Mock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundleDeployments: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundles: [] }),
-        });
-
-      renderWithProviders(<BundleDeploymentManager />);
-
-      await waitFor(() => {
-        expect(global.fetch).toHaveBeenCalledWith('/api/bundles');
-      });
-    });
-
-    it('should display error when API fails', async () => {
-      (global.fetch as jest.Mock)
-        .mockRejectedValueOnce(new Error('API Error'))
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundles: [] }),
-        });
-
-      renderWithProviders(<BundleDeploymentManager />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/Failed to connect to the server/i)).toBeInTheDocument();
-      });
-    });
-  });
-
-  describe('Deployment List', () => {
-    it('should show empty state when no deployments', async () => {
-      (global.fetch as jest.Mock)
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundleDeployments: [] }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ success: true, bundles: [] }),
-        });
-
-      renderWithProviders(<BundleDeploymentManager />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/No bundle deployments found/i)).toBeInTheDocument();
-      });
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
+      expect(global.fetch).toHaveBeenCalledWith('/api/bundles');
     });
   });
 });

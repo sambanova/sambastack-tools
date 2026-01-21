@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, existsSync } from 'fs';
+import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 export async function POST(request: NextRequest) {
@@ -14,6 +14,12 @@ export async function POST(request: NextRequest) {
     }
 
     const savedArtifactsDir = join(process.cwd(), 'saved_artifacts');
+
+    // Create saved_artifacts directory if it doesn't exist
+    if (!existsSync(savedArtifactsDir)) {
+      mkdirSync(savedArtifactsDir, { recursive: true });
+    }
+
     const filePath = join(savedArtifactsDir, fileName);
 
     // Check if file already exists
@@ -55,6 +61,12 @@ export async function PUT(request: NextRequest) {
     }
 
     const savedArtifactsDir = join(process.cwd(), 'saved_artifacts');
+
+    // Create saved_artifacts directory if it doesn't exist
+    if (!existsSync(savedArtifactsDir)) {
+      mkdirSync(savedArtifactsDir, { recursive: true });
+    }
+
     const filePath = join(savedArtifactsDir, fileName);
 
     // Overwrite the file

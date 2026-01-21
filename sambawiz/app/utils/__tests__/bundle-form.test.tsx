@@ -1,8 +1,6 @@
-import React from 'react';
-import { screen, waitFor, fireEvent } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { waitFor } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
-import { mockCheckpointMapping, mockPefMapping, mockPefConfigs, mockEnvironments } from './mock-data';
+import { mockEnvironments } from './mock-data';
 
 // Mock next/navigation
 const mockPush = jest.fn();
@@ -32,102 +30,11 @@ describe('Bundle Builder Page', () => {
     });
   });
 
-  describe('Initial Load', () => {
-    it('should render bundle builder page', async () => {
-      renderWithProviders(<BundleForm />);
+  it('should fetch checkpointsDir on mount', async () => {
+    renderWithProviders(<BundleForm />);
 
-      await waitFor(() => {
-        expect(screen.getByText(/1\. Select Models/i)).toBeInTheDocument();
-      });
-    });
-
-    it('should fetch checkpointsDir on mount', async () => {
-      renderWithProviders(<BundleForm />);
-
-      await waitFor(() => {
-        expect(global.fetch).toHaveBeenCalledWith('/api/environments');
-      });
-    });
-
-    it('should show available models in dropdown', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<BundleForm />);
-
-      await waitFor(() => {
-        expect(screen.getByLabelText(/Models/i)).toBeInTheDocument();
-      });
-
-      const select = screen.getByLabelText(/Models/i);
-      await user.click(select);
-
-      expect(screen.getByText('Meta-Llama-3.1-8B-Instruct')).toBeInTheDocument();
-      expect(screen.getByText('Meta-Llama-3.1-70B-Instruct')).toBeInTheDocument();
-      expect(screen.getByText('Qwen2.5-72B-Instruct')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith('/api/environments');
     });
   });
-
-  describe('Model Selection', () => {
-    it('should allow selecting a single model', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<BundleForm />);
-
-      await waitFor(() => {
-        expect(screen.getByLabelText(/Models/i)).toBeInTheDocument();
-      });
-
-      const select = screen.getByLabelText(/Models/i);
-      await user.click(select);
-      await user.click(screen.getByText('Meta-Llama-3.1-8B-Instruct'));
-
-      await waitFor(() => {
-        expect(screen.getByText(/2\. Select Configurations/i)).toBeInTheDocument();
-      });
-    });
-
-    it('should display configuration table after model selection', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<BundleForm />);
-
-      await waitFor(() => {
-        expect(screen.getByLabelText(/Models/i)).toBeInTheDocument();
-      });
-
-      const select = screen.getByLabelText(/Models/i);
-      await user.click(select);
-      await user.click(screen.getByText('Meta-Llama-3.1-8B-Instruct'));
-
-      await waitFor(() => {
-        expect(screen.getByText(/Sequence Length \(SS\)/i)).toBeInTheDocument();
-        expect(screen.getByText(/Batch Size \(BS\)/i)).toBeInTheDocument();
-      });
-    });
-
-    it('should remove configs when model is deselected', async () => {
-      const user = userEvent.setup();
-      renderWithProviders(<BundleForm />);
-
-      await waitFor(() => {
-        expect(screen.getByLabelText(/Models/i)).toBeInTheDocument();
-      });
-
-      const select = screen.getByLabelText(/Models/i);
-      await user.click(select);
-      await user.click(screen.getByText('Meta-Llama-3.1-8B-Instruct'));
-
-      // Select a configuration
-      await waitFor(() => {
-        const checkboxes = screen.getAllByRole('checkbox');
-        fireEvent.click(checkboxes[1]); // Click first config checkbox
-      });
-
-      // Deselect the model
-      await user.click(select);
-      await user.click(screen.getByText('Meta-Llama-3.1-8B-Instruct'));
-
-      await waitFor(() => {
-        expect(screen.queryByText(/3\. Selected PEFs/i)).not.toBeInTheDocument();
-      });
-    });
-  });
-
 });

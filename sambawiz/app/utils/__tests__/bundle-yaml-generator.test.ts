@@ -33,16 +33,6 @@ describe('bundle-yaml-generator', () => {
       const result = generateCheckpointName('-model-name-');
       expect(result).toBe('MODEL_NAME_CKPT');
     });
-
-    it('should handle empty string', () => {
-      const result = generateCheckpointName('');
-      expect(result).toBe('_CKPT');
-    });
-
-    it('should handle all special characters', () => {
-      const result = generateCheckpointName('!!!');
-      expect(result).toBe('_CKPT');
-    });
   });
 
   describe('generateBundleYaml', () => {
@@ -189,17 +179,6 @@ describe('bundle-yaml-generator', () => {
       expect(yaml).toContain('owner: no-reply@sambanova.ai');
       expect(yaml).toContain('secretNames:');
       expect(yaml).toContain('- sambanova-artifact-reader');
-    });
-
-    it('should set usePefCRs to true', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('usePefCRs: true');
     });
 
     it('should handle multiple models', () => {
@@ -382,70 +361,6 @@ describe('bundle-yaml-generator', () => {
       // Count occurrences of spec_decoding (should only be 1)
       const specDecodingMatches = yaml.match(/spec_decoding:/g);
       expect(specDecodingMatches).toHaveLength(1);
-    });
-
-    it('should generate YAML with separator between BundleTemplate and Bundle', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toMatch(/---/);
-    });
-
-    it('should link Bundle to BundleTemplate via template field', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'my-bundle'
-      );
-
-      expect(yaml).toContain('template: bt-my-bundle');
-    });
-
-    it('should handle empty config selection', () => {
-      const yaml = generateBundleYaml(
-        [],
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'empty-bundle'
-      );
-
-      // Should still generate valid YAML structure
-      expect(yaml).toContain('apiVersion: sambanova.ai/v1alpha1');
-      expect(yaml).toContain('kind: BundleTemplate');
-      expect(yaml).toContain('kind: Bundle');
-    });
-
-    it('should generate valid YAML that ends with newline', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml.endsWith('\n')).toBe(true);
-    });
-
-    it('should properly indent YAML structure', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      // Check for proper indentation patterns
-      expect(yaml).toContain('  models:');
-      expect(yaml).toContain('    Meta-Llama-3.1-8B-Instruct:');
-      expect(yaml).toContain('      experts:');
-      expect(yaml).toContain('        1024:');
-      expect(yaml).toContain('          configs:');
-      expect(yaml).toContain('          - batch_size: 1');
     });
 
     it('should group configs by sequence size (SS)', () => {

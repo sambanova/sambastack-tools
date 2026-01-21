@@ -14,6 +14,7 @@ import {
   SelectChangeEvent,
   CircularProgress,
   Alert,
+  IconButton,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -21,6 +22,8 @@ import PersonIcon from '@mui/icons-material/Person';
 import CodeIcon from '@mui/icons-material/Code';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import { getBundleDeploymentStatus } from './BundleDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
@@ -50,6 +53,7 @@ interface Message {
   content: string;
   timestamp: Date;
   metrics?: Metrics;
+  isError?: boolean;
 }
 
 export default function Playground() {
@@ -73,6 +77,7 @@ export default function Playground() {
   const [inputMessage, setInputMessage] = useState<string>('');
   const [isSending, setIsSending] = useState<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [copiedErrorId, setCopiedErrorId] = useState<string | null>(null);
 
   // View Code dialog state
   const [viewCodeDialogOpen, setViewCodeDialogOpen] = useState<boolean>(false);
@@ -282,8 +287,9 @@ export default function Playground() {
         const errorMessage: Message = {
           id: (Date.now() + 1).toString(),
           role: 'assistant',
-          content: `Error: ${data.error}`,
+          content: data.error,
           timestamp: new Date(),
+          isError: true,
         };
         setMessages((prev) => [...prev, errorMessage]);
       }
@@ -292,13 +298,66 @@ export default function Playground() {
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `Error: Failed to send message - ${err.message}`,
+        content: `Failed to send message - ${err.message}`,
         timestamp: new Date(),
+        isError: true,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsSending(false);
     }
+  };
+
+  // Handle copy error to clipboard
+  const handleCopyError = (messageId: string, content: string) => {
+    navigator.clipboard.writeText(content);
+    setCopiedErrorId(messageId);
+    setTimeout(() => {
+      setCopiedErrorId(null);
+    }, 2000);
+  };
+
+  // Parse error message to separate header and body
+  const parseErrorMessage = (errorContent: string): { header: string; body: string } => {
+    // Check if the error follows the pattern "API request failed: STATUS - DETAILS"
+    // Look for " - " separator
+    const dashIndex = errorContent.indexOf(' - ');
+
+    if (dashIndex !== -1) {
+      const potentialHeader = errorContent.substring(0, dashIndex).trim();
+      const potentialBody = errorContent.substring(dashIndex + 3).trim();
+
+      // If we found a separator and the header looks like an error status line
+      if (potentialHeader && potentialBody &&
+          (potentialHeader.startsWith('API request failed:') ||
+           potentialHeader.startsWith('Failed to') ||
+           potentialHeader.includes('Error'))) {
+        return {
+          header: potentialHeader,
+          body: potentialBody,
+        };
+      }
+    }
+
+    // For other error formats, check if it starts with a recognizable error pattern
+    if (errorContent.startsWith('API request failed:')) {
+      // Extract just the status line as header
+      const statusMatch = errorContent.match(/^(API request failed: \d+ [A-Z\s]+)/);
+      if (statusMatch) {
+        const header = statusMatch[1];
+        const remainingText = errorContent.substring(header.length).trim();
+        return {
+          header: header,
+          body: remainingText || 'No additional details provided',
+        };
+      }
+    }
+
+    // Fallback: use "Error" as header and full content as body
+    return {
+      header: 'Error',
+      body: errorContent,
+    };
   };
 
   // Handle Enter key press
@@ -532,35 +591,110 @@ export default function Playground() {
 
                       {/* Message Content */}
                       <Box sx={{ maxWidth: '70%' }}>
-                        <Box
-                          sx={{
-                            p: 2,
-                            borderRadius: 2,
-                            backgroundColor: message.role === 'user' ? 'primary.main' : 'white',
-                            color: message.role === 'user' ? 'white' : 'text.primary',
-                            boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                          }}
-                        >
-                          <Typography
-                            variant="body1"
+                        {message.isError ? (
+                          // Error Box with special styling
+                          (() => {
+                            const { header, body } = parseErrorMessage(message.content);
+                            return (
+                              <Box
+                                sx={{
+                                  border: '1px solid',
+                                  borderColor: 'error.main',
+                                  borderRadius: 2,
+                                  backgroundColor: '#fff5f5',
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                <Box
+                                  sx={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    backgroundColor: '#ffebee',
+                                    px: 2,
+                                    py: 1,
+                                    borderBottom: '1px solid',
+                                    borderColor: 'error.light',
+                                  }}
+                                >
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
+                                    <ErrorOutlineIcon sx={{ fontSize: 20, color: 'error.main' }} />
+                                    <Typography
+                                      variant="subtitle2"
+                                      sx={{ color: 'error.main', fontWeight: 600 }}
+                                    >
+                                      {header}
+                                    </Typography>
+                                  </Box>
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => handleCopyError(message.id, message.content)}
+                                    sx={{
+                                      color: copiedErrorId === message.id ? 'success.main' : 'text.secondary',
+                                    }}
+                                  >
+                                    <ContentCopyIcon sx={{ fontSize: 18 }} />
+                                  </IconButton>
+                                </Box>
+                                <Box sx={{ p: 2 }}>
+                                  <Typography
+                                    variant="body2"
+                                    sx={{
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word',
+                                      color: 'text.primary',
+                                      fontFamily: 'monospace',
+                                      fontSize: '0.875rem',
+                                    }}
+                                  >
+                                    {body}
+                                  </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      display: 'block',
+                                      mt: 1.5,
+                                      color: 'text.secondary',
+                                    }}
+                                  >
+                                    {message.timestamp.toLocaleTimeString()}
+                                  </Typography>
+                                </Box>
+                              </Box>
+                            );
+                          })()
+                        ) : (
+                          // Normal Message Box
+                          <Box
                             sx={{
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-word',
+                              p: 2,
+                              borderRadius: 2,
+                              backgroundColor: message.role === 'user' ? 'primary.main' : 'white',
+                              color: message.role === 'user' ? 'white' : 'text.primary',
+                              boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
                             }}
                           >
-                            {message.content}
-                          </Typography>
-                          <Typography
-                            variant="caption"
-                            sx={{
-                              display: 'block',
-                              mt: 1,
-                              opacity: 0.7,
-                            }}
-                          >
-                            {message.timestamp.toLocaleTimeString()}
-                          </Typography>
-                        </Box>
+                            <Typography
+                              variant="body1"
+                              sx={{
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                              }}
+                            >
+                              {message.content}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                display: 'block',
+                                mt: 1,
+                                opacity: 0.7,
+                              }}
+                            >
+                              {message.timestamp.toLocaleTimeString()}
+                            </Typography>
+                          </Box>
+                        )}
 
                         {/* Metrics Panel - Only for assistant messages with metrics */}
                         {message.role === 'assistant' && message.metrics && (

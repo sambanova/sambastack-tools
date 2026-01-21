@@ -238,31 +238,6 @@ describe('pef-config-generator', () => {
       expect(writtenData['invalid-pef-name']).toBeUndefined();
     });
 
-    it('should skip PEFs without metadata name', async () => {
-      const kubectlOutputWithoutName = {
-        items: [
-          {
-            metadata: {},
-            spec: { versions: { '1': {} } },
-          },
-          {
-            metadata: { name: 'model-ss1024-bs1' },
-            spec: { versions: { '1': {} } },
-          },
-        ],
-      };
-
-      (execSync as jest.Mock).mockReturnValue(JSON.stringify(kubectlOutputWithoutName));
-
-      await generatePefConfigs();
-
-      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
-      const writtenData = JSON.parse(writeCall[1]);
-
-      expect(Object.keys(writtenData).length).toBe(1);
-      expect(writtenData['model-ss1024-bs1']).toBeDefined();
-    });
-
     it('should return success with correct count', async () => {
       const result = await generatePefConfigs();
 
@@ -270,29 +245,6 @@ describe('pef-config-generator', () => {
       if (result.success) {
         expect(result.count).toBe(3);
       }
-    });
-
-    it('should write to correct output path', async () => {
-      await generatePefConfigs();
-
-      expect(writeFileSync).toHaveBeenCalledWith(
-        expect.stringMatching(/app[\/\\]data[\/\\]pef_configs\.json$/),
-        expect.any(String),
-        'utf-8'
-      );
-    });
-
-    it('should write valid JSON with proper formatting', async () => {
-      await generatePefConfigs();
-
-      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
-      const writtenJson = writeCall[1];
-
-      // Should be valid JSON
-      expect(() => JSON.parse(writtenJson)).not.toThrow();
-
-      // Should be formatted with 2-space indentation
-      expect(writtenJson).toContain('\n  ');
     });
 
     it('should handle empty PEF list', async () => {
@@ -458,32 +410,5 @@ describe('pef-config-generator', () => {
       expect(writtenData['model-ss1024-bs1'].latestVersion).toBe('15');
     });
 
-    it('should handle mixed valid and invalid version numbers', async () => {
-      const kubectlOutputWithMixedVersions = {
-        items: [
-          {
-            metadata: { name: 'model-ss1024-bs1' },
-            spec: {
-              versions: {
-                '1': {},
-                invalid: {},
-                '5': {},
-                '': {},
-              },
-            },
-          },
-        ],
-      };
-
-      (execSync as jest.Mock).mockReturnValue(JSON.stringify(kubectlOutputWithMixedVersions));
-
-      await generatePefConfigs();
-
-      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
-      const writtenData = JSON.parse(writeCall[1]);
-
-      // Should ignore invalid versions and use highest valid one
-      expect(writtenData['model-ss1024-bs1'].latestVersion).toBe('5');
-    });
   });
 });

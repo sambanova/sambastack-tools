@@ -109,9 +109,29 @@ export async function POST(request: NextRequest) {
     if (!response.ok) {
       const errorText = await response.text();
       console.error('API Error:', errorText);
+
+      // Try to parse the error body to get more details
+      let errorMessage = `API request failed: ${response.status} ${response.statusText}`;
+      if (errorText) {
+        try {
+          const errorJson = JSON.parse(errorText);
+          if (errorJson.error) {
+            errorMessage += ` - ${errorJson.error}`;
+          } else if (errorJson.message) {
+            errorMessage += ` - ${errorJson.message}`;
+          } else {
+            // JSON but no standard error field, include the whole thing
+            errorMessage += ` - ${errorText}`;
+          }
+        } catch {
+          // If not JSON, include the raw text regardless of length
+          errorMessage += ` - ${errorText}`;
+        }
+      }
+
       return NextResponse.json({
         success: false,
-        error: `API request failed: ${response.status} ${response.statusText}`,
+        error: errorMessage,
       }, { status: response.status });
     }
 
