@@ -58,9 +58,5 @@
   "Whisper-Large-v3": {
     "path": "version/0.1.0/pefs-checkpoints/ckpts/whisper-large-v3-untied-fp32",
     "resource_name": "whisper-large-v3"
-  },
-  "sarashina2-70b": {
-    "path": "<replace me>",
-    "resource_name": "sarashina2-70b"
   }
 }

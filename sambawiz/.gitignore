@@ -1,3 +1,4 @@
+# SambaWiz-specific .gitignore
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
@@ -21,7 +22,6 @@
 /build
 
 # misc
-.DS_Store
 *.pem
 
 # debug
@@ -40,6 +40,13 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# package manager lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# SambaWiz-specific files below
+
 # kubeconfig (contains sensitive cluster credentials)
 # Ignore all files in kubeconfigs directory
 kubeconfigs/*
@@ -51,27 +58,17 @@ app-config.json
 # Except the example file
 !app-config.example.json
 
-# package manager lock files
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-
-# IDE
-.vscode/
-.idea/
-
 # temporary yaml files
 /temp/
 
 # reference files
 /reference/
 
-# Claude AI conversation files
-CLAUDE.md
-.claude
-
 # saved artifacts (user-generated bundle/deployment files)
 saved_artifacts/
 
 # auto-generated PEF configs (generated from cluster on startup)
 app/data/pef_configs.json
+
+# custom configurations and files
+custom/
