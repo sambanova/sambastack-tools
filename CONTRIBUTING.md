@@ -94,7 +94,7 @@ Package owners must:
 5. Update libraries monthly and coordinate with global dependency updates
 
 ## Questions or Issues?
-- <a href="https://community.sambanova.ai/latest" target="_blank">,Message us</a> on SambaNova Community <a href="https://community.sambanova.ai/latest" 
+- [Message us](https://community.sambanova.ai/latest) on SambaNova Community
 - Create an issue on GitHub
 - We're happy to help!
 
