@@ -40,8 +40,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# package manager lock files
-package-lock.json
+# package manager lock files (keep package-lock.json for consistent builds)
+# package-lock.json should be committed for reproducible builds
 yarn.lock
 pnpm-lock.yaml
 
