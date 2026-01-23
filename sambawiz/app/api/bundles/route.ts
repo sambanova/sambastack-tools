@@ -23,7 +23,7 @@ interface Bundle {
   isValid: boolean;
   validationReason: string;
   validationMessage: string;
-  models: { [key: string]: any };
+  models: Record<string, unknown>;
 }
 
 /**
@@ -82,7 +82,18 @@ export async function GET() {
     const data = JSON.parse(output);
 
     // Transform the data to a more usable format
-    const bundles: Bundle[] = data.items.map((item: any) => {
+    const bundles: Bundle[] = data.items.map((item: {
+      metadata: { name: string; namespace: string; creationTimestamp: string };
+      spec: { template: string; models?: Record<string, unknown> };
+      status?: {
+        conditions?: Array<{
+          type?: string;
+          status?: string;
+          reason?: string;
+          message?: string;
+        }>;
+      };
+    }) => {
       const condition = item.status?.conditions?.[0];
       const isValid = condition?.reason === 'ValidationSucceeded' || condition?.status === 'True';
 
@@ -102,14 +113,18 @@ export async function GET() {
       success: true,
       bundles,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to fetch bundles:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const stderr = (error && typeof error === 'object' && 'stderr' in error)
+      ? String(error.stderr)
+      : '';
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to fetch bundles',
-        message: error.message || 'Unknown error',
-        stderr: error.stderr?.toString() || '',
+        message,
+        stderr,
       },
       { status: 500 }
     );

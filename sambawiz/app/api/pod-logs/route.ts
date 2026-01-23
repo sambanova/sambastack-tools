@@ -88,23 +88,27 @@ export async function GET(request: NextRequest) {
         logs: output,
         podName,
       });
-    } catch (error: any) {
+    } catch (error) {
       // Pod might not exist yet or kubectl command failed
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
       return NextResponse.json({
         success: false,
         error: 'Failed to fetch pod logs',
-        message: error.message || 'Unknown error',
-        stderr: error.stderr?.toString() || '',
+        message,
+        stderr,
         podName,
       });
     }
-  } catch (error: any) {
+  } catch (error) {
     console.error('Pod logs error:', error);
     return NextResponse.json(
       {
         success: false,
         error: 'Internal server error',
-        message: error.message || 'Unknown error',
+        message: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }
     );

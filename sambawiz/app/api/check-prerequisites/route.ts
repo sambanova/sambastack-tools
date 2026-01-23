@@ -12,7 +12,7 @@ export async function GET() {
     try {
       execSync('kubectl version --client', { stdio: 'pipe' });
       prerequisites.kubectl = true;
-    } catch (error) {
+    } catch {
       console.error('kubectl not found');
     }
 
@@ -20,7 +20,7 @@ export async function GET() {
     try {
       execSync('helm version', { stdio: 'pipe' });
       prerequisites.helm = true;
-    } catch (error) {
+    } catch {
       console.error('helm not found');
     }
 

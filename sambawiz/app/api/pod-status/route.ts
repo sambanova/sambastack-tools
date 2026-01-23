@@ -115,23 +115,27 @@ export async function GET(request: NextRequest) {
         podStatus,
         deploymentName,
       });
-    } catch (error: any) {
+    } catch (error) {
       // Pods might not exist yet or kubectl command failed
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
       return NextResponse.json({
         success: false,
         error: 'Failed to fetch pod status',
-        message: error.message || 'Unknown error',
-        stderr: error.stderr?.toString() || '',
+        message,
+        stderr,
         deploymentName,
       });
     }
-  } catch (error: any) {
+  } catch (error) {
     console.error('Pod status error:', error);
     return NextResponse.json(
       {
         success: false,
         error: 'Internal server error',
-        message: error.message || 'Unknown error',
+        message: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }
     );

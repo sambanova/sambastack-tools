@@ -51,6 +51,10 @@
     "path": "version/0.1.0/pefs-checkpoints/ckpts/Llama-3.3-70B-Instruct",
     "resource_name": "meta-llama-3-3-70b-instruct"
   },
+  "Qwen3-235B": {
+    "path": "version/0.1.0/pefs-checkpoints/ckpts/Qwen3-235B-A22B-Instruct-2507-FP8-per-tensor-RDU-packed-kvall-idc",
+    "resource_name": "qwen-3-235b"
+  },  
   "Qwen3-32B": {
     "path": "version/0.1.0/pefs-checkpoints/ckpts/Qwen3-32B",
     "resource_name": "qwen3-32b"

@@ -187,12 +187,12 @@ export async function GET() {
           namespace = config.kubeconfigs[currentEnv].namespace || 'default';
         }
       }
-    } catch (e) {
+    } catch {
       // Ignore error, use default namespace
     }
 
     // Determine error message and details
-    let errorMessage = 'Failed to validate kubeconfig';
+    const errorMessage = 'Failed to validate kubeconfig';
     let errorDetails = '';
     const helmCommand = `helm list -n ${namespace} -o json`;
 

@@ -60,7 +60,6 @@ export default function Home() {
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [fullHelmVersion, setFullHelmVersion] = useState<string | null>(null);
-  const [validatingVersion, setValidatingVersion] = useState<boolean>(false);
 
   // Check prerequisites on component mount
   useEffect(() => {
@@ -192,7 +191,6 @@ export default function Home() {
   // Fetch helm version on component mount and when environment changes
   useEffect(() => {
     const fetchHelmVersion = async () => {
-      setValidatingVersion(true);
       try {
         const response = await fetch('/api/kubeconfig-validate');
         const data = await response.json();
@@ -205,8 +203,6 @@ export default function Home() {
       } catch (error) {
         console.error('Failed to fetch helm version:', error);
         setFullHelmVersion(null);
-      } finally {
-        setValidatingVersion(false);
       }
     };
 

@@ -88,10 +88,10 @@ function extractValidationStatus(jsonOutput: string): {
       message: condition.message || 'No message provided',
       isValid: condition.reason === 'ValidationSucceeded' || condition.status === 'True',
     };
-  } catch (error: any) {
+  } catch (error) {
     return {
       reason: 'ParseError',
-      message: `Failed to parse bundle status: ${error.message}`,
+      message: `Failed to parse bundle status: ${error instanceof Error ? error.message : 'Unknown error'}`,
       isValid: false,
     };
   }
@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
     const tempDir = path.join(process.cwd(), 'temp');
     try {
       execSync(`mkdir -p "${tempDir}"`);
-    } catch (error) {
+    } catch {
       // Directory might already exist
     }
 
@@ -176,15 +176,22 @@ export async function POST(request: NextRequest) {
         env,
         timeout: 30000, // 30 second timeout
       });
-    } catch (error: any) {
+    } catch (error) {
       // kubectl apply failed
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
+      const stdout = (error && typeof error === 'object' && 'stdout' in error)
+        ? String(error.stdout)
+        : '';
       return NextResponse.json(
         {
           success: false,
           error: 'kubectl apply failed',
-          message: error.message || 'Unknown error',
-          stderr: error.stderr?.toString() || '',
-          stdout: error.stdout?.toString() || '',
+          message,
+          stderr,
+          stdout,
           filePath,
         },
         { status: 400 }
@@ -204,16 +211,22 @@ export async function POST(request: NextRequest) {
       });
 
       validationStatus = extractValidationStatus(jsonOutput);
-    } catch (error: any) {
+    } catch (error) {
       // kubectl get bundle failed
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
+      const stdout = (error && typeof error === 'object' && 'stdout' in error)
+        ? String(error.stdout)
+        : '';
       return NextResponse.json(
         {
           success: false,
           error: 'kubectl get bundle failed',
           message: 'Bundle was applied but status check failed',
           applyOutput: applyOutput.trim(),
-          stderr: error.stderr?.toString() || '',
-          stdout: error.stdout?.toString() || '',
+          stderr,
+          stdout,
         },
         { status: 400 }
       );
@@ -229,13 +242,13 @@ export async function POST(request: NextRequest) {
       bundleName,
       filePath,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Validation error:', error);
     return NextResponse.json(
       {
         success: false,
         error: 'Internal server error',
-        message: error.message || 'Unknown error',
+        message: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }
     );

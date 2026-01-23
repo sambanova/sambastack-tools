@@ -2,8 +2,8 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** After test cleanup and consolidation
-**Total Tests:** 61 (reduced from ~107)
+**Last Updated:** After simplified YAML format update
+**Total Tests:** 50
 **Focus:** Core business logic and API integration
 
 ## Table of Contents
@@ -155,7 +155,8 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 
 **File:** [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts)
 **Functions:** `generateCheckpointName`, `generateBundleYaml`
-**Test Count:** 33 (reduced from 41)
+**Test Count:** 22
+**Last Updated:** Updated for simplified YAML format (removed batch_size, ckpt_sharing_uuid, num_tokens_at_a_time, draft_expert)
 
 #### generateCheckpointName Function (6 tests)
 
@@ -168,9 +169,7 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 | should collapse multiple underscores | Normalizes multiple consecutive underscores |
 | should remove leading and trailing underscores | Trims underscores from ends |
 
-**What was removed:** Edge cases that never occur (empty strings, all special characters)
-
-#### generateBundleYaml Function (27 tests)
+#### generateBundleYaml Function (16 tests)
 
 **Basic YAML Structure**
 
@@ -178,19 +177,19 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 |------|-------------|
 | should generate valid YAML structure | Verifies YAML contains required apiVersion, BundleTemplate, and Bundle kinds |
 | should include bundle name in metadata | Tests bundle name formatting (bt-* for template, b-* for bundle) |
-| should include model configurations | Verifies model configs (batch_size, num_tokens_at_a_time) are included |
+| should include model configurations | Verifies simplified model configs with only pef field |
 
 **Configuration Handling**
 
 | Test | Description |
 |------|-------------|
-| should generate unique ckpt_sharing_uuid for each SS | Each sequence size gets a unique checkpoint sharing ID |
+| should group configs by SS | Verifies configs are grouped by sequence size (SS) |
 | should include PEF names with versions | PEF names include version numbers (e.g., "pef:1") |
 | should include checkpoint source path | Checkpoint source path construction with checkpointsDir |
 | should use empty source when checkpointsDir is not provided | Fallback behavior without checkpointsDir |
 | should set toolSupport to true for all checkpoints | Verifies toolSupport flag is enabled |
 | should include owner and secretNames | Metadata fields for bundle ownership and secrets |
-| should group configs by sequence size (SS) | Groups batch sizes under the same sequence size |
+| should group configs by sequence size (SS) | Groups multiple batch sizes under the same sequence size |
 
 **Multi-Model Support**
 
@@ -198,22 +197,26 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 |------|-------------|
 | should handle multiple models | YAML generation with multiple different models |
 
-**Speculative Decoding (Complex Feature - All Tests Kept)**
+**Speculative Decoding (Complex Feature)**
 
 | Test | Description |
 |------|-------------|
-| should handle speculative decoding with draft models | spec_decoding configuration with draft model references |
-| should set num_tokens_at_a_time to 1 for target models with spec decoding | Target models use num_tokens_at_a_time=1 |
-| should set num_tokens_at_a_time to 20 for models without spec decoding | Default num_tokens_at_a_time=20 without spec decoding |
+| should handle speculative decoding with draft models using default_config_values | When multiple configs in an SS all have matching draft configs, uses default_config_values (saves YAML lines) |
+| should handle speculative decoding with per-config spec_decoding when not all configs have draft | When only some configs have draft models, uses per-config spec_decoding |
+| should not include spec_decoding for models without draft models | Models without draft models have no spec_decoding section |
 | should not add spec_decoding when draft model is "skip" | "skip" value prevents spec_decoding configuration |
-| should only add spec_decoding when matching draft config exists | spec_decoding only added when draft model config exists |
+| should only add spec_decoding when matching draft config exists | spec_decoding only added when draft model config exists; uses default_config_values for single-config SS, per-config for mixed scenarios |
 
-**What was removed:**
-- YAML formatting tests (indentation, newlines, separators)
-- Implementation detail tests (usePefCRs, template linking)
-- Edge cases (empty config selection)
+**Simplified YAML Format Changes:**
+- ✅ Removed `batch_size` field (embedded in PEF name)
+- ✅ Removed `ckpt_sharing_uuid` field (not needed)
+- ✅ Removed `num_tokens_at_a_time` field (not needed)
+- ✅ Removed `draft_expert` field from spec_decoding
+- ✅ spec_decoding now only contains `draft_model`
+- ✅ Added `default_config_values` support at expert (SS) level
+- ✅ Smart placement of spec_decoding: per-config when single or mixed, default_config_values when multiple and all have drafts
 
-**Why these matter:** YAML generation is mission-critical. Wrong YAML = failed Kubernetes deployment. These tests prevent production incidents.
+**Why these matter:** YAML generation is mission-critical. Wrong YAML = failed Kubernetes deployment. The simplified format reduces YAML verbosity while maintaining all necessary configuration. These tests prevent production incidents.
 
 ---
 
@@ -298,8 +301,8 @@ All tests use the following infrastructure:
 | Category | Test Count | Notes |
 |----------|-----------|-------|
 | **UI Components** | **4** | Only API integration tests |
-| **Core Utilities** | **57** | Business logic and data processing |
-| **Total** | **61** | Down from ~107 (43% reduction) |
+| **Core Utilities** | **46** | Business logic and data processing |
+| **Total** | **50** | Focused on critical business logic |
 
 ### Breakdown by File
 
@@ -310,7 +313,7 @@ All tests use the following infrastructure:
 | bundle-form.test.tsx | 1 | API integration |
 | bundle-deployment.test.tsx | 7 | Status logic (6) + API integration (1) |
 | model-availability.test.ts | 9 | Model filtering logic |
-| bundle-yaml-generator.test.ts | 33 | YAML generation logic |
+| bundle-yaml-generator.test.ts | 22 | Simplified YAML generation logic |
 | pef-config-generator.test.ts | 24 | Kubernetes integration |
 
 ---
@@ -379,11 +382,11 @@ Tests **do not** cover:
 - **Bundle Builder:** 6 tests → 1 test (API integration only)
 - **Bundle Deployment:** 6 UI tests → 1 test (combined fetches)
 
-### Tests Kept (61 tests, 100% of critical logic)
+### Tests Kept (50 tests, 100% of critical logic)
 
 - ✅ All model availability logic tests (9)
 - ✅ All deployment status calculation tests (6)
-- ✅ All YAML generation business logic (33)
+- ✅ All YAML generation business logic (22 - updated for simplified format)
 - ✅ All PEF configuration parsing (24)
 - ✅ All API integration tests (4)
 

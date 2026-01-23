@@ -30,6 +30,7 @@ export default function DocumentationPanel({ docFile }: DocumentationPanelProps)
     if (open && !content) {
       fetchDocumentation();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const fetchDocumentation = async () => {
@@ -43,7 +44,7 @@ export default function DocumentationPanel({ docFile }: DocumentationPanelProps)
       }
       const text = await response.text();
       setContent(text);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error loading documentation:', err);
       setError('Failed to load documentation');
     } finally {

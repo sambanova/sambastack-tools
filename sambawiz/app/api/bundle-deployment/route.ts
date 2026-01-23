@@ -86,7 +86,11 @@ export async function GET() {
     const data = JSON.parse(output);
 
     // Transform the data to a more usable format
-    const bundleDeployments: BundleDeployment[] = data.items.map((item: any) => ({
+    const bundleDeployments: BundleDeployment[] = data.items.map((item: {
+      metadata: { name: string; namespace: string; creationTimestamp: string };
+      spec: { bundle: string };
+      status?: BundleDeployment['status'];
+    }) => ({
       name: item.metadata.name,
       namespace: item.metadata.namespace,
       bundle: item.spec.bundle,
@@ -98,14 +102,18 @@ export async function GET() {
       success: true,
       bundleDeployments,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to fetch bundle deployments:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const stderr = (error && typeof error === 'object' && 'stderr' in error)
+      ? String(error.stderr)
+      : '';
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to fetch bundle deployments',
-        message: error.message || 'Unknown error',
-        stderr: error.stderr?.toString() || '',
+        message,
+        stderr,
       },
       { status: 500 }
     );
@@ -180,14 +188,18 @@ export async function DELETE(request: NextRequest) {
       message: `Bundle deployment ${name} deleted successfully`,
       output: output.trim(),
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Failed to delete bundle deployment:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const stderr = (error && typeof error === 'object' && 'stderr' in error)
+      ? String(error.stderr)
+      : '';
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to delete bundle deployment',
-        message: error.message || 'Unknown error',
-        stderr: error.stderr?.toString() || '',
+        message,
+        stderr,
       },
       { status: 500 }
     );

@@ -82,7 +82,7 @@ export default function BundleForm() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Fetch checkpointsDir from config on component mount
+  // Fetch checkpointsDir from config and load saved state on component mount
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -95,7 +95,26 @@ export default function BundleForm() {
         console.error('Failed to fetch checkpoints directory:', error);
       }
     };
+
+    const loadSavedState = async () => {
+      try {
+        const response = await fetch('/api/bundle-builder-state');
+        const data = await response.json();
+        if (data.success && data.state) {
+          // Restore the saved state
+          setSelectedModels(data.state.selectedModels || []);
+          setSelectedConfigs(data.state.selectedConfigs || []);
+          setBundleName(data.state.bundleName || 'bundle1');
+          setGeneratedYaml(data.state.generatedYaml || '');
+          setDraftModels(data.state.draftModels || {});
+        }
+      } catch (error) {
+        console.error('Failed to load saved state:', error);
+      }
+    };
+
     fetchConfig();
+    loadSavedState();
   }, []);
 
   // Get available models (intersection of checkpoint and pef mapping keys with non-empty values)
@@ -459,6 +478,28 @@ export default function BundleForm() {
     setIsValidating(true);
     setValidationResult(null);
 
+    // Save the current state before validating
+    try {
+      await fetch('/api/bundle-builder-state', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          state: {
+            selectedModels,
+            selectedConfigs,
+            bundleName,
+            generatedYaml,
+            draftModels,
+          },
+        }),
+      });
+    } catch (error) {
+      console.error('Failed to save state:', error);
+      // Continue with validation even if state save fails
+    }
+
     try {
       const response = await fetch('/api/validate', {
         method: 'POST',
@@ -485,11 +526,11 @@ export default function BundleForm() {
           applyOutput: data.applyOutput || data.stderr || data.stdout || data.message,
         });
       }
-    } catch (error: any) {
+    } catch (error) {
       setValidationResult({
         success: false,
         message: 'Failed to connect to validation service',
-        applyOutput: error.message,
+        applyOutput: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
       setIsValidating(false);
@@ -538,7 +579,7 @@ export default function BundleForm() {
           message: data.error || 'Failed to save bundle',
         });
       }
-    } catch (error: any) {
+    } catch {
       setSaveResult({
         success: false,
         message: 'Failed to connect to save service',
@@ -769,6 +810,11 @@ export default function BundleForm() {
               variant="outlined"
               size="small"
             />
+            {bundleName && bundleName !== bundleName.toLowerCase() && (
+              <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: 0.5 }}>
+                Warning: Bundle name should be in lowercase
+              </Typography>
+            )}
           </Box>
 
           {/* Generated YAML */}

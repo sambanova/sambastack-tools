@@ -85,11 +85,10 @@ describe('bundle-yaml-generator', () => {
       );
 
       expect(yaml).toContain('Meta-Llama-3.1-8B-Instruct:');
-      expect(yaml).toContain('batch_size: 1');
-      expect(yaml).toContain('num_tokens_at_a_time: 20');
+      expect(yaml).toContain('pef: COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024:1');
     });
 
-    it('should generate unique ckpt_sharing_uuid for each SS', () => {
+    it('should group configs by SS', () => {
       const configs: ConfigSelection[] = [
         {
           modelName: 'Meta-Llama-3.1-8B-Instruct',
@@ -118,8 +117,8 @@ describe('bundle-yaml-generator', () => {
         'test-bundle'
       );
 
-      expect(yaml).toContain('ckpt_sharing_uuid: id1');
-      expect(yaml).toContain('ckpt_sharing_uuid: id2');
+      expect(yaml).toContain('1024:');
+      expect(yaml).toContain('2048:');
     });
 
     it('should include PEF names with versions', () => {
@@ -210,7 +209,7 @@ describe('bundle-yaml-generator', () => {
       expect(yaml).toContain('QWEN2_5_72B_INSTRUCT_CKPT:');
     });
 
-    it('should handle speculative decoding with draft models', () => {
+    it('should handle speculative decoding with draft models using default_config_values', () => {
       const configs: ConfigSelection[] = [
         {
           modelName: 'Meta-Llama-3.1-70B-Instruct',
@@ -219,10 +218,22 @@ describe('bundle-yaml-generator', () => {
           pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
         },
         {
+          modelName: 'Meta-Llama-3.1-70B-Instruct',
+          ss: '1024',
+          bs: '16',
+          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
+        },
+        {
           modelName: 'Meta-Llama-3.1-8B-Instruct',
           ss: '1024',
           bs: '1',
           pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+        },
+        {
+          modelName: 'Meta-Llama-3.1-8B-Instruct',
+          ss: '1024',
+          bs: '16',
+          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
         },
       ];
 
@@ -239,18 +250,25 @@ describe('bundle-yaml-generator', () => {
         draftModels
       );
 
+      // Should use default_config_values when multiple configs all have matching draft configs
       expect(yaml).toContain('spec_decoding:');
-      expect(yaml).toContain('draft_expert: 1024');
+      expect(yaml).toContain('default_config_values:');
       expect(yaml).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
     });
 
-    it('should set num_tokens_at_a_time to 1 for target models with spec decoding', () => {
+    it('should handle speculative decoding with per-config spec_decoding when not all configs have draft', () => {
       const configs: ConfigSelection[] = [
         {
           modelName: 'Meta-Llama-3.1-70B-Instruct',
           ss: '1024',
           bs: '1',
           pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
+        },
+        {
+          modelName: 'Meta-Llama-3.1-70B-Instruct',
+          ss: '1024',
+          bs: '16',
+          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
         },
         {
           modelName: 'Meta-Llama-3.1-8B-Instruct',
@@ -273,16 +291,16 @@ describe('bundle-yaml-generator', () => {
         draftModels
       );
 
-      // Target model should have num_tokens_at_a_time: 1
-      const targetSection = yaml.split('Meta-Llama-3.1-70B-Instruct:')[1].split('Meta-Llama-3.1-8B-Instruct:')[0];
-      expect(targetSection).toContain('num_tokens_at_a_time: 1');
+      // Should have spec_decoding but NOT default_config_values (since not all configs have draft)
+      expect(yaml).toContain('spec_decoding:');
+      expect(yaml).not.toContain('default_config_values:');
 
-      // Draft model should have num_tokens_at_a_time: 20
-      const draftSection = yaml.split('Meta-Llama-3.1-8B-Instruct:')[1];
-      expect(draftSection).toContain('num_tokens_at_a_time: 20');
+      // Should have inline spec_decoding for the config with draft
+      const targetSection = yaml.split('Meta-Llama-3.1-70B-Instruct:')[1].split('Meta-Llama-3.1-8B-Instruct:')[0];
+      expect(targetSection).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
     });
 
-    it('should set num_tokens_at_a_time to 20 for models without spec decoding', () => {
+    it('should not include spec_decoding for models without draft models', () => {
       const yaml = generateBundleYaml(
         selectedConfigs,
         mockCheckpointMapping,
@@ -290,7 +308,7 @@ describe('bundle-yaml-generator', () => {
         'test-bundle'
       );
 
-      expect(yaml).toContain('num_tokens_at_a_time: 20');
+      expect(yaml).not.toContain('spec_decoding:');
     });
 
     it('should not add spec_decoding when draft model is "skip"', () => {
@@ -323,19 +341,19 @@ describe('bundle-yaml-generator', () => {
       const configs: ConfigSelection[] = [
         {
           modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
+          ss: '4k',
           bs: '1',
           pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
         },
         {
           modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '2048',
+          ss: '8k',
           bs: '1',
           pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss2048',
         },
         {
           modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
+          ss: '4k',
           bs: '1',
           pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
         },
@@ -354,13 +372,21 @@ describe('bundle-yaml-generator', () => {
         draftModels
       );
 
-      // Only the 1024 config should have spec_decoding (it has a matching draft config)
-      // Check that the YAML contains spec_decoding for the 1024 config
+      // Only the 4k SS should have spec_decoding (it has a matching draft config)
       expect(yaml).toContain('spec_decoding:');
 
-      // Count occurrences of spec_decoding (should only be 1)
-      const specDecodingMatches = yaml.match(/spec_decoding:/g);
-      expect(specDecodingMatches).toHaveLength(1);
+      // Get the target model section
+      const targetModelSection = yaml.split('Meta-Llama-3.1-70B-Instruct:')[1].split('Meta-Llama-3.1-8B-Instruct:')[0];
+
+      // The 4k SS has only 1 config, so should use per-config spec_decoding (not default_config_values)
+      expect(targetModelSection).toContain('4k:');
+      expect(targetModelSection).toContain('spec_decoding:');
+      expect(targetModelSection).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
+
+      // The 8k SS should NOT have spec_decoding (no matching draft config)
+      expect(targetModelSection).toContain('8k:');
+      const section8k = targetModelSection.split('8k:')[1];
+      expect(section8k).not.toContain('spec_decoding:');
     });
 
     it('should group configs by sequence size (SS)', () => {
@@ -396,12 +422,9 @@ describe('bundle-yaml-generator', () => {
       expect(yaml).toContain('1024:');
       expect(yaml).toContain('2048:');
 
-      // Both batch sizes should appear in the YAML (they'll be under the same 1024 SS group)
-      expect(yaml).toContain('batch_size: 1');
-      expect(yaml).toContain('batch_size: 16');
-
-      // Both should have the same ckpt_sharing_uuid since they're in the same SS group
-      expect(yaml).toContain('ckpt_sharing_uuid: id1');
+      // Both PEFs should appear in the YAML (they'll be under the same 1024 SS group)
+      expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024');
+      expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024');
     });
   });
 });

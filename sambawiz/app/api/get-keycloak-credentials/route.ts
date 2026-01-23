@@ -102,20 +102,20 @@ export async function POST(request: Request) {
         password
       });
 
-    } catch (execError: any) {
+    } catch (execError) {
       return NextResponse.json({
         success: false,
         error: 'Failed to execute kubectl command',
-        details: execError.message
+        details: execError instanceof Error ? execError.message : 'Unknown error'
       }, { status: 500 });
     }
 
-  } catch (error: any) {
+  } catch (error) {
     console.error('Error getting keycloak credentials:', error);
     return NextResponse.json({
       success: false,
       error: 'Failed to get keycloak credentials',
-      details: error.message
+      details: error instanceof Error ? error.message : 'Unknown error'
     }, { status: 500 });
   }
 }

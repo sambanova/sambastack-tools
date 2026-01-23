@@ -83,7 +83,7 @@ export default function Playground() {
   const [viewCodeDialogOpen, setViewCodeDialogOpen] = useState<boolean>(false);
   const [apiKey, setApiKey] = useState<string>('');
   const [apiDomain, setApiDomain] = useState<string>('');
-  const [currentEnvironment, setCurrentEnvironment] = useState<string>('');
+  const [, setCurrentEnvironment] = useState<string>('');
 
   // Fetch bundle deployments and their statuses
   const fetchBundleDeployments = async () => {
@@ -114,7 +114,7 @@ export default function Playground() {
               } else {
                 statuses[deployment.name] = { cachePod: null, defaultPod: null };
               }
-            } catch (err) {
+            } catch {
               statuses[deployment.name] = { cachePod: null, defaultPod: null };
             }
           })
@@ -124,7 +124,7 @@ export default function Playground() {
       } else {
         setError(data.error || 'Failed to fetch bundle deployments');
       }
-    } catch (err: any) {
+    } catch (err) {
       setError('Failed to connect to the server');
       console.error(err);
     } finally {
@@ -178,7 +178,7 @@ export default function Playground() {
       } else {
         setModelsError(data.error || 'Failed to fetch models');
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error fetching models:', err);
       setModelsError('Failed to connect to the server');
     } finally {
@@ -293,12 +293,12 @@ export default function Playground() {
         };
         setMessages((prev) => [...prev, errorMessage]);
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Error sending message:', err);
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `Failed to send message - ${err.message}`,
+        content: `Failed to send message - ${err instanceof Error ? err.message : 'Unknown error'}`,
         timestamp: new Date(),
         isError: true,
       };

@@ -44,7 +44,7 @@ export async function GET() {
         config,
         message: hasCheckpointsDir ? 'Configuration is valid' : 'checkpointsDir is not populated',
       });
-    } catch (parseError) {
+    } catch {
       return NextResponse.json({
         success: true,
         exists: true,

@@ -28,6 +28,7 @@ export const mockPefMapping: PefMapping = {
   'Meta-Llama-3.1-70B-Instruct': [
     'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
     'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss2048',
+    'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
   ],
   'Qwen2.5-72B-Instruct': [
     'COE_Qwen2-5-72B-Instruct_131k_bs1_ss4096',
@@ -37,28 +38,33 @@ export const mockPefMapping: PefMapping = {
 
 export const mockPefConfigs: PefConfigs = {
   'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024': {
-    ss: '1024',
+    ss: '4k',
     bs: '1',
     latestVersion: '1',
   },
   'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048': {
-    ss: '2048',
+    ss: '8k',
     bs: '1',
     latestVersion: '1',
   },
   'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024': {
-    ss: '1024',
+    ss: '4k',
     bs: '16',
     latestVersion: '1',
   },
   'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024': {
-    ss: '1024',
+    ss: '4k',
     bs: '1',
     latestVersion: '1',
   },
   'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss2048': {
-    ss: '2048',
+    ss: '8k',
     bs: '1',
+    latestVersion: '1',
+  },
+  'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024': {
+    ss: '4k',
+    bs: '16',
     latestVersion: '1',
   },
   'COE_Qwen2-5-72B-Instruct_131k_bs1_ss4096': {

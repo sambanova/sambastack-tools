@@ -11,9 +11,11 @@ jest.mock('next/navigation', () => ({
 }));
 
 // Mock the data imports - must be done before importing BundleForm
+/* eslint-disable @typescript-eslint/no-require-imports */
 jest.mock('../../data/pef_configs.json', () => require('./mock-data').mockPefConfigs, { virtual: true });
 jest.mock('../../data/pef_mapping.json', () => require('./mock-data').mockPefMapping, { virtual: true });
 jest.mock('../../data/checkpoint_mapping.json', () => require('./mock-data').mockCheckpointMapping, { virtual: true });
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 import BundleForm from '../../components/BundleForm';
 

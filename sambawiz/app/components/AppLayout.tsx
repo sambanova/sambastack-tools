@@ -10,8 +10,6 @@ import {
   Typography,
   Alert,
 } from '@mui/material';
-import KeyIcon from '@mui/icons-material/Key';
-import PersonIcon from '@mui/icons-material/Person';
 import BuildIcon from '@mui/icons-material/Build';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -28,7 +26,17 @@ interface AppLayoutProps {
 export default function AppLayout({ children }: AppLayoutProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const [selectedItem, setSelectedItem] = useState('bundle-builder');
+
+  // Derive selected item directly from pathname instead of using state
+  const getSelectedItem = () => {
+    if (pathname === '/') return 'home';
+    if (pathname === '/bundle-builder') return 'bundle-builder';
+    if (pathname === '/bundle-deployment') return 'bundle-deployment';
+    if (pathname === '/playground') return 'playground';
+    return 'bundle-builder';
+  };
+  const selectedItem = getSelectedItem();
+
   const [envVersion, setEnvVersion] = useState<string | null>(null);
   const [envName, setEnvName] = useState<string | null>(null);
   const [namespace, setNamespace] = useState<string | null>(null);
@@ -39,19 +47,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
   const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
-
-  // Update selected item based on current pathname
-  useEffect(() => {
-    if (pathname === '/') {
-      setSelectedItem('home');
-    } else if (pathname === '/bundle-builder') {
-      setSelectedItem('bundle-builder');
-    } else if (pathname === '/bundle-deployment') {
-      setSelectedItem('bundle-deployment');
-    } else if (pathname === '/playground') {
-      setSelectedItem('playground');
-    }
-  }, [pathname]);
 
   // Validate kubeconfig on component mount
   useEffect(() => {
@@ -146,7 +141,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
           disabled={helmVersionError}
           onClick={() => {
             if (!helmVersionError) {
-              setSelectedItem('bundle-builder');
               router.push('/bundle-builder');
             }
           }}
@@ -194,7 +188,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
           disabled={helmVersionError}
           onClick={() => {
             if (!helmVersionError) {
-              setSelectedItem('bundle-deployment');
               router.push('/bundle-deployment');
             }
           }}
@@ -242,7 +235,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
           disabled={helmVersionError}
           onClick={() => {
             if (!helmVersionError) {
-              setSelectedItem('playground');
               router.push('/playground');
             }
           }}
@@ -293,7 +285,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
       {envVersion && envName && (
         <Box
           onClick={() => {
-            setSelectedItem('home');
             router.push('/');
           }}
           sx={{

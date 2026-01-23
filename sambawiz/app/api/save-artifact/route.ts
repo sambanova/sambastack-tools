@@ -40,10 +40,10 @@ export async function POST(request: NextRequest) {
       message: `File saved successfully: ${fileName}`,
       filePath,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Save artifact error:', error);
     return NextResponse.json(
-      { success: false, error: error.message || 'Failed to save file' },
+      { success: false, error: error instanceof Error ? error.message : 'Failed to save file' },
       { status: 500 }
     );
   }
@@ -77,10 +77,10 @@ export async function PUT(request: NextRequest) {
       message: `File overwritten successfully: ${fileName}`,
       filePath,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Overwrite artifact error:', error);
     return NextResponse.json(
-      { success: false, error: error.message || 'Failed to overwrite file' },
+      { success: false, error: error instanceof Error ? error.message : 'Failed to overwrite file' },
       { status: 500 }
     );
   }

@@ -1,19 +1,21 @@
 import type { ConfigSelection, CheckpointMapping, PefConfigs } from '../types/bundle';
 
 interface ModelExpertConfig {
-  batch_size: string;
-  ckpt_sharing_uuid: string;
-  num_tokens_at_a_time: number;
   pef: string;
   spec_decoding?: {
-    draft_expert: string;
     draft_model: string;
   };
+  _hasSpecDecoding?: boolean; // Internal flag for tracking spec_decoding configs
 }
 
 interface ModelExperts {
   [ss: string]: {
     configs: ModelExpertConfig[];
+    default_config_values?: {
+      spec_decoding?: {
+        draft_model: string;
+      };
+    };
   };
 }
 
@@ -56,7 +58,6 @@ export function generateBundleYaml(
 
   // Build BundleTemplate spec.models
   const templateModels: BundleTemplateModels = {};
-  let uuidCounter = 1; // Counter for ckpt_sharing_uuid across all models
 
   Object.entries(modelConfigs).forEach(([modelName, configs]) => {
     const experts: ModelExperts = {};
@@ -65,7 +66,7 @@ export function generateBundleYaml(
     const draftModel = draftModels[modelName];
     const hasDraftModel = draftModel && draftModel !== 'skip';
 
-    // Group by SS and assign UUID per expert
+    // Group by SS
     configs.forEach(config => {
       if (!experts[config.ss]) {
         experts[config.ss] = { configs: [] };
@@ -74,40 +75,58 @@ export function generateBundleYaml(
       const version = pefConfigs[config.pefName]?.latestVersion || '1';
 
       // Check if this config will have spec_decoding (i.e., is a target model with matching draft config)
-      let hasSpecDecoding = false;
+      let hasMatchingDraftConfig = false;
       if (hasDraftModel) {
         const draftModelHasMatchingConfig = selectedConfigs.some(
           (sc) => sc.modelName === draftModel && sc.ss === config.ss && sc.bs === config.bs
         );
-        hasSpecDecoding = draftModelHasMatchingConfig;
+        hasMatchingDraftConfig = draftModelHasMatchingConfig;
       }
 
       const expertConfig: ModelExpertConfig = {
-        batch_size: config.bs,
-        ckpt_sharing_uuid: '', // Will be set below
-        num_tokens_at_a_time: hasSpecDecoding ? 1 : 20, // Target models use 1, others use 20
         pef: `${config.pefName}:${version}`
       };
 
-      // Add spec_decoding if this model has a draft model and the draft model has a matching config
-      if (hasSpecDecoding) {
-        expertConfig.spec_decoding = {
-          draft_expert: config.ss,
-          draft_model: draftModel
-        };
-      }
-
       experts[config.ss].configs.push(expertConfig);
+
+      // Track if this specific config needs spec_decoding
+      if (hasMatchingDraftConfig) {
+        expertConfig._hasSpecDecoding = true;
+      }
     });
 
-    // Assign ckpt_sharing_uuid to each expert (all configs in an expert get the same ID)
-    Object.values(experts).forEach(expert => {
-      const currentUuid = `id${uuidCounter}`;
-      expert.configs.forEach(config => {
-        config.ckpt_sharing_uuid = currentUuid;
+    // For each expert (SS level), determine if we should use default_config_values or per-config spec_decoding
+    // Use default_config_values only when:
+    // 1. There are multiple configs for this SS/expert
+    // 2. ALL configs have matching draft configs
+    if (hasDraftModel) {
+      Object.entries(experts).forEach(([, expert]) => {
+        // Check if ALL configs in this expert have matching draft configs
+        const allConfigsHaveDraft = expert.configs.every((config) => config._hasSpecDecoding);
+        const hasMultipleConfigs = expert.configs.length > 1;
+
+        if (allConfigsHaveDraft && hasMultipleConfigs) {
+          // Use default_config_values for this expert (saves YAML lines when multiple configs exist)
+          expert.default_config_values = {
+            spec_decoding: {
+              draft_model: draftModel
+            }
+          };
+          // Clean up temporary flags
+          expert.configs.forEach((config: ModelExpertConfig) => delete config._hasSpecDecoding);
+        } else {
+          // Use per-config spec_decoding
+          expert.configs.forEach((config: ModelExpertConfig) => {
+            if (config._hasSpecDecoding) {
+              config.spec_decoding = {
+                draft_model: draftModel
+              };
+              delete config._hasSpecDecoding;
+            }
+          });
+        }
       });
-      uuidCounter++;
-    });
+    }
 
     templateModels[modelName] = { experts };
   });
@@ -149,21 +168,27 @@ ${Object.entries(templateModels).map(([modelName, model]) => {
   return `    ${modelName}:
       experts:
 ${Object.entries(model.experts).map(([ss, expert]) => {
-  return `        ${ss}:
+  let expertStr = `        ${ss}:
           configs:
 ${expert.configs.map(config => {
-  let configStr = `          - batch_size: ${config.batch_size}
-            ckpt_sharing_uuid: ${config.ckpt_sharing_uuid}
-            num_tokens_at_a_time: ${config.num_tokens_at_a_time}
-            pef: ${config.pef}`;
+  let configStr = `          - pef: ${config.pef}`;
   if (config.spec_decoding) {
     configStr += `
             spec_decoding:
-              draft_expert: ${config.spec_decoding.draft_expert}
               draft_model: ${config.spec_decoding.draft_model}`;
   }
   return configStr;
 }).join('\n')}`;
+
+  // Add default_config_values if present
+  if (expert.default_config_values?.spec_decoding) {
+    expertStr += `
+          default_config_values:
+            spec_decoding:
+              draft_model: ${expert.default_config_values.spec_decoding.draft_model}`;
+  }
+
+  return expertStr;
 }).join('\n')}`;
 }).join('\n')}
   owner: no-reply@sambanova.ai

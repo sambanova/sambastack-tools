@@ -1,5 +1,3 @@
-import { execSync } from 'child_process';
-
 /**
  * Mock kubectl command execution for testing
  */

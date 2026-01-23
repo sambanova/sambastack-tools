@@ -29,7 +29,6 @@ import {
   Collapse,
   IconButton,
   LinearProgress,
-  Chip,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -63,7 +62,7 @@ interface Bundle {
   isValid: boolean;
   validationReason: string;
   validationMessage: string;
-  models: { [key: string]: any };
+  models: Record<string, unknown>;
 }
 
 interface PodStatusInfo {
@@ -121,7 +120,6 @@ export default function BundleDeploymentManager() {
   const [deleting, setDeleting] = useState<boolean>(false);
 
   // Section 2: Deploy a Bundle
-  const [bundles, setBundles] = useState<Bundle[]>([]);
   const [validBundles, setValidBundles] = useState<Bundle[]>([]);
   const [selectedBundle, setSelectedBundle] = useState<string>('');
   const [deploymentName, setDeploymentName] = useState<string>('');
@@ -176,7 +174,7 @@ export default function BundleDeploymentManager() {
           } else {
             statuses[deployment.name] = { cachePod: null, defaultPod: null };
           }
-        } catch (err) {
+        } catch {
           statuses[deployment.name] = { cachePod: null, defaultPod: null };
         }
       })
@@ -202,7 +200,7 @@ export default function BundleDeploymentManager() {
       } else {
         setError(data.error || 'Failed to fetch bundle deployments');
       }
-    } catch (err: any) {
+    } catch (err) {
       setError('Failed to connect to the server');
       console.error(err);
     } finally {
@@ -214,6 +212,7 @@ export default function BundleDeploymentManager() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Handle query parameter for pre-selecting a bundle
@@ -263,7 +262,7 @@ export default function BundleDeploymentManager() {
         } else {
           setPodLogsError(data.message || 'Failed to fetch logs');
         }
-      } catch (err: any) {
+      } catch {
         setPodLogsError('Failed to connect to the server');
       }
     };
@@ -308,7 +307,7 @@ export default function BundleDeploymentManager() {
         } else {
           setDefaultPodLogsError(data.message || 'Failed to fetch logs');
         }
-      } catch (err: any) {
+      } catch {
         setDefaultPodLogsError('Failed to connect to the server');
       }
     };
@@ -338,14 +337,10 @@ export default function BundleDeploymentManager() {
         if (data.success) {
           setPodStatus(data.podStatus);
 
-          // Check if both pods are fully ready
-          const cacheReady = data.podStatus.cachePod?.ready === data.podStatus.cachePod?.total;
-          const defaultReady = data.podStatus.defaultPod?.ready === data.podStatus.defaultPod?.total;
-
           // If both pods are ready, we could optionally stop auto-refresh
           // For now, we'll keep refreshing but the user can see completion status
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to fetch pod status:', err);
       }
     };
@@ -369,14 +364,13 @@ export default function BundleDeploymentManager() {
       const data = await response.json();
 
       if (data.success) {
-        setBundles(data.bundles);
         // Filter to only valid bundles
         const valid = data.bundles.filter((b: Bundle) => b.isValid);
         setValidBundles(valid);
       } else {
         console.error('Failed to fetch bundles:', data.error);
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to connect to the server', err);
     } finally {
       setLoadingBundles(false);
@@ -480,11 +474,11 @@ spec:
           output: data.stderr || data.stdout || data.message || '',
         });
       }
-    } catch (err: any) {
+    } catch (err) {
       setDeploymentResult({
         success: false,
         message: 'Failed to connect to deployment service',
-        output: err.message,
+        output: err instanceof Error ? err.message : 'Unknown error',
       });
     } finally {
       setDeploying(false);
@@ -533,7 +527,7 @@ spec:
 
       // Refresh the list
       await fetchBundleDeployments();
-    } catch (err: any) {
+    } catch (err) {
       setError('Failed to delete bundle deployment');
       console.error(err);
     } finally {
@@ -614,7 +608,7 @@ spec:
           message: data.error || 'Failed to save bundle deployment',
         });
       }
-    } catch (error: any) {
+    } catch {
       setSaveResult({
         success: false,
         message: 'Failed to connect to save service',
@@ -797,6 +791,11 @@ spec:
                   variant="outlined"
                   sx={{ mb: 3 }}
                 />
+                {deploymentName && deploymentName !== deploymentName.toLowerCase() && (
+                  <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: -2, mb: 2 }}>
+                    Warning: Deployment name should be in lowercase
+                  </Typography>
+                )}
 
                 {/* Generated YAML */}
                 <Box>

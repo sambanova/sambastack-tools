@@ -161,11 +161,11 @@ export async function POST(request: NextRequest) {
       metrics,
     });
 
-  } catch (error: any) {
+  } catch (error) {
     console.error('Error in chat API:', error);
     return NextResponse.json({
       success: false,
-      error: error.message || 'Failed to process chat request',
+      error: error instanceof Error ? error.message : 'Failed to process chat request',
     }, { status: 500 });
   }
 }

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 
@@ -50,7 +49,7 @@ export async function POST(request: NextRequest) {
       try {
         const configContent = fs.readFileSync(configPath, 'utf-8');
         config = JSON.parse(configContent);
-      } catch (parseError) {
+      } catch {
         return NextResponse.json(
           { success: false, error: 'Failed to parse app-config.json' },
           { status: 500 }
@@ -92,7 +91,7 @@ export async function POST(request: NextRequest) {
 
     try {
       await execAsync(`cat "${tempFilePath}" | base64 -d > "${kubeconfigFilePath}"`);
-    } catch (decodeError) {
+    } catch {
       // Clean up temp file
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);

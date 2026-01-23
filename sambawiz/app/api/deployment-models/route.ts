@@ -80,30 +80,38 @@ export async function GET(request: NextRequest) {
           timeout: 30000,
         }
       );
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error getting bundle deployment:', error);
+      const details = error instanceof Error ? error.message : 'Unknown error';
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
       return NextResponse.json(
         {
           success: false,
           error: 'Failed to get bundle deployment',
-          details: error.message,
-          stderr: error.stderr?.toString() || '',
+          details,
+          stderr,
         },
         { status: 500 }
       );
     }
 
     // Parse the BundleDeployment JSON
-    let bundleDeployment: any;
+    let bundleDeployment: {
+      spec?: {
+        bundle?: string;
+      };
+    };
     try {
       bundleDeployment = JSON.parse(bundleDeploymentOutput);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error parsing bundle deployment JSON:', error);
       return NextResponse.json(
         {
           success: false,
           error: 'Failed to parse bundle deployment data',
-          details: error.message,
+          details: error instanceof Error ? error.message : 'Unknown error',
         },
         { status: 500 }
       );
@@ -132,30 +140,38 @@ export async function GET(request: NextRequest) {
           timeout: 30000,
         }
       );
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error getting bundle:', error);
+      const details = error instanceof Error ? error.message : 'Unknown error';
+      const stderr = (error && typeof error === 'object' && 'stderr' in error)
+        ? String(error.stderr)
+        : '';
       return NextResponse.json(
         {
           success: false,
           error: 'Failed to get bundle',
-          details: error.message,
-          stderr: error.stderr?.toString() || '',
+          details,
+          stderr,
         },
         { status: 500 }
       );
     }
 
     // Parse the Bundle JSON
-    let bundle: any;
+    let bundle: {
+      spec?: {
+        models?: Record<string, unknown>;
+      };
+    };
     try {
       bundle = JSON.parse(bundleOutput);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error parsing bundle JSON:', error);
       return NextResponse.json(
         {
           success: false,
           error: 'Failed to parse bundle data',
-          details: error.message,
+          details: error instanceof Error ? error.message : 'Unknown error',
         },
         { status: 500 }
       );
@@ -184,13 +200,13 @@ export async function GET(request: NextRequest) {
       bundleName,
       models: modelNames,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Unexpected error in deployment-models API:', error);
     return NextResponse.json(
       {
         success: false,
         error: 'An unexpected error occurred',
-        details: error.message,
+        details: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }
     );
