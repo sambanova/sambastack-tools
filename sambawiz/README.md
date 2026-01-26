@@ -1,3 +1,10 @@
+<a href="https://sambanova.ai/">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/light-logo.png" height="100">
+  <img alt="SambaNova logo" src="../images/dark-logo.png" height="100">
+</picture>
+</a>
+
 # SambaWiz
 
 SambaWiz is a GUI wizard that accelerates the creation and deployment of model bundles on [SambaStack](https://docs.sambanova.ai/docs/en/admin/overview/sambastack-overview).
@@ -25,7 +32,11 @@ SambaWiz is a GUI wizard that accelerates the creation and deployment of model b
 - [Technology Stack](#technology-stack)
 - [Development](#development)
 - [Security Considerations](#security-considerations)
-- [License](#license)
+- [Troubleshooting](#troubleshooting)
+  - [Configuration Issues](#configuration-issues)
+  - [Version Compatibility Issues](#version-compatibility-issues)
+  - [Connection Issues](#connection-issues)
+  - [Common Error Messages](#common-error-messages)
 
 ## Overview
 
@@ -283,3 +294,78 @@ npm run build
 - Consider implementing authentication/authorization for production deployments
 - Never commit sensitive configuration files or credentials to version control
 - Use `app-config.example.json` as a template (safe to commit)
+
+## Troubleshooting
+
+### Configuration Issues
+
+**Problem: Application fails to start or shows configuration errors**
+
+1. **Verify `app-config.json` exists**
+   - The `app-config.json` file must exist in the sambawiz folder root directory
+   - If it doesn't exist, create it by copying the example file:
+     ```bash
+     cp app-config.example.json app-config.json
+     ```
+
+2. **Check `app-config.json` fields**
+   - Ensure all required fields are populated:
+     - `checkpointsDir`: Must be set to a valid GCS bucket path (ending with `/`)
+     - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
+     - `kubeconfigs`: Must contain at least one environment with:
+       - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
+       - `namespace`: Kubernetes namespace for the environment
+       - `apiDomain`: Required for Playground functionality
+       - `apiKey`: Required for Playground functionality
+
+3. **Verify kubeconfig files exist**
+   - Ensure the kubeconfig file specified in `app-config.json` exists at the specified path
+   - Example: If `file` is `"kubeconfigs/production.yaml"`, verify the file exists at `./kubeconfigs/production.yaml`
+   - The kubeconfig file must be valid and contain proper cluster credentials
+
+### Version Compatibility Issues
+
+**Problem: Kubeconfig validation fails or version mismatch errors**
+
+1. **Check SambaStack Helm version**
+   - Verify your SambaStack Helm chart version meets the minimum requirement
+   - Minimum required version: as specified in the VERSION file
+   - To check your current SambaStack Helm version:
+     ```bash
+     helm list --kubeconfig ./kubeconfigs/your-environment.yaml -n <namespace>
+     ```
+   - Look for the SambaStack chart in the output and verify the CHART VERSION column
+   - If your version is below the minimum, upgrade your SambaStack deployment
+
+2. **Check Node.js and npm versions**
+   - Minimum required Node.js version: **18+** (as specified in Prerequisites)
+   - To check your current versions:
+     ```bash
+     node --version
+     npm --version
+     ```
+   - If your versions are below the minimum, upgrade Node.js and npm:
+     - Visit [nodejs.org](https://nodejs.org/) for installation instructions
+     - npm is typically included with Node.js
+
+### Connection Issues
+
+**Problem: Kubeconfig validation fails with connection errors**
+
+- Ensure you are connected to the correct network or VPN required to access your Kubernetes cluster
+- Verify that `kubectl` and `helm` are installed and accessible in your PATH:
+  ```bash
+  kubectl version --client
+  helm version
+  ```
+- Test cluster connectivity manually:
+  ```bash
+  kubectl get nodes --kubeconfig ./kubeconfigs/your-environment.yaml
+  ```
+
+### Common Error Messages
+
+- **"Your kubeconfig.yaml seems to be invalid"**: Check that the kubeconfig file exists, is properly formatted YAML, and contains valid cluster credentials
+- **"Version mismatch"**: Your SambaStack Helm version is below the minimum required version (as specified in the VERSION file)
+- **"Cannot find module" or "ENOENT"**: The kubeconfig file path in `app-config.json` is incorrect or the file doesn't exist
+- **"Connection refused" or "timeout"**: Check your network/VPN connection and cluster accessibility
