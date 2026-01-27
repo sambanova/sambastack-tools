@@ -3,14 +3,14 @@
   "currentKubeconfig": "your-environment-name",
   "kubeconfigs": {
     "your-environment-name": {
-      "file": "kubeconfigs/your-environment.yaml",
+      "file": "kubeconfigs/kubeconfig_example.yaml",
       "namespace": "default",
       "uiDomain": "https://ui-your-environment.example.com/",
       "apiDomain": "https://api-your-environment.example.com/",
       "apiKey": "your-api-key-here"
     },
     "another-environment": {
-      "file": "kubeconfigs/another-environment.yaml",
+      "file": "kubeconfigs/another-kubeconfig_example.yaml",
       "namespace": "default",
       "uiDomain": "https://ui-another-environment.example.com/",
       "apiDomain": "https://api-another-environment.example.com/",
