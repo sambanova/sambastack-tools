@@ -1,5 +1,5 @@
 {
-  "checkpointsDir": "gs://your-bucket-name/path/to/checkpoints/",
+  "checkpointsDir": "gs://your-bucket-name/path/to/checkpoints",
   "currentKubeconfig": "your-environment-name",
   "kubeconfigs": {
     "your-environment-name": {

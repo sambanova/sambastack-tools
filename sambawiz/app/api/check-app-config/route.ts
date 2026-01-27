@@ -16,6 +16,15 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
+/**
+ * Ensures checkpointsDir has a trailing slash
+ */
+function normalizeCheckpointsDir(dir: string): string {
+  const trimmed = dir.trim();
+  if (trimmed === '') return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
 export async function GET() {
   try {
     const configPath = path.join(process.cwd(), 'app-config.json');
@@ -34,6 +43,11 @@ export async function GET() {
     try {
       const configContent = fs.readFileSync(configPath, 'utf-8');
       const config: AppConfig = JSON.parse(configContent);
+
+      // Normalize checkpointsDir to ensure it has a trailing slash
+      if (config.checkpointsDir) {
+        config.checkpointsDir = normalizeCheckpointsDir(config.checkpointsDir);
+      }
 
       const hasCheckpointsDir = config.checkpointsDir && config.checkpointsDir.trim() !== '';
 
@@ -75,9 +89,9 @@ export async function POST(request: Request) {
     const configPath = path.join(process.cwd(), 'app-config.json');
     const kubeconfigsDir = path.join(process.cwd(), 'kubeconfigs');
 
-    // Create minimal app-config.json
+    // Create minimal app-config.json with normalized checkpointsDir
     const config: AppConfig = {
-      checkpointsDir,
+      checkpointsDir: normalizeCheckpointsDir(checkpointsDir),
       currentKubeconfig: '',
       kubeconfigs: {},
     };

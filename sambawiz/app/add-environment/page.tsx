@@ -10,6 +10,11 @@ import {
   Button,
   Alert,
   CircularProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
 } from '@mui/material';
 
 export default function AddEnvironment() {
@@ -19,6 +24,8 @@ export default function AddEnvironment() {
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [showOverwriteDialog, setShowOverwriteDialog] = useState<boolean>(false);
+  const [pendingEnvironmentName, setPendingEnvironmentName] = useState<string>('');
 
   const handleEnvironmentNameChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = event.target.value;
@@ -43,7 +50,7 @@ export default function AddEnvironment() {
     router.push('/home');
   };
 
-  const handleAdd = async () => {
+  const handleAdd = async (overwrite: boolean = false) => {
     // Validation
     if (!encodedConfig.trim()) {
       setError('Please provide an encoded config');
@@ -72,6 +79,7 @@ export default function AddEnvironment() {
         body: JSON.stringify({
           encodedConfig: encodedConfig.trim(),
           environmentName: environmentName.trim(),
+          overwrite: overwrite,
         }),
       });
 
@@ -80,6 +88,10 @@ export default function AddEnvironment() {
       if (data.success) {
         // Redirect to home page on success
         router.push('/home');
+      } else if (data.environmentExists && !overwrite) {
+        // Show confirmation dialog for overwriting
+        setPendingEnvironmentName(environmentName.trim());
+        setShowOverwriteDialog(true);
       } else {
         setError(data.error || 'Failed to add environment');
       }
@@ -91,19 +103,63 @@ export default function AddEnvironment() {
     }
   };
 
+  const handleConfirmOverwrite = async () => {
+    setShowOverwriteDialog(false);
+    await handleAdd(true);
+  };
+
+  const handleCancelOverwrite = () => {
+    setShowOverwriteDialog(false);
+    setPendingEnvironmentName('');
+  };
+
   return (
-    <Box
-      sx={{
-        minHeight: 'calc(100vh - 100px)',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        py: 4,
-        px: 2,
-      }}
-    >
-      <Paper
+    <>
+      {/* Overwrite Confirmation Dialog */}
+      <Dialog
+        open={showOverwriteDialog}
+        onClose={handleCancelOverwrite}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Environment Already Exists</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            The environment <strong>{pendingEnvironmentName}</strong> already exists.
+            Do you want to overwrite its kubeconfig file?
+          </DialogContentText>
+          <Alert severity="info" sx={{ mt: 2 }}>
+            This will replace the kubeconfig file in the kubeconfigs directory.
+            No changes will be made to app-config.json.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCancelOverwrite} color="inherit">
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirmOverwrite}
+            variant="contained"
+            color="primary"
+            autoFocus
+          >
+            Overwrite
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Box
+        sx={{
+          minHeight: 'calc(100vh - 100px)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          py: 4,
+          px: 2,
+        }}
+      >
+        <Paper
         elevation={3}
         sx={{
           p: 4,
@@ -227,7 +283,7 @@ export default function AddEnvironment() {
           <Button
             variant="contained"
             size="large"
-            onClick={handleAdd}
+            onClick={() => handleAdd(false)}
             disabled={submitting || !!nameError || !encodedConfig.trim() || !environmentName.trim()}
             sx={{
               px: 4,
@@ -255,5 +311,6 @@ export default function AddEnvironment() {
         </Box>
       </Paper>
     </Box>
+    </>
   );
 }

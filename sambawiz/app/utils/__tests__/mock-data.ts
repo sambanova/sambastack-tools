@@ -7,15 +7,15 @@ import type { CheckpointMapping, PefMapping, PefConfigs } from '../../types/bund
 export const mockCheckpointMapping: CheckpointMapping = {
   'Meta-Llama-3.1-8B-Instruct': {
     path: '/checkpoints/llama-3.1-8b',
-    huggingFaceId: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    resource_name: 'meta-llama-3-1-8b-instruct',
   },
   'Meta-Llama-3.1-70B-Instruct': {
     path: '/checkpoints/llama-3.1-70b',
-    huggingFaceId: 'meta-llama/Meta-Llama-3.1-70B-Instruct',
+    resource_name: 'meta-llama-3-1-70b-instruct',
   },
   'Qwen2.5-72B-Instruct': {
     path: '/checkpoints/qwen2.5-72b',
-    huggingFaceId: 'Qwen/Qwen2.5-72B-Instruct',
+    resource_name: 'qwen2-5-72b-instruct',
   },
 };
 

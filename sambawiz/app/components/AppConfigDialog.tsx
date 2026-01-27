@@ -80,11 +80,11 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
         <TextField
           fullWidth
           label="Checkpoints Dir"
-          placeholder="gs://your-bucket-name/path/to/checkpoints/"
+          placeholder="gs://your-bucket-name/path/to/checkpoints"
           value={checkpointsDir}
           onChange={(e) => setCheckpointsDir(e.target.value)}
           variant="outlined"
-          helperText="Enter the GCS checkpoint directory path (must end with /)"
+          helperText="Enter the GCS checkpoint directory path"
           sx={{ mb: 2 }}
         />
         {error && (

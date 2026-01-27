@@ -16,6 +16,15 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
+/**
+ * Ensures checkpointsDir has a trailing slash
+ */
+function normalizeCheckpointsDir(dir: string): string {
+  const trimmed = dir.trim();
+  if (trimmed === '') return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
 export async function GET() {
   try {
     // Read app-config.json to get current configuration
@@ -39,7 +48,7 @@ export async function GET() {
 
         // Get current environment and its settings
         defaultEnvironment = config.currentKubeconfig || null;
-        checkpointsDir = config.checkpointsDir || '';
+        checkpointsDir = normalizeCheckpointsDir(config.checkpointsDir || '');
         kubeconfigs = config.kubeconfigs || {};
 
         // Get namespace, API key, and domains for current environment

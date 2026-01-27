@@ -1004,21 +1004,29 @@ spec:
                   </Alert>
                 ) : (
                   <Box
-                    component="pre"
                     sx={{
-                      p: 2,
                       bgcolor: 'black',
-                      color: 'white',
                       borderRadius: 1,
-                      fontSize: '0.875rem',
-                      fontFamily: 'monospace',
-                      overflow: 'auto',
+                      p: 2,
+                      overflowX: 'auto',
+                      overflowY: 'auto',
                       minHeight: '120px',
-                      whiteSpace: 'pre-wrap',
-                      wordWrap: 'break-word',
+                      maxHeight: '300px',
+                      maxWidth: 'calc(100vw - 350px)',
                     }}
                   >
-                    {podLogs || 'Waiting for logs...'}
+                    <Box
+                      component="pre"
+                      sx={{
+                        m: 0,
+                        color: 'white',
+                        fontSize: '0.875rem',
+                        fontFamily: 'monospace',
+                        whiteSpace: 'pre',
+                      }}
+                    >
+                      {podLogs || 'Waiting for logs...'}
+                    </Box>
                   </Box>
                 )}
 
@@ -1120,21 +1128,29 @@ spec:
                   </Alert>
                 ) : (
                   <Box
-                    component="pre"
                     sx={{
-                      p: 2,
                       bgcolor: 'black',
-                      color: 'white',
                       borderRadius: 1,
-                      fontSize: '0.875rem',
-                      fontFamily: 'monospace',
-                      overflow: 'auto',
+                      p: 2,
+                      overflowX: 'auto',
+                      overflowY: 'auto',
                       minHeight: '120px',
-                      whiteSpace: 'pre-wrap',
-                      wordWrap: 'break-word',
+                      maxHeight: '300px',
+                      maxWidth: 'calc(100vw - 350px)',
                     }}
                   >
-                    {defaultPodLogs || 'Waiting for logs...'}
+                    <Box
+                      component="pre"
+                      sx={{
+                        m: 0,
+                        color: 'white',
+                        fontSize: '0.875rem',
+                        fontFamily: 'monospace',
+                        whiteSpace: 'pre',
+                      }}
+                    >
+                      {defaultPodLogs || 'Waiting for logs...'}
+                    </Box>
                   </Box>
                 )}
 

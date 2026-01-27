@@ -23,7 +23,7 @@ interface AppConfig {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { encodedConfig, environmentName } = body;
+    const { encodedConfig, environmentName, overwrite } = body;
 
     // Validation
     if (!encodedConfig || !environmentName) {
@@ -63,9 +63,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if environment already exists
-    if (config.kubeconfigs[environmentName]) {
+    if (config.kubeconfigs[environmentName] && !overwrite) {
       return NextResponse.json(
-        { success: false, error: `Environment '${environmentName}' already exists` },
+        { success: false, error: `Environment '${environmentName}' already exists`, environmentExists: true },
         { status: 400 }
       );
     }
@@ -115,24 +115,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Update app-config.json
-    config.kubeconfigs[environmentName] = {
-      file: `kubeconfigs/${environmentName}.yaml`,
-      namespace: 'default',
-      uiDomain: '',
-      apiDomain: '',
-      apiKey: ''
-    };
+    // Update app-config.json only if environment is new
+    if (!config.kubeconfigs[environmentName]) {
+      config.kubeconfigs[environmentName] = {
+        file: `kubeconfigs/${environmentName}.yaml`,
+        namespace: 'default',
+        uiDomain: '',
+        apiDomain: '',
+        apiKey: ''
+      };
 
-    // Set as current kubeconfig
-    config.currentKubeconfig = environmentName;
+      // Set as current kubeconfig
+      config.currentKubeconfig = environmentName;
 
-    // Write updated config back to file
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+      // Write updated config back to file
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
+    }
+    // When overwriting, we don't modify app-config.json since the entry already exists
 
     return NextResponse.json({
       success: true,
-      message: `Environment '${environmentName}' added successfully`
+      message: overwrite
+        ? `Environment '${environmentName}' kubeconfig overwritten successfully`
+        : `Environment '${environmentName}' added successfully`
     });
 
   } catch (error) {

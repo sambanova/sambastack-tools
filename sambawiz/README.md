@@ -92,7 +92,7 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpointsDir`: GCS checkpoint directory path (must end with `/`)
+- `checkpointsDir`: GCS checkpoint directory path
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments
   - Each environment has:
@@ -133,7 +133,6 @@ The application uses several configuration files:
 - Version requirements are enforced during kubeconfig validation
 
 **Data Configuration Files** in `app/data/`:
-- `pef_configs.json`: Defines PEF configurations with SS, BS, and version info
 - `pef_mapping.json`: Maps model names to their available PEF configurations
 - `checkpoint_mapping.json`: Maps model names to their checkpoint GCS paths
 
@@ -310,7 +309,7 @@ npm run build
 
 2. **Check `app-config.json` fields**
    - Ensure all required fields are populated:
-     - `checkpointsDir`: Must be set to a valid GCS bucket path (ending with `/`)
+     - `checkpointsDir`: Must be set to a valid GCS bucket path
      - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
      - `kubeconfigs`: Must contain at least one environment with:
        - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
