@@ -312,6 +312,29 @@ export default function Home() {
       return;
     }
 
+    // Validate URLs if they are non-empty
+    if (apiDomain && apiDomain.trim() !== '') {
+      if (!apiDomain.startsWith('https://')) {
+        setSaveError('API Domain must start with https://');
+        return;
+      }
+      if (apiDomain.includes(' ')) {
+        setSaveError('API Domain cannot contain spaces');
+        return;
+      }
+    }
+
+    if (uiDomain && uiDomain.trim() !== '') {
+      if (!uiDomain.startsWith('https://')) {
+        setSaveError('UI Domain must start with https://');
+        return;
+      }
+      if (uiDomain.includes(' ')) {
+        setSaveError('UI Domain cannot contain spaces');
+        return;
+      }
+    }
+
     setSaving(true);
     setSaveSuccess(false);
     setSaveError(null);

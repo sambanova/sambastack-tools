@@ -585,7 +585,15 @@ export default function Playground() {
                         {message.role === 'user' ? (
                           <PersonIcon sx={{ fontSize: 20 }} />
                         ) : (
-                          <SmartToyIcon sx={{ fontSize: 20 }} />
+                          <Box
+                            component="img"
+                            src="/icon.svg"
+                            alt="AI Assistant"
+                            sx={{
+                              width: 24,
+                              height: 24,
+                            }}
+                          />
                         )}
                       </Box>
 
@@ -763,7 +771,15 @@ export default function Playground() {
                           backgroundColor: '#e0e0e0',
                         }}
                       >
-                        <SmartToyIcon sx={{ fontSize: 20 }} />
+                        <Box
+                          component="img"
+                          src="/icon.svg"
+                          alt="AI Assistant"
+                          sx={{
+                            width: 24,
+                            height: 24,
+                          }}
+                        />
                       </Box>
                       <Box
                         sx={{

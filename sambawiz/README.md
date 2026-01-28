@@ -92,7 +92,7 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpointsDir`: GCS checkpoint directory path
+- `checkpointsDir`: GCS checkpoint directory path relative to which the checkpoints `app/data/checkpoint_mapping.json` can be found
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments
   - Each environment has:
@@ -171,11 +171,20 @@ npm start
 - **Editable YAML**: Manually edit generated YAML before validation
 - **Bundle Validation**: Validate bundle deployability by applying resources to your cluster and checking their status
 
+![Bundle Builder - Configuration](images/bundlebuilder1.png)
+*Configure model settings, PEF parameters, and resource requirements*
+
+![Bundle Builder - YAML Preview](images/bundlebuilder2.png)
+*Review and edit generated YAML before validation*
+
 ### 3. Bundle Deployment
 - **Deployment Management**: Deploy validated bundles to your Kubernetes cluster
 - **Status Monitoring**: Real-time monitoring of deployment status including pod readiness
 - **Error Reporting**: View detailed error messages and status conditions from the cluster
 - **Deployment History**: Track all deployed bundles with creation timestamps
+
+![Bundle Deployment](images/bundledeployment.png)
+*Monitor deployment status and manage bundle lifecycle*
 
 ### 4. Playground
 - **Interactive Chat Interface**: Test deployed models with an intuitive chat interface
@@ -184,6 +193,9 @@ npm start
 - **Code Examples**: View and copy cURL and Python code snippets with syntax highlighting
 - **Model Selection**: Choose from available deployed models to interact with
 - **Chat Management**: Clear conversation history to start fresh interactions
+
+![Playground](images/playground.png)
+*Interactive chat interface with performance metrics and code examples*
 ## Project Structure
 
 ```
@@ -309,7 +321,7 @@ npm run build
 
 2. **Check `app-config.json` fields**
    - Ensure all required fields are populated:
-     - `checkpointsDir`: Must be set to a valid GCS bucket path
+     - `checkpointsDir`: Must be set to a valid GCS bucket path that services a root folder for the relative paths in `app/data/checkpoint_mapping.json`. If this path is invalid, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
      - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
      - `kubeconfigs`: Must contain at least one environment with:
        - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
