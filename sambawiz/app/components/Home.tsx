@@ -340,6 +340,22 @@ export default function Home() {
     setSaveError(null);
 
     try {
+      // Check if checkpoint_mapping.json exists
+      const checkpointResponse = await fetch('/api/check-checkpoint-mapping');
+      const checkpointData = await checkpointResponse.json();
+
+      if (checkpointData.success && !checkpointData.exists) {
+        setSaveError('checkpoint_mapping.json file not found in app/data/ folder. Please obtain it from your SambaNova contact and copy it into that folder before applying configuration.');
+        setSaving(false);
+        return;
+      }
+
+      if (!checkpointData.success) {
+        setSaveError('Failed to verify checkpoint mapping file. Please try again.');
+        setSaving(false);
+        return;
+      }
+
       const response = await fetch('/api/update-config', {
         method: 'POST',
         headers: {
