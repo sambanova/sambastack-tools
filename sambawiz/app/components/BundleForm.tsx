@@ -113,8 +113,26 @@ export default function BundleForm() {
       }
     };
 
+    // Listen for load bundle events from the dialog
+    const handleLoadBundleState = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { bundleName, selectedModels, selectedConfigs, draftModels } = customEvent.detail;
+
+      setBundleName(bundleName);
+      setSelectedModels(selectedModels);
+      setSelectedConfigs(selectedConfigs);
+      setDraftModels(draftModels);
+      setValidationResult(null); // Clear any previous validation results
+    };
+
+    window.addEventListener('loadBundleState', handleLoadBundleState);
+
     fetchConfig();
     loadSavedState();
+
+    return () => {
+      window.removeEventListener('loadBundleState', handleLoadBundleState);
+    };
   }, []);
 
   // Get available models (intersection of checkpoint and pef mapping keys with non-empty values)
