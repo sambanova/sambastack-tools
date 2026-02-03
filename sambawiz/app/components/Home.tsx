@@ -70,6 +70,7 @@ export default function Home() {
   const [installerLogs, setInstallerLogs] = useState<string>('');
   const [showInstallerLogs, setShowInstallerLogs] = useState<boolean>(false);
   const [enableUpdates, setEnableUpdates] = useState<boolean>(true);
+  const [installationComplete, setInstallationComplete] = useState<boolean>(false);
 
   // Check prerequisites on component mount
   useEffect(() => {
@@ -239,6 +240,12 @@ export default function Home() {
 
         if (data.success) {
           setInstallerLogs(data.logs);
+          // Check if installation is complete (last line contains "configure_default_ingress")
+          const lines = data.logs.trim().split('\n');
+          const lastLine = lines[lines.length - 1];
+          if (lastLine && lastLine.includes('configure_default_ingress')) {
+            setInstallationComplete(true);
+          }
         } else {
           setInstallerLogs(`Error: ${data.error || 'Failed to fetch logs'}`);
         }
@@ -460,6 +467,7 @@ data:
     setInstallYaml(defaultYaml);
     setInstallOutput('');
     setInstallError(null);
+    setInstallationComplete(false);
     setShowInstallDialog(true);
   };
 
@@ -468,9 +476,10 @@ data:
     setInstallOutput('');
     setInstallError(null);
     setShowInstallerLogs(false);
-    // Refresh helm version after closing dialog
-    fetchHelmVersion();
-  }, [fetchHelmVersion]);
+    setInstallationComplete(false);
+    // Force page refresh to update helm version
+    window.location.reload();
+  }, []);
 
   const handleInstallYamlChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInstallYaml(event.target.value);
@@ -481,6 +490,7 @@ data:
     setInstallError(null);
     setInstallOutput('');
     setShowInstallerLogs(false);
+    setInstallationComplete(false);
 
     try {
       const response = await fetch('/api/install-sambastack', {
@@ -816,13 +826,15 @@ data:
               <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
                 Auto-refreshing every 3 seconds
               </Typography>
+              {installationComplete && (
+                <Alert severity="success" sx={{ mt: 2 }}>
+                  Installation complete! You may close this dialog now to apply the changes.
+                </Alert>
+              )}
             </Box>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCloseInstallDialog}>
-            Close
-          </Button>
           <Button
             variant="contained"
             onClick={handleInstall}

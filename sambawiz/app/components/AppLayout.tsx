@@ -13,6 +13,7 @@ import {
 import BuildIcon from '@mui/icons-material/Build';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import HomeIcon from '@mui/icons-material/Home';
 import Image from 'next/image';
 import { useRouter, usePathname } from 'next/navigation';
 import KubeconfigErrorDialog from './KubeconfigErrorDialog';
@@ -315,18 +316,19 @@ export default function AppLayout({ children }: AppLayoutProps) {
             },
           }}
         >
-          <Typography
-            sx={{
-              fontSize: '0.875rem',
-              fontWeight: 600,
-              color: 'primary.main',
-              mb: 0.5,
-              fontFamily: 'var(--font-geist-sans)',
-              textAlign: 'center',
-            }}
-          >
-            {envName}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 0.5 }}>
+            <HomeIcon sx={{ fontSize: '1rem', color: 'primary.main', mr: 0.75 }} />
+            <Typography
+              sx={{
+                fontSize: '0.875rem',
+                fontWeight: 600,
+                color: 'primary.main',
+                fontFamily: 'var(--font-geist-sans)',
+              }}
+            >
+              {envName}
+            </Typography>
+          </Box>
           <Typography
             sx={{
               fontSize: '0.75rem',
