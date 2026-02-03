@@ -8,6 +8,7 @@ interface KubeconfigEntry {
   apiKey?: string;
   apiDomain?: string;
   uiDomain?: string;
+  enableUpdates?: boolean;
 }
 
 interface AppConfig {
