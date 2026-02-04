@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -59,6 +59,11 @@ interface ModelConfig {
 
 export default function BundleForm() {
   const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const bundleNameId = useId();
+  const generatedYamlId = useId();
+
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [selectedConfigs, setSelectedConfigs] = useState<ConfigSelection[]>([]);
   const [bundleName, setBundleName] = useState<string>('bundle1');
@@ -820,6 +825,7 @@ export default function BundleForm() {
           {/* Bundle Name Input */}
           <Box sx={{ mb: 2 }}>
             <TextField
+              id={bundleNameId}
               fullWidth
               label="Bundle Name"
               value={bundleName}
@@ -867,6 +873,7 @@ export default function BundleForm() {
               {' '}for an explanation of fields in the YAML.
             </Typography>
             <TextField
+              id={generatedYamlId}
               fullWidth
               multiline
               rows={25}

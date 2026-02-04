@@ -50,7 +50,7 @@ SambaWiz provides an intuitive interface to:
 
 ## Prerequisites
 
-- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum helm version specified in the [VERSION](VERSION) file)
+- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
 - Valid `kubeconfig.yaml` for your SambaStack environment
 - Node.js 18+ and npm
 - `checkpoint_mapping.json` file and the root directory for checkpoints (provided by your SambaNova contact)
@@ -93,7 +93,7 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpoint_mapping.json` must be obtained from you SambaNova contact and placed in the `app/data/` folder
+- `checkpoint_mapping.json` must be obtained from your SambaNova contact and placed in the `app/data/` folder
 - `checkpointsDir`: GCS checkpoint directory path relative to which the checkpoints in `checkpoint_mapping.json` can be found
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments

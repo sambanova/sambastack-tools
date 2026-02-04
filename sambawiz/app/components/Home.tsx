@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -40,6 +40,16 @@ interface KubeconfigEntry {
 
 export default function Home() {
   const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const namespaceId = useId();
+  const apiDomainId = useId();
+  const uiDomainId = useId();
+  const apiKeyId = useId();
+  const keycloakUsernameId = useId();
+  const keycloakPasswordId = useId();
+  const installYamlId = useId();
+
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
   const [namespace, setNamespace] = useState<string>('');
   const [apiKey, setApiKey] = useState<string>('');
@@ -628,6 +638,7 @@ data:
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakUsernameId}
                     fullWidth
                     value={keycloakUsername}
                     variant="outlined"
@@ -655,6 +666,7 @@ data:
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakPasswordId}
                     fullWidth
                     type={showPassword ? 'text' : 'password'}
                     value={keycloakPassword}
@@ -738,6 +750,7 @@ data:
           </Box>
 
           <TextField
+            id={installYamlId}
             fullWidth
             multiline
             rows={12}
@@ -1039,6 +1052,7 @@ data:
         </FormControl>        
 
         <TextField
+          id={namespaceId}
           fullWidth
           label="Namespace"
           value={namespace}
@@ -1058,6 +1072,7 @@ data:
         />
 
         <TextField
+          id={apiDomainId}
           fullWidth
           label="API Domain"
           value={apiDomain}
@@ -1077,6 +1092,7 @@ data:
         />
 
         <TextField
+          id={uiDomainId}
           fullWidth
           label="UI Domain"
           value={uiDomain}
@@ -1114,6 +1130,7 @@ data:
             </Typography>
           </Box>
           <TextField
+            id={apiKeyId}
             fullWidth
             label="API Key"
             type={showApiKey ? 'text' : 'password'}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -20,6 +20,9 @@ interface AppConfigDialogProps {
 }
 
 export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppConfigDialogProps) {
+  // Generate stable ID for form field to prevent hydration mismatches
+  const checkpointsDirId = useId();
+
   const [checkpointsDir, setCheckpointsDir] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +81,7 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
           The app-config.json file must exist in the SambaWiz root directory and contain a valid checkpoints directory path.
         </Typography>
         <TextField
+          id={checkpointsDirId}
           fullWidth
           label="Checkpoints Dir"
           placeholder="gs://your-bucket-name/path/to/checkpoints"

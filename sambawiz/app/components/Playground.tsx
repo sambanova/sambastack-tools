@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Box,
   Paper,
@@ -65,6 +66,13 @@ interface Message {
 }
 
 export default function Playground() {
+  const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const inputMessageId = useId();
+  const keycloakUsernameId = useId();
+  const keycloakPasswordId = useId();
+
   const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
   const [selectedDeployment, setSelectedDeployment] = useState<string>('');
   const [deploymentStatuses, setDeploymentStatuses] = useState<Record<string, {
@@ -932,6 +940,7 @@ export default function Playground() {
             >
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
                 <TextField
+                  id={inputMessageId}
                   fullWidth
                   multiline
                   maxRows={4}
@@ -1087,6 +1096,7 @@ export default function Playground() {
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakUsernameId}
                     fullWidth
                     value={keycloakUsername}
                     variant="outlined"
@@ -1114,6 +1124,7 @@ export default function Playground() {
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakPasswordId}
                     fullWidth
                     type={showPassword ? 'text' : 'password'}
                     value={keycloakPassword}
@@ -1155,7 +1166,10 @@ export default function Playground() {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setShowApiKeyInstructionsDialog(false)} autoFocus>
+          <Button onClick={() => {
+            setShowApiKeyInstructionsDialog(false);
+            router.push('/');
+          }} autoFocus>
             Close
           </Button>
         </DialogActions>
