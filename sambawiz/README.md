@@ -31,6 +31,7 @@ SambaWiz is a GUI wizard that accelerates the creation and deployment of model b
   - [POST /api/validate](#post-apivalidate)
 - [Technology Stack](#technology-stack)
 - [Development](#development)
+- [Testing](#testing)
 - [Security Considerations](#security-considerations)
 - [Troubleshooting](#troubleshooting)
   - [Configuration Issues](#configuration-issues)
@@ -296,6 +297,53 @@ npm run lint
 # Build for production
 npm run build
 ```
+
+## Testing
+
+SambaWiz includes a comprehensive test suite covering business logic, API integration, and feature validation.
+
+### Running Tests
+
+```bash
+# Run all automated tests
+npm test
+
+# Run tests in watch mode (auto-rerun on file changes)
+npm test -- --watch
+
+# Run tests with coverage report
+npm test -- --coverage
+
+# Run specific test file
+npm test bundle-yaml-generator.test.ts
+
+# Run tests for a specific directory
+npm test app/utils/__tests__
+```
+
+### Test Documentation
+
+Comprehensive test documentation is available at [app/utils/__tests__/TESTS.md](app/utils/__tests__/TESTS.md), which includes:
+- Test philosophy and guidelines for writing new tests
+- Detailed breakdown of all test categories
+- Test coverage and statistics
+- Manual integration test procedures for new features
+
+### Test Coverage
+
+The test suite focuses on critical business logic:
+- ✅ Model availability and filtering logic
+- ✅ Bundle YAML generation
+- ✅ PEF configuration parsing and validation
+- ✅ Deployment status calculation
+- ✅ API integration for all page components
+- ✅ Kubernetes integration tests
+- ✅ Data transformations and error handling
+
+Tests explicitly **do not** cover:
+- ❌ UI rendering details
+- ❌ Third-party libraries (Material-UI, React internals)
+- ❌ Browser features
 
 ## Security Considerations
 

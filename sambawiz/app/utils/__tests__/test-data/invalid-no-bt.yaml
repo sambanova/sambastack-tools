@@ -1,0 +1,7 @@
+---
+apiVersion: sambanova.ai/v1alpha1
+kind: Bundle
+metadata:
+  name: b-test
+spec:
+  template: bt-missing
