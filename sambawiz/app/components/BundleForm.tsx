@@ -445,7 +445,7 @@ export default function BundleForm() {
     }
     const yaml = generateBundleYaml(selectedConfigs, checkpointMapping, pefConfigs, bundleName, checkpointsDir, draftModels);
     setGeneratedYaml(yaml);
-  }, [selectedConfigs, bundleName, draftModels, checkpointsDir]);
+  }, [selectedConfigs, bundleName, draftModels, checkpointsDir, checkpointMapping]);
 
   // Handle copy to clipboard
   const handleCopyToClipboard = async () => {

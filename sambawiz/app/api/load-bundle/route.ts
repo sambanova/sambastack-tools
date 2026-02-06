@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
 
     // Read and parse YAML
     const fileContent = fs.readFileSync(filePath, 'utf-8');
-    const documents = yaml.loadAll(fileContent) as any[];
+    const documents = yaml.loadAll(fileContent) as Array<Record<string, unknown>>;
 
     // Find BundleTemplate (should be first document)
     const bundleTemplate = documents.find(

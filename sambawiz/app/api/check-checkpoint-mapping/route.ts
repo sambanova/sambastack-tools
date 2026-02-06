@@ -1,8 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { promises as fs } from 'fs';
 import path from 'path';
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
     const checkpointMappingPath = path.join(process.cwd(), 'app/data/checkpoint_mapping.json');
 
@@ -12,7 +12,7 @@ export async function GET(request: NextRequest) {
         success: true,
         exists: true,
       });
-    } catch (error) {
+    } catch {
       return NextResponse.json({
         success: true,
         exists: false,
