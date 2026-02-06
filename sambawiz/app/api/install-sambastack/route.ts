@@ -15,9 +15,6 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-/**
- * POST - Deploy a bundle by applying BundleDeployment YAML
- */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -32,7 +29,7 @@ export async function POST(request: NextRequest) {
 
     // Save YAML to temporary file
     const timestamp = Date.now();
-    const fileName = `bundle-deployment-${timestamp}.yaml`;
+    const fileName = `sambastack-install-${timestamp}.yaml`;
     const filePath = path.join(process.cwd(), 'temp', fileName);
 
     // Ensure temp directory exists
@@ -125,12 +122,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: 'Bundle deployment applied successfully',
+      message: 'SambaStack installation initiated successfully!',
       output: applyOutput.trim(),
       filePath,
     });
   } catch (error) {
-    console.error('Deployment error:', error);
+    console.error('Installation error:', error);
     return NextResponse.json(
       {
         success: false,

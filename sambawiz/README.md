@@ -31,6 +31,7 @@ SambaWiz is a GUI wizard that accelerates the creation and deployment of model b
   - [POST /api/validate](#post-apivalidate)
 - [Technology Stack](#technology-stack)
 - [Development](#development)
+- [Testing](#testing)
 - [Security Considerations](#security-considerations)
 - [Troubleshooting](#troubleshooting)
   - [Configuration Issues](#configuration-issues)
@@ -50,7 +51,7 @@ SambaWiz provides an intuitive interface to:
 
 ## Prerequisites
 
-- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum helm version specified in the [VERSION](VERSION) file)
+- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
 - Valid `kubeconfig.yaml` for your SambaStack environment
 - Node.js 18+ and npm
 - `checkpoint_mapping.json` file and the root directory for checkpoints (provided by your SambaNova contact)
@@ -93,7 +94,7 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpoint_mapping.json` must be obtained from you SambaNova contact and placed in the `app/data/` folder
+- `checkpoint_mapping.json` must be obtained from your SambaNova contact and placed in the `app/data/` folder
 - `checkpointsDir`: GCS checkpoint directory path relative to which the checkpoints in `checkpoint_mapping.json` can be found
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments
@@ -296,6 +297,53 @@ npm run lint
 # Build for production
 npm run build
 ```
+
+## Testing
+
+SambaWiz includes a comprehensive test suite covering business logic, API integration, and feature validation.
+
+### Running Tests
+
+```bash
+# Run all automated tests
+npm test
+
+# Run tests in watch mode (auto-rerun on file changes)
+npm test -- --watch
+
+# Run tests with coverage report
+npm test -- --coverage
+
+# Run specific test file
+npm test bundle-yaml-generator.test.ts
+
+# Run tests for a specific directory
+npm test app/utils/__tests__
+```
+
+### Test Documentation
+
+Comprehensive test documentation is available at [app/utils/__tests__/TESTS.md](app/utils/__tests__/TESTS.md), which includes:
+- Test philosophy and guidelines for writing new tests
+- Detailed breakdown of all test categories
+- Test coverage and statistics
+- Manual integration test procedures for new features
+
+### Test Coverage
+
+The test suite focuses on critical business logic:
+- ✅ Model availability and filtering logic
+- ✅ Bundle YAML generation
+- ✅ PEF configuration parsing and validation
+- ✅ Deployment status calculation
+- ✅ API integration for all page components
+- ✅ Kubernetes integration tests
+- ✅ Data transformations and error handling
+
+Tests explicitly **do not** cover:
+- ❌ UI rendering details
+- ❌ Third-party libraries (Material-UI, React internals)
+- ❌ Browser features
 
 ## Security Considerations
 

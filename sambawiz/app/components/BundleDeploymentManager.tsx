@@ -212,8 +212,26 @@ export default function BundleDeploymentManager() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
+    loadSavedState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load saved state from backend
+  const loadSavedState = async () => {
+    try {
+      const response = await fetch('/api/bundle-deployment-state');
+      const data = await response.json();
+      if (data.success && data.state) {
+        // Restore the saved state
+        setSelectedBundle(data.state.selectedBundle || '');
+        setDeploymentName(data.state.deploymentName || '');
+        setDeploymentYaml(data.state.deploymentYaml || '');
+        setMonitoredDeployment(data.state.monitoredDeployment || '');
+      }
+    } catch (error) {
+      console.error('Failed to load saved deployment state:', error);
+    }
+  };
 
   // Handle query parameter for pre-selecting a bundle
   useEffect(() => {
@@ -447,6 +465,27 @@ spec:
 
     setDeploying(true);
     setDeploymentResult(null);
+
+    // Save the current state before deploying
+    try {
+      await fetch('/api/bundle-deployment-state', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          state: {
+            selectedBundle,
+            deploymentName,
+            deploymentYaml,
+            monitoredDeployment: deploymentName, // Set this to the deployment name we're about to deploy
+          },
+        }),
+      });
+    } catch (error) {
+      console.error('Failed to save deployment state:', error);
+      // Continue with deployment even if state save fails
+    }
 
     try {
       const response = await fetch('/api/deploy-bundle', {

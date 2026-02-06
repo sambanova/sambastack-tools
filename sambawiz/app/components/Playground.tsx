@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useId } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   Box,
   Paper,
@@ -15,6 +16,13 @@ import {
   CircularProgress,
   Alert,
   IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  InputAdornment,
+  Link,
 } from '@mui/material';
 import SendIcon from '@mui/icons-material/Send';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
@@ -24,6 +32,7 @@ import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { getBundleDeploymentStatus } from './BundleDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
@@ -57,6 +66,13 @@ interface Message {
 }
 
 export default function Playground() {
+  const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const inputMessageId = useId();
+  const keycloakUsernameId = useId();
+  const keycloakPasswordId = useId();
+
   const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
   const [selectedDeployment, setSelectedDeployment] = useState<string>('');
   const [deploymentStatuses, setDeploymentStatuses] = useState<Record<string, {
@@ -84,6 +100,15 @@ export default function Playground() {
   const [apiKey, setApiKey] = useState<string>('');
   const [apiDomain, setApiDomain] = useState<string>('');
   const [, setCurrentEnvironment] = useState<string>('');
+
+  // API Key Instructions Dialog state
+  const [showApiKeyInstructionsDialog, setShowApiKeyInstructionsDialog] = useState<boolean>(false);
+  const [keycloakUsername, setKeycloakUsername] = useState<string>('');
+  const [keycloakPassword, setKeycloakPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
+  const [credentialsError, setCredentialsError] = useState<string | null>(null);
+  const [uiDomain, setUiDomain] = useState<string>('');
 
   // Fetch bundle deployments and their statuses
   const fetchBundleDeployments = async () => {
@@ -147,6 +172,7 @@ export default function Playground() {
         setCurrentEnvironment(data.defaultEnvironment || '');
         setApiKey(data.defaultApiKey || '');
         setApiDomain(data.defaultApiDomain || '');
+        setUiDomain(data.defaultUiDomain || '');
       }
     } catch (err) {
       console.error('Error fetching environment config:', err);
@@ -315,6 +341,65 @@ export default function Playground() {
     setTimeout(() => {
       setCopiedErrorId(null);
     }, 2000);
+  };
+
+  // Handle get API key
+  const handleGetApiKey = async () => {
+    setShowApiKeyInstructionsDialog(true);
+    setLoadingCredentials(true);
+    setCredentialsError(null);
+    setKeycloakUsername('');
+    setKeycloakPassword('');
+    setShowPassword(false);
+
+    try {
+      // Get current environment from bundleDeployments
+      const response = await fetch('/api/environments');
+      const data = await response.json();
+
+      if (!data.success || !data.defaultEnvironment) {
+        setCredentialsError('Please select an environment first');
+        setLoadingCredentials(false);
+        return;
+      }
+
+      const credResponse = await fetch('/api/get-keycloak-credentials', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          environment: data.defaultEnvironment,
+        }),
+      });
+
+      const credData = await credResponse.json();
+
+      if (credData.success) {
+        setKeycloakUsername(credData.username);
+        setKeycloakPassword(credData.password);
+      } else {
+        setCredentialsError(credData.error || 'Failed to retrieve credentials');
+      }
+    } catch (error) {
+      console.error('Error fetching credentials:', error);
+      setCredentialsError('Failed to retrieve credentials');
+    } finally {
+      setLoadingCredentials(false);
+    }
+  };
+
+  // Handle copy to clipboard
+  const handleCopyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  // Check if error is related to API key issues
+  const isApiKeyError = (errorContent: string): boolean => {
+    const lowerContent = errorContent.toLowerCase();
+    return lowerContent.includes('unauthorized') ||
+           lowerContent.includes('invalid api key') ||
+           lowerContent.includes('401');
   };
 
   // Parse error message to separate header and body
@@ -657,6 +742,52 @@ export default function Playground() {
                                   >
                                     {body}
                                   </Typography>
+
+                                  {/* Show remedial message for API key errors */}
+                                  {isApiKeyError(message.content) && (
+                                    <Box
+                                      sx={{
+                                        mt: 2,
+                                        pt: 2,
+                                        borderTop: '1px solid',
+                                        borderColor: 'error.light',
+                                      }}
+                                    >
+                                      <Typography
+                                        variant="body2"
+                                        sx={{
+                                          color: 'text.primary',
+                                          mb: 1,
+                                        }}
+                                      >
+                                        This error may be caused by an invalid or missing API key.
+                                      </Typography>
+                                      <Typography
+                                        variant="body2"
+                                        sx={{
+                                          color: 'text.primary',
+                                        }}
+                                      >
+                                        Please{' '}
+                                        <Link
+                                          component="button"
+                                          onClick={handleGetApiKey}
+                                          sx={{
+                                            color: 'primary.main',
+                                            cursor: 'pointer',
+                                            textDecoration: 'underline',
+                                            '&:hover': {
+                                              color: 'primary.dark',
+                                            },
+                                          }}
+                                        >
+                                          get your API key
+                                        </Link>
+                                        {' '}and update it on the Home page.
+                                      </Typography>
+                                    </Box>
+                                  )}
+
                                   <Typography
                                     variant="caption"
                                     sx={{
@@ -809,6 +940,7 @@ export default function Playground() {
             >
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
                 <TextField
+                  id={inputMessageId}
                   fullWidth
                   multiline
                   maxRows={4}
@@ -901,6 +1033,147 @@ export default function Playground() {
         apiDomain={apiDomain}
         modelName={selectedModel}
       />
+
+      {/* API Key Instructions Dialog */}
+      <Dialog
+        open={showApiKeyInstructionsDialog}
+        onClose={() => setShowApiKeyInstructionsDialog(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>API Key Instructions</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 3 }}>
+            Login to the following UI domain using the following credentials to create your API key
+          </DialogContentText>
+
+          {/* Loading State */}
+          {loadingCredentials && (
+            <Box sx={{ display: 'flex', justifyContent: 'center', my: 3 }}>
+              <CircularProgress size={40} />
+            </Box>
+          )}
+
+          {/* Error State */}
+          {credentialsError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {credentialsError}
+            </Alert>
+          )}
+
+          {/* UI Domain */}
+          {!loadingCredentials && uiDomain && (
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                UI Domain:
+              </Typography>
+              <Typography
+                component="a"
+                href={uiDomain}
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{
+                  color: 'primary.main',
+                  textDecoration: 'underline',
+                  wordBreak: 'break-all',
+                  '&:hover': {
+                    color: 'primary.dark',
+                  },
+                }}
+              >
+                {uiDomain}
+              </Typography>
+            </Box>
+          )}
+
+          {/* Credentials */}
+          {!loadingCredentials && keycloakUsername && keycloakPassword && (
+            <Box>
+              {/* Username */}
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Username:
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <TextField
+                    id={keycloakUsernameId}
+                    fullWidth
+                    value={keycloakUsername}
+                    variant="outlined"
+                    size="small"
+                    slotProps={{
+                      input: {
+                        readOnly: true,
+                      },
+                    }}
+                  />
+                  <IconButton
+                    onClick={() => handleCopyToClipboard(keycloakUsername)}
+                    size="small"
+                    sx={{ color: 'primary.main' }}
+                  >
+                    <ContentCopyIcon fontSize="small" />
+                  </IconButton>
+                </Box>
+              </Box>
+
+              {/* Password */}
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Password:
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <TextField
+                    id={keycloakPasswordId}
+                    fullWidth
+                    type={showPassword ? 'text' : 'password'}
+                    value={keycloakPassword}
+                    variant="outlined"
+                    size="small"
+                    slotProps={{
+                      input: {
+                        readOnly: true,
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <IconButton
+                              onClick={() => setShowPassword(!showPassword)}
+                              edge="end"
+                              size="small"
+                            >
+                              {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                            </IconButton>
+                          </InputAdornment>
+                        ),
+                      },
+                    }}
+                  />
+                  <IconButton
+                    onClick={() => handleCopyToClipboard(keycloakPassword)}
+                    size="small"
+                    sx={{ color: 'primary.main' }}
+                  >
+                    <ContentCopyIcon fontSize="small" />
+                  </IconButton>
+                </Box>
+              </Box>
+            </Box>
+          )}
+
+          {!loadingCredentials && !uiDomain && (
+            <Alert severity="warning">
+              Please select an environment with a UI domain configured.
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => {
+            setShowApiKeyInstructionsDialog(false);
+            router.push('/');
+          }} autoFocus>
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

@@ -1,0 +1,19 @@
+---
+apiVersion: sambanova.ai/v1alpha1
+kind: BundleTemplate
+metadata:
+  name: bt-test
+spec:
+  models:
+    Meta-Llama-3.1-8B-Instruct:
+      experts:
+        "4k":
+          configs:
+            - pef: invalid-pef-name
+---
+apiVersion: sambanova.ai/v1alpha1
+kind: Bundle
+metadata:
+  name: b-test
+spec:
+  template: bt-test

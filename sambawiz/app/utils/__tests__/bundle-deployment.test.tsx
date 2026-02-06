@@ -1,4 +1,4 @@
-import { waitFor } from '@testing-library/react';
+import { waitFor, act } from '@testing-library/react';
 import { renderWithProviders } from './test-utils';
 import BundleDeploymentManager, { getBundleDeploymentStatus } from '../../components/BundleDeploymentManager';
 
@@ -68,6 +68,10 @@ describe('Bundle Deployment Manager', () => {
   });
 
   it('should fetch deployments and bundles on mount', async () => {
+    // Use real timers for this test since we're testing async fetch operations
+    jest.useRealTimers();
+
+    // Mock all three fetch calls that happen on mount
     (global.fetch as jest.Mock)
       .mockResolvedValueOnce({
         ok: true,
@@ -76,13 +80,27 @@ describe('Bundle Deployment Manager', () => {
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, bundles: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: false }), // loadSavedState returns no state
       });
 
-    renderWithProviders(<BundleDeploymentManager />);
-
-    await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
-      expect(global.fetch).toHaveBeenCalledWith('/api/bundles');
+    await act(async () => {
+      renderWithProviders(<BundleDeploymentManager />);
     });
+
+    // Wait for all async operations to complete
+    await waitFor(
+      () => {
+        expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
+        expect(global.fetch).toHaveBeenCalledWith('/api/bundles');
+        expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment-state');
+      },
+      { timeout: 3000 }
+    );
+
+    // Restore fake timers for other tests
+    jest.useFakeTimers();
   });
 });

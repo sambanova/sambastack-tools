@@ -1,21 +1,17 @@
 'use client';
 
-import { useState } from 'react';
+import { AppRouterCacheProvider } from '@mui/material-nextjs/v15-appRouter';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
-import { CacheProvider } from '@emotion/react';
 import { theme } from './theme';
-import createEmotionCache from './utils/emotion-cache';
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [cache] = useState(() => createEmotionCache());
-
   return (
-    <CacheProvider value={cache}>
+    <AppRouterCacheProvider>
       <ThemeProvider theme={theme}>
         <CssBaseline />
         {children}
       </ThemeProvider>
-    </CacheProvider>
+    </AppRouterCacheProvider>
   );
 }

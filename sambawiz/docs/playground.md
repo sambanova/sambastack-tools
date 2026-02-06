@@ -18,7 +18,7 @@ All commands use the namespace configured on the Home page.
 
 ### 1. List Bundle Deployments
 ```bash
-kubectl -n <namespace> get bundledeployment -o json
+kubectl -n <namespace> get bundledeployment.sambanova.ai -o json
 ```
 **Purpose**: Retrieves all BundleDeployment resources to populate the deployment selector
 **When**: On page load
@@ -36,7 +36,7 @@ kubectl -n <namespace> get pods | grep <deployment-name>
 
 ### 3. Get BundleDeployment Details
 ```bash
-kubectl get bundledeployment <deployment-name> -n <namespace> -o json
+kubectl get bundledeployment.sambanova.ai <deployment-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves the bundle reference from the deployment
 **When**: When a deployment is selected
@@ -45,7 +45,7 @@ kubectl get bundledeployment <deployment-name> -n <namespace> -o json
 
 ### 4. Get Bundle Models
 ```bash
-kubectl get bundle <bundle-name> -n <namespace> -o json
+kubectl get bundle.sambanova.ai <bundle-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves the list of models in the bundle
 **When**: After selecting a deployment

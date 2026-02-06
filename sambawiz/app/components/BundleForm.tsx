@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useId, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -46,11 +46,9 @@ import DocumentationPanel from './DocumentationPanel';
 // Import the JSON data
 import pefConfigsData from '../data/pef_configs.json';
 import pefMappingData from '../data/pef_mapping.json';
-import checkpointMappingData from '../data/checkpoint_mapping.json';
 
 const pefConfigs: PefConfigs = pefConfigsData;
 const pefMapping: PefMapping = pefMappingData;
-const checkpointMapping: CheckpointMapping = checkpointMappingData;
 
 interface ModelConfig {
   ss: string;
@@ -59,6 +57,11 @@ interface ModelConfig {
 
 export default function BundleForm() {
   const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const bundleNameId = useId();
+  const generatedYamlId = useId();
+
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [selectedConfigs, setSelectedConfigs] = useState<ConfigSelection[]>([]);
   const [bundleName, setBundleName] = useState<string>('bundle1');
@@ -81,6 +84,10 @@ export default function BundleForm() {
   const [saveDialogOpen, setSaveDialogOpen] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [checkpointMapping, setCheckpointMapping] = useState<CheckpointMapping>({});
+
+  // Track if we're loading from saved state to prevent YAML regeneration
+  const isLoadingFromSavedState = useRef<boolean>(false);
 
   // Fetch checkpointsDir from config and load saved state on component mount
   useEffect(() => {
@@ -101,20 +108,71 @@ export default function BundleForm() {
         const response = await fetch('/api/bundle-builder-state');
         const data = await response.json();
         if (data.success && data.state) {
+          // Set flag to prevent YAML regeneration during state load
+          isLoadingFromSavedState.current = true;
+
           // Restore the saved state
           setSelectedModels(data.state.selectedModels || []);
           setSelectedConfigs(data.state.selectedConfigs || []);
           setBundleName(data.state.bundleName || 'bundle1');
           setGeneratedYaml(data.state.generatedYaml || '');
           setDraftModels(data.state.draftModels || {});
+
+          // Clear flag after a brief delay to allow state updates to complete
+          setTimeout(() => {
+            isLoadingFromSavedState.current = false;
+          }, 100);
         }
       } catch (error) {
         console.error('Failed to load saved state:', error);
+        isLoadingFromSavedState.current = false;
       }
     };
 
+    // Listen for load bundle events from the dialog
+    const handleLoadBundleState = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      const { bundleName, selectedModels, selectedConfigs, draftModels } = customEvent.detail;
+
+      setBundleName(bundleName);
+      setSelectedModels(selectedModels);
+      setSelectedConfigs(selectedConfigs);
+      setDraftModels(draftModels);
+      setValidationResult(null); // Clear any previous validation results
+    };
+
+    window.addEventListener('loadBundleState', handleLoadBundleState);
+
     fetchConfig();
     loadSavedState();
+
+    return () => {
+      window.removeEventListener('loadBundleState', handleLoadBundleState);
+    };
+  }, []);
+
+  // Load checkpoint mapping dynamically (file may not exist if gitignored)
+  useEffect(() => {
+    const loadCheckpointMapping = async () => {
+      try {
+        const response = await fetch('/api/checkpoint-mapping');
+        const result = await response.json();
+        if (result.success && result.data) {
+          setCheckpointMapping(result.data);
+        } else {
+          // File doesn't exist (gitignored), use empty object
+          console.warn('checkpoint_mapping.json not found, using empty mapping');
+          setCheckpointMapping({});
+        }
+      } catch (error) {
+        // API call failed, use empty object
+        // The UI will show an error message for the user to configure it
+        console.warn('Failed to load checkpoint_mapping.json:', error);
+        setCheckpointMapping({});
+      }
+    };
+
+    loadCheckpointMapping();
   }, []);
 
   // Get available models (intersection of checkpoint and pef mapping keys with non-empty values)
@@ -126,7 +184,7 @@ export default function BundleForm() {
       (key) => pefMapping[key].length > 0
     );
     return checkpointKeys.filter((key) => pefMappingKeys.includes(key)).sort();
-  }, []);
+  }, [checkpointMapping]);
 
   // Check if a model supports speculative decoding
   const modelSupportsSpeculativeDecoding = useMemo(() => {
@@ -376,13 +434,18 @@ export default function BundleForm() {
 
   // Generate YAML automatically when configs or bundle name change
   useEffect(() => {
+    // Skip regeneration if we're loading from saved state
+    if (isLoadingFromSavedState.current) {
+      return;
+    }
+
     if (selectedConfigs.length === 0 || !bundleName) {
       setGeneratedYaml('');
       return;
     }
     const yaml = generateBundleYaml(selectedConfigs, checkpointMapping, pefConfigs, bundleName, checkpointsDir, draftModels);
     setGeneratedYaml(yaml);
-  }, [selectedConfigs, bundleName, draftModels, checkpointsDir]);
+  }, [selectedConfigs, bundleName, draftModels, checkpointsDir, checkpointMapping]);
 
   // Handle copy to clipboard
   const handleCopyToClipboard = async () => {
@@ -802,6 +865,7 @@ export default function BundleForm() {
           {/* Bundle Name Input */}
           <Box sx={{ mb: 2 }}>
             <TextField
+              id={bundleNameId}
               fullWidth
               label="Bundle Name"
               value={bundleName}
@@ -849,6 +913,7 @@ export default function BundleForm() {
               {' '}for an explanation of fields in the YAML.
             </Typography>
             <TextField
+              id={generatedYamlId}
               fullWidth
               multiline
               rows={25}

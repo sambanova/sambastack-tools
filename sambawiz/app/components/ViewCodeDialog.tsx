@@ -11,7 +11,6 @@ import {
   Tab,
   Button,
   Tooltip,
-  Typography,
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -183,7 +182,7 @@ print(response.choices[0].message.content)`;
           pb: 1,
         }}
       >
-        <Typography variant="h6">View Code</Typography>
+        View Code
         <IconButton
           aria-label="close"
           onClick={onClose}

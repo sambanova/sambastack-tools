@@ -13,6 +13,7 @@ import {
 import BuildIcon from '@mui/icons-material/Build';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
+import HomeIcon from '@mui/icons-material/Home';
 import Image from 'next/image';
 import { useRouter, usePathname } from 'next/navigation';
 import KubeconfigErrorDialog from './KubeconfigErrorDialog';
@@ -47,6 +48,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
   const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
+  const [checkpointMappingMissing, setCheckpointMappingMissing] = useState<boolean>(false);
 
   // Validate kubeconfig on component mount
   useEffect(() => {
@@ -77,6 +79,17 @@ export default function AppLayout({ children }: AppLayoutProps) {
           setHasNonNumericalSuffix(false);
           // Check if this is a helm version error
           setHelmVersionError(data.helmVersionError || false);
+        }
+
+        // Check if checkpoint_mapping.json exists
+        const checkpointResponse = await fetch('/api/check-checkpoint-mapping');
+        const checkpointData = await checkpointResponse.json();
+
+        if (checkpointData.success && !checkpointData.exists) {
+          setCheckpointMappingMissing(true);
+          setValidationError('checkpoint_mapping.json file not found in app/data/ folder. Please obtain it from your SambaNova contact and copy it into that folder. Navigation to Bundle Builder is disabled.');
+        } else {
+          setCheckpointMappingMissing(false);
         }
       } catch (error) {
         console.error('Failed to validate kubeconfig:', error);
@@ -138,9 +151,9 @@ export default function AppLayout({ children }: AppLayoutProps) {
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
         <ListItemButton
           selected={selectedItem === 'bundle-builder'}
-          disabled={helmVersionError}
+          disabled={helmVersionError || checkpointMappingMissing}
           onClick={() => {
-            if (!helmVersionError) {
+            if (!helmVersionError && !checkpointMappingMissing) {
               router.push('/bundle-builder');
             }
           }}
@@ -157,7 +170,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
               },
             },
             '&:hover': {
-              backgroundColor: helmVersionError ? 'transparent' : 'rgb(232, 229, 234)',
+              backgroundColor: (helmVersionError || checkpointMappingMissing) ? 'transparent' : 'rgb(232, 229, 234)',
               borderRadius: 2,
             },
             '&.Mui-disabled': {
@@ -303,18 +316,19 @@ export default function AppLayout({ children }: AppLayoutProps) {
             },
           }}
         >
-          <Typography
-            sx={{
-              fontSize: '0.875rem',
-              fontWeight: 600,
-              color: 'primary.main',
-              mb: 0.5,
-              fontFamily: 'var(--font-geist-sans)',
-              textAlign: 'center',
-            }}
-          >
-            {envName}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 0.5 }}>
+            <HomeIcon sx={{ fontSize: '1rem', color: 'primary.main', mr: 0.75 }} />
+            <Typography
+              sx={{
+                fontSize: '0.875rem',
+                fontWeight: 600,
+                color: 'primary.main',
+                fontFamily: 'var(--font-geist-sans)',
+              }}
+            >
+              {envName}
+            </Typography>
+          </Box>
           <Typography
             sx={{
               fontSize: '0.75rem',

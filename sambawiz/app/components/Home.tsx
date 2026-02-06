@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -22,8 +22,9 @@ import {
   DialogContent,
   DialogContentText,
   DialogActions,
+  Tooltip,
 } from '@mui/material';
-import { Visibility, VisibilityOff, ContentCopy } from '@mui/icons-material';
+import { Visibility, VisibilityOff, ContentCopy, Close, Warning } from '@mui/icons-material';
 import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
@@ -34,10 +35,21 @@ interface KubeconfigEntry {
   uiDomain?: string;
   apiDomain?: string;
   apiKey?: string;
+  enableUpdates?: boolean;
 }
 
 export default function Home() {
   const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const namespaceId = useId();
+  const apiDomainId = useId();
+  const uiDomainId = useId();
+  const apiKeyId = useId();
+  const keycloakUsernameId = useId();
+  const keycloakPasswordId = useId();
+  const installYamlId = useId();
+
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
   const [namespace, setNamespace] = useState<string>('');
   const [apiKey, setApiKey] = useState<string>('');
@@ -60,6 +72,15 @@ export default function Home() {
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [fullHelmVersion, setFullHelmVersion] = useState<string | null>(null);
+  const [showInstallDialog, setShowInstallDialog] = useState<boolean>(false);
+  const [installYaml, setInstallYaml] = useState<string>('');
+  const [installing, setInstalling] = useState<boolean>(false);
+  const [installOutput, setInstallOutput] = useState<string>('');
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [installerLogs, setInstallerLogs] = useState<string>('');
+  const [showInstallerLogs, setShowInstallerLogs] = useState<boolean>(false);
+  const [enableUpdates, setEnableUpdates] = useState<boolean>(true);
+  const [installationComplete, setInstallationComplete] = useState<boolean>(false);
 
   // Check prerequisites on component mount
   useEffect(() => {
@@ -179,6 +200,11 @@ export default function Home() {
           if (data.defaultUiDomain) {
             setUiDomain(data.defaultUiDomain);
           }
+          // Set default enableUpdates from app-config.json
+          if (data.defaultEnvironment && data.kubeconfigs[data.defaultEnvironment]) {
+            const enableUpdatesValue = data.kubeconfigs[data.defaultEnvironment].enableUpdates;
+            setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
+          }
         }
       } catch (error) {
         console.error('Failed to fetch environments:', error);
@@ -188,26 +214,66 @@ export default function Home() {
     fetchEnvironments();
   }, []);
 
-  // Fetch helm version on component mount and when environment changes
+  // Function to fetch helm version
+  const fetchHelmVersion = useCallback(async () => {
+    try {
+      const response = await fetch('/api/kubeconfig-validate');
+      const data = await response.json();
+
+      if (data.success && data.fullVersion) {
+        setFullHelmVersion(data.fullVersion);
+      } else {
+        setFullHelmVersion(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch helm version:', error);
+      setFullHelmVersion(null);
+    }
+  }, []);
+
+  // Fetch helm version on component mount
   useEffect(() => {
-    const fetchHelmVersion = async () => {
+    fetchHelmVersion();
+  }, [fetchHelmVersion]);
+
+  // Auto-refresh installer logs every 3 seconds when enabled
+  useEffect(() => {
+    if (!showInstallerLogs) {
+      setInstallerLogs('');
+      return;
+    }
+
+    const fetchInstallerLogs = async () => {
       try {
-        const response = await fetch('/api/kubeconfig-validate');
+        const response = await fetch('/api/installer-logs?lines=20');
         const data = await response.json();
 
-        if (data.success && data.fullVersion) {
-          setFullHelmVersion(data.fullVersion);
+        if (data.success) {
+          setInstallerLogs(data.logs);
+          // Check if installation is complete (last line contains "configure_default_ingress")
+          const lines = data.logs.trim().split('\n');
+          const lastLine = lines[lines.length - 1];
+          if (lastLine && lastLine.includes('configure_default_ingress')) {
+            setInstallationComplete(true);
+          }
         } else {
-          setFullHelmVersion(null);
+          setInstallerLogs(`Error: ${data.error || 'Failed to fetch logs'}`);
         }
       } catch (error) {
-        console.error('Failed to fetch helm version:', error);
-        setFullHelmVersion(null);
+        console.error('Failed to fetch installer logs:', error);
+        setInstallerLogs('Failed to connect to the server');
       }
     };
 
-    fetchHelmVersion();
-  }, []);
+    // Fetch immediately
+    fetchInstallerLogs();
+
+    // Set up interval to fetch every 3 seconds
+    const intervalId = setInterval(fetchInstallerLogs, 3000);
+
+    // Cleanup interval on unmount or when showInstallerLogs changes
+    return () => clearInterval(intervalId);
+  }, [showInstallerLogs]);
 
   const handleEnvironmentChange = (event: SelectChangeEvent<string>) => {
     const envName = event.target.value;
@@ -221,11 +287,14 @@ export default function Home() {
       setApiKey(kubeconfigs[envName].apiKey || '');
       setApiDomain(kubeconfigs[envName].apiDomain || '');
       setUiDomain(kubeconfigs[envName].uiDomain || '');
+      const enableUpdatesValue = kubeconfigs[envName].enableUpdates;
+      setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
     } else {
       setNamespace('default');
       setApiKey('');
       setApiDomain('');
       setUiDomain('');
+      setEnableUpdates(true); // Default to true for empty selection
     }
   };
 
@@ -340,6 +409,22 @@ export default function Home() {
     setSaveError(null);
 
     try {
+      // Check if checkpoint_mapping.json exists
+      const checkpointResponse = await fetch('/api/check-checkpoint-mapping');
+      const checkpointData = await checkpointResponse.json();
+
+      if (checkpointData.success && !checkpointData.exists) {
+        setSaveError('checkpoint_mapping.json file not found in app/data/ folder. Please obtain it from your SambaNova contact and copy it into that folder before applying configuration.');
+        setSaving(false);
+        return;
+      }
+
+      if (!checkpointData.success) {
+        setSaveError('Failed to verify checkpoint mapping file. Please try again.');
+        setSaving(false);
+        return;
+      }
+
       const response = await fetch('/api/update-config', {
         method: 'POST',
         headers: {
@@ -376,6 +461,78 @@ export default function Home() {
   const handleAppConfigCreated = async () => {
     // Refresh the page to load the new config
     window.location.reload();
+  };
+
+  const handleOpenInstallDialog = () => {
+    // Initialize with default YAML
+    const defaultYaml = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sambastack
+  labels:
+    sambastack-installer: "true"
+data:
+  sambastack.yaml: |
+    version: 0.3.575                     # [CHANGE ME] Helm version of sambastack to install`;
+    setInstallYaml(defaultYaml);
+    setInstallOutput('');
+    setInstallError(null);
+    setInstallationComplete(false);
+    setShowInstallDialog(true);
+  };
+
+  const handleCloseInstallDialog = useCallback(() => {
+    setShowInstallDialog(false);
+    setInstallOutput('');
+    setInstallError(null);
+    setShowInstallerLogs(false);
+    setInstallationComplete(false);
+    // Force page refresh to update helm version
+    window.location.reload();
+  }, []);
+
+  const handleInstallYamlChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInstallYaml(event.target.value);
+  };
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    setInstallError(null);
+    setInstallOutput('');
+    setShowInstallerLogs(false);
+    setInstallationComplete(false);
+
+    try {
+      const response = await fetch('/api/install-sambastack', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          yaml: installYaml,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setInstallOutput(data.output || 'Installation initiated successfully!');
+        // Enable installer logs monitoring
+        setShowInstallerLogs(true);
+      } else {
+        setInstallError(data.error || 'Installation failed');
+        if (data.stderr) {
+          setInstallOutput(data.stderr);
+        } else if (data.stdout) {
+          setInstallOutput(data.stdout);
+        }
+      }
+    } catch (error) {
+      console.error('Error installing SambaStack:', error);
+      setInstallError('Failed to install SambaStack');
+    } finally {
+      setInstalling(false);
+    }
   };
 
   return (
@@ -481,6 +638,7 @@ export default function Home() {
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakUsernameId}
                     fullWidth
                     value={keycloakUsername}
                     variant="outlined"
@@ -508,6 +666,7 @@ export default function Home() {
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <TextField
+                    id={keycloakPasswordId}
                     fullWidth
                     type={showPassword ? 'text' : 'password'}
                     value={keycloakPassword}
@@ -551,6 +710,163 @@ export default function Home() {
         <DialogActions>
           <Button onClick={() => setShowApiKeyInstructionsDialog(false)} autoFocus>
             Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Install SambaStack Dialog */}
+      <Dialog
+        open={showInstallDialog}
+        onClose={handleCloseInstallDialog}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Install SambaStack</span>
+            <IconButton
+              aria-label="close"
+              onClick={handleCloseInstallDialog}
+              sx={{
+                color: (theme) => theme.palette.grey[500],
+              }}
+            >
+              <Close />
+            </IconButton>
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+            Install Environment: <Box component="span" sx={{ fontWeight: 600, color: 'primary.main' }}>{selectedEnvironment}</Box>
+          </Typography>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+            <Typography variant="body2" sx={{ color: 'text.primary' }}>
+              Please update the SambaStack helm version below to the version you want installed
+            </Typography>
+            <Tooltip title="Please do not modify anything else unless you know what you are doing." arrow>
+              <Warning sx={{ color: 'warning.main', fontSize: '1.2rem' }} />
+            </Tooltip>
+          </Box>
+
+          <TextField
+            id={installYamlId}
+            fullWidth
+            multiline
+            rows={12}
+            value={installYaml}
+            onChange={handleInstallYamlChange}
+            variant="outlined"
+            sx={{
+              mb: 2,
+              '& .MuiInputBase-root': {
+                fontFamily: 'monospace',
+                fontSize: '0.875rem',
+              },
+            }}
+          />
+
+          {/* Error Message */}
+          {installError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {installError}
+            </Alert>
+          )}
+
+          {/* Output Display */}
+          {installOutput && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                Output:
+              </Typography>
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 2,
+                  backgroundColor: 'grey.100',
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  maxHeight: '200px',
+                  overflow: 'auto',
+                }}
+              >
+                <Typography
+                  component="pre"
+                  sx={{
+                    fontFamily: 'monospace',
+                    fontSize: '0.75rem',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    m: 0,
+                  }}
+                >
+                  {installOutput}
+                </Typography>
+              </Paper>
+            </Box>
+          )}
+
+          {/* Installer Logs Display */}
+          {showInstallerLogs && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                Installer Logs:
+              </Typography>
+              <Box
+                sx={{
+                  bgcolor: 'black',
+                  borderRadius: 1,
+                  p: 2,
+                  overflowX: 'auto',
+                  overflowY: 'auto',
+                  minHeight: '200px',
+                  maxHeight: '400px',
+                }}
+              >
+                <Box
+                  component="pre"
+                  sx={{
+                    m: 0,
+                    color: 'white',
+                    fontSize: '0.875rem',
+                    fontFamily: 'monospace',
+                    whiteSpace: 'pre',
+                  }}
+                >
+                  {installerLogs || 'Waiting for logs...'}
+                </Box>
+              </Box>
+              <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                Auto-refreshing every 3 seconds
+              </Typography>
+              {installationComplete && (
+                <Alert severity="success" sx={{ mt: 2 }}>
+                  Installation complete! You may close this dialog now to apply the changes.
+                </Alert>
+              )}
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            variant="contained"
+            onClick={handleInstall}
+            disabled={installing || !installYaml.trim()}
+            sx={{
+              background: '#A2297D',
+              '&:hover': {
+                background: '#8B2268',
+              },
+            }}
+          >
+            {installing ? (
+              <>
+                <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
+                Installing...
+              </>
+            ) : (
+              'Install'
+            )}
           </Button>
         </DialogActions>
       </Dialog>
@@ -614,17 +930,44 @@ export default function Home() {
 
       {/* Helm Version Display */}
       {fullHelmVersion && (
-        <Typography
-          variant="body2"
+        <Box
           sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 2,
             mb: 3,
             ml: 1.5,
-            color: 'text.secondary',
-            fontSize: 'rem',
           }}
         >
-          Current SambaStack Helm Version: <Box component="span" sx={{ fontFamily: 'monospace', color: 'primary.main' }}>{fullHelmVersion}</Box>
-        </Typography>
+          <Typography
+            variant="body2"
+            sx={{
+              color: 'text.secondary',
+              fontSize: 'rem',
+            }}
+          >
+            Current SambaStack Helm Version: <Box component="span" sx={{ fontFamily: 'monospace', color: 'primary.main' }}>{fullHelmVersion}</Box>
+          </Typography>
+          {enableUpdates && (
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={handleOpenInstallDialog}
+              sx={{
+                textTransform: 'none',
+                fontWeight: 600,
+                borderColor: 'primary.main',
+                color: 'primary.main',
+                '&:hover': {
+                  borderColor: 'primary.dark',
+                  backgroundColor: 'rgba(255, 107, 53, 0.05)',
+                },
+              }}
+            >
+              Update
+            </Button>
+          )}
+        </Box>
       )}
 
 
@@ -709,6 +1052,7 @@ export default function Home() {
         </FormControl>        
 
         <TextField
+          id={namespaceId}
           fullWidth
           label="Namespace"
           value={namespace}
@@ -728,6 +1072,7 @@ export default function Home() {
         />
 
         <TextField
+          id={apiDomainId}
           fullWidth
           label="API Domain"
           value={apiDomain}
@@ -747,6 +1092,7 @@ export default function Home() {
         />
 
         <TextField
+          id={uiDomainId}
           fullWidth
           label="UI Domain"
           value={uiDomain}
@@ -784,6 +1130,7 @@ export default function Home() {
             </Typography>
           </Box>
           <TextField
+            id={apiKeyId}
             fullWidth
             label="API Key"
             type={showApiKey ? 'text' : 'password'}

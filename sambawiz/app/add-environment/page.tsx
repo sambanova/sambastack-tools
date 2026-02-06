@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -19,6 +19,11 @@ import {
 
 export default function AddEnvironment() {
   const router = useRouter();
+
+  // Generate stable IDs for form fields to prevent hydration mismatches
+  const encodedConfigId = useId();
+  const environmentNameId = useId();
+
   const [encodedConfig, setEncodedConfig] = useState<string>('');
   const [environmentName, setEnvironmentName] = useState<string>('sambastack-dev-0');
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -193,6 +198,7 @@ export default function AddEnvironment() {
           Copy your encoded config here (e.g., from 1Password)
         </Typography>
         <TextField
+          id={encodedConfigId}
           fullWidth
           multiline
           rows={8}
@@ -226,6 +232,7 @@ export default function AddEnvironment() {
           Environment Name (no whitespaces allowed)
         </Typography>
         <TextField
+          id={environmentNameId}
           fullWidth
           label="Environment Name"
           value={environmentName}
