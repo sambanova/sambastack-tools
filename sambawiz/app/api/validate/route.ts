@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 
@@ -176,8 +176,21 @@ export async function POST(request: NextRequest) {
         env,
         timeout: 30000, // 30 second timeout
       });
+
+      // Clean up temp file after successful apply
+      try {
+        unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to delete temp file:', filePath, cleanupError);
+      }
     } catch (error) {
-      // kubectl apply failed
+      // kubectl apply failed - clean up temp file before returning
+      try {
+        unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to delete temp file:', filePath, cleanupError);
+      }
+
       const message = error instanceof Error ? error.message : 'Unknown error';
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)
@@ -204,7 +217,7 @@ export async function POST(request: NextRequest) {
     // Get bundle status using JSON output
     let validationStatus;
     try {
-      const jsonOutput = execSync(`kubectl -n ${namespace} get bundle ${bundleName} -o json`, {
+      const jsonOutput = execSync(`kubectl -n ${namespace} get bundle.sambanova.ai ${bundleName} -o json`, {
         encoding: 'utf-8',
         env,
         timeout: 30000,
@@ -212,7 +225,7 @@ export async function POST(request: NextRequest) {
 
       validationStatus = extractValidationStatus(jsonOutput);
     } catch (error) {
-      // kubectl get bundle failed
+      // kubectl get bundle.sambanova.ai failed
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)
         : '';
@@ -222,7 +235,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: 'kubectl get bundle failed',
+          error: 'kubectl get bundle.sambanova.ai failed',
           message: 'Bundle was applied but status check failed',
           applyOutput: applyOutput.trim(),
           stderr,

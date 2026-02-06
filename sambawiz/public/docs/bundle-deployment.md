@@ -30,7 +30,7 @@ All commands use the namespace configured on the Home page.
 
 ### 1. List Bundle Deployments
 ```bash
-kubectl -n <namespace> get bundledeployment -o json
+kubectl -n <namespace> get bundledeployment.sambanova.ai -o json
 ```
 **Purpose**: Retrieves all BundleDeployment resources in the namespace
 **When**: On page load and when clicking "Refresh"
@@ -39,7 +39,7 @@ kubectl -n <namespace> get bundledeployment -o json
 
 ### 2. Get BundleDeployment Details
 ```bash
-kubectl get bundledeployment <deployment-name> -n <namespace> -o json
+kubectl get bundledeployment.sambanova.ai <deployment-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves detailed information about a specific deployment
 **When**: When checking which models are deployed
@@ -48,7 +48,7 @@ kubectl get bundledeployment <deployment-name> -n <namespace> -o json
 
 ### 3. Get Bundle Details
 ```bash
-kubectl get bundle <bundle-name> -n <namespace> -o json
+kubectl get bundle.sambanova.ai <bundle-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves the bundle specification including models
 **When**: When fetching available models for the Playground
@@ -57,7 +57,7 @@ kubectl get bundle <bundle-name> -n <namespace> -o json
 
 ### 4. List Valid Bundles
 ```bash
-kubectl -n <namespace> get bundle -o json
+kubectl -n <namespace> get bundle.sambanova.ai -o json
 ```
 **Purpose**: Lists all Bundle resources to show validated bundles available for deployment
 **When**: On page load
@@ -75,7 +75,7 @@ kubectl -n <namespace> apply -f <bundle-deployment>.yaml
 
 ### 6. Delete BundleDeployment
 ```bash
-kubectl -n <namespace> delete bundledeployment <deployment-name>
+kubectl -n <namespace> delete bundledeployment.sambanova.ai <deployment-name>
 ```
 **Purpose**: Removes a BundleDeployment and its associated pods
 **When**: When you click "Delete" on a deployment

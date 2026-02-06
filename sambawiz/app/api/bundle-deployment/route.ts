@@ -77,7 +77,7 @@ export async function GET() {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} get bundledeployment -o json`, {
+    const output = execSync(`kubectl -n ${namespace} get bundledeployment.sambanova.ai -o json`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,
@@ -177,7 +177,7 @@ export async function DELETE(request: NextRequest) {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} delete bundledeployment ${name}`, {
+    const output = execSync(`kubectl -n ${namespace} delete bundledeployment.sambanova.ai ${name}`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,

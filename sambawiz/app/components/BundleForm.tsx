@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect, useId } from 'react';
+import { useState, useMemo, useEffect, useId, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -87,6 +87,9 @@ export default function BundleForm() {
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // Track if we're loading from saved state to prevent YAML regeneration
+  const isLoadingFromSavedState = useRef<boolean>(false);
+
   // Fetch checkpointsDir from config and load saved state on component mount
   useEffect(() => {
     const fetchConfig = async () => {
@@ -106,15 +109,24 @@ export default function BundleForm() {
         const response = await fetch('/api/bundle-builder-state');
         const data = await response.json();
         if (data.success && data.state) {
+          // Set flag to prevent YAML regeneration during state load
+          isLoadingFromSavedState.current = true;
+
           // Restore the saved state
           setSelectedModels(data.state.selectedModels || []);
           setSelectedConfigs(data.state.selectedConfigs || []);
           setBundleName(data.state.bundleName || 'bundle1');
           setGeneratedYaml(data.state.generatedYaml || '');
           setDraftModels(data.state.draftModels || {});
+
+          // Clear flag after a brief delay to allow state updates to complete
+          setTimeout(() => {
+            isLoadingFromSavedState.current = false;
+          }, 100);
         }
       } catch (error) {
         console.error('Failed to load saved state:', error);
+        isLoadingFromSavedState.current = false;
       }
     };
 
@@ -399,6 +411,11 @@ export default function BundleForm() {
 
   // Generate YAML automatically when configs or bundle name change
   useEffect(() => {
+    // Skip regeneration if we're loading from saved state
+    if (isLoadingFromSavedState.current) {
+      return;
+    }
+
     if (selectedConfigs.length === 0 || !bundleName) {
       setGeneratedYaml('');
       return;

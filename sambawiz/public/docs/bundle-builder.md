@@ -43,7 +43,7 @@ kubectl -n <namespace> apply -f <temp-bundle-file>.yaml
 
 ### 4. Get Bundle Status
 ```bash
-kubectl -n <namespace> get bundle <bundle-name> -o json
+kubectl -n <namespace> get bundle.sambanova.ai <bundle-name> -o json
 ```
 **Purpose**: Checks the validation status of the bundle
 **When**: After applying the bundle (5 seconds wait)

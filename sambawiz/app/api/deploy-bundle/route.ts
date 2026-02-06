@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 
@@ -88,8 +88,21 @@ export async function POST(request: NextRequest) {
         env,
         timeout: 30000, // 30 second timeout
       });
+
+      // Clean up temp file after successful apply
+      try {
+        unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to delete temp file:', filePath, cleanupError);
+      }
     } catch (error) {
-      // kubectl apply failed
+      // kubectl apply failed - clean up temp file before returning
+      try {
+        unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.warn('Failed to delete temp file:', filePath, cleanupError);
+      }
+
       const message = error instanceof Error ? error.message : 'Unknown error';
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)

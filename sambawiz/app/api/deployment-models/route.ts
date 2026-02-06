@@ -73,7 +73,7 @@ export async function GET(request: NextRequest) {
     let bundleDeploymentOutput: string;
     try {
       bundleDeploymentOutput = execSync(
-        `kubectl get bundledeployment ${deploymentName} -n ${namespace} -o json`,
+        `kubectl get bundledeployment.sambanova.ai ${deploymentName} -n ${namespace} -o json`,
         {
           encoding: 'utf-8',
           env,
@@ -133,7 +133,7 @@ export async function GET(request: NextRequest) {
     let bundleOutput: string;
     try {
       bundleOutput = execSync(
-        `kubectl get bundle ${bundleName} -n ${namespace} -o json`,
+        `kubectl get bundle.sambanova.ai ${bundleName} -n ${namespace} -o json`,
         {
           encoding: 'utf-8',
           env,
