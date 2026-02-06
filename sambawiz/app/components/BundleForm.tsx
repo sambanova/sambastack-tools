@@ -46,11 +46,9 @@ import DocumentationPanel from './DocumentationPanel';
 // Import the JSON data
 import pefConfigsData from '../data/pef_configs.json';
 import pefMappingData from '../data/pef_mapping.json';
-import checkpointMappingData from '../data/checkpoint_mapping.json';
 
 const pefConfigs: PefConfigs = pefConfigsData;
 const pefMapping: PefMapping = pefMappingData;
-const checkpointMapping: CheckpointMapping = checkpointMappingData;
 
 interface ModelConfig {
   ss: string;
@@ -86,6 +84,7 @@ export default function BundleForm() {
   const [saveDialogOpen, setSaveDialogOpen] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [checkpointMapping, setCheckpointMapping] = useState<CheckpointMapping>({});
 
   // Track if we're loading from saved state to prevent YAML regeneration
   const isLoadingFromSavedState = useRef<boolean>(false);
@@ -152,6 +151,30 @@ export default function BundleForm() {
     };
   }, []);
 
+  // Load checkpoint mapping dynamically (file may not exist if gitignored)
+  useEffect(() => {
+    const loadCheckpointMapping = async () => {
+      try {
+        const response = await fetch('/api/checkpoint-mapping');
+        const result = await response.json();
+        if (result.success && result.data) {
+          setCheckpointMapping(result.data);
+        } else {
+          // File doesn't exist (gitignored), use empty object
+          console.warn('checkpoint_mapping.json not found, using empty mapping');
+          setCheckpointMapping({});
+        }
+      } catch (error) {
+        // API call failed, use empty object
+        // The UI will show an error message for the user to configure it
+        console.warn('Failed to load checkpoint_mapping.json:', error);
+        setCheckpointMapping({});
+      }
+    };
+
+    loadCheckpointMapping();
+  }, []);
+
   // Get available models (intersection of checkpoint and pef mapping keys with non-empty values)
   const availableModels = useMemo(() => {
     const checkpointKeys = Object.keys(checkpointMapping).filter(
@@ -161,7 +184,7 @@ export default function BundleForm() {
       (key) => pefMapping[key].length > 0
     );
     return checkpointKeys.filter((key) => pefMappingKeys.includes(key)).sort();
-  }, []);
+  }, [checkpointMapping]);
 
   // Check if a model supports speculative decoding
   const modelSupportsSpeculativeDecoding = useMemo(() => {
