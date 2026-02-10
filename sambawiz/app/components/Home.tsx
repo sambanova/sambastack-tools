@@ -463,8 +463,32 @@ export default function Home() {
     window.location.reload();
   };
 
+  const getNextVersion = (currentVersion: string | null): string => {
+    if (!currentVersion) {
+      return '0.3.576'; // Default fallback
+    }
+
+    // Remove any non-numerical suffix (e.g., "0.3.586-dev" -> "0.3.586")
+    const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
+    if (!versionMatch) {
+      return '0.3.576'; // Fallback if format doesn't match
+    }
+
+    const numericalVersion = versionMatch[1];
+    const parts = numericalVersion.split('.');
+
+    // Increment the last part
+    const lastPart = parseInt(parts[parts.length - 1], 10);
+    parts[parts.length - 1] = (lastPart + 1).toString();
+
+    return parts.join('.');
+  };
+
   const handleOpenInstallDialog = () => {
-    // Initialize with default YAML
+    // Calculate the next version based on current helm version
+    const nextVersion = getNextVersion(fullHelmVersion);
+
+    // Initialize with YAML containing the next version
     const defaultYaml = `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -473,7 +497,7 @@ metadata:
     sambastack-installer: "true"
 data:
   sambastack.yaml: |
-    version: 0.3.575                     # [CHANGE ME] Helm version of sambastack to install`;
+    version: ${nextVersion}                     # [CHANGE ME] Helm version of sambastack to install`;
     setInstallYaml(defaultYaml);
     setInstallOutput('');
     setInstallError(null);
@@ -496,6 +520,7 @@ data:
   };
 
   const handleInstall = async () => {
+    // Clear previous installation state including success message
     setInstalling(true);
     setInstallError(null);
     setInstallOutput('');
@@ -851,7 +876,7 @@ data:
           <Button
             variant="contained"
             onClick={handleInstall}
-            disabled={installing || !installYaml.trim()}
+            disabled={installing || (showInstallerLogs && !installationComplete) || !installYaml.trim()}
             sx={{
               background: '#A2297D',
               '&:hover': {
