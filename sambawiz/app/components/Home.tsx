@@ -81,6 +81,7 @@ export default function Home() {
   const [showInstallerLogs, setShowInstallerLogs] = useState<boolean>(false);
   const [enableUpdates, setEnableUpdates] = useState<boolean>(true);
   const [installationComplete, setInstallationComplete] = useState<boolean>(false);
+  const [yamlModifiedAfterInstall, setYamlModifiedAfterInstall] = useState<boolean>(false);
 
   // Check prerequisites on component mount
   useEffect(() => {
@@ -238,8 +239,10 @@ export default function Home() {
 
   // Auto-refresh installer logs every 3 seconds when enabled
   useEffect(() => {
-    if (!showInstallerLogs) {
-      setInstallerLogs('');
+    if (!showInstallerLogs || installationComplete) {
+      if (!showInstallerLogs) {
+        setInstallerLogs('');
+      }
       return;
     }
 
@@ -255,6 +258,7 @@ export default function Home() {
           const lastLine = lines[lines.length - 1];
           if (lastLine && lastLine.includes('configure_default_ingress')) {
             setInstallationComplete(true);
+            setYamlModifiedAfterInstall(false); // Require YAML modification before next install
           }
         } else {
           setInstallerLogs(`Error: ${data.error || 'Failed to fetch logs'}`);
@@ -271,9 +275,9 @@ export default function Home() {
     // Set up interval to fetch every 3 seconds
     const intervalId = setInterval(fetchInstallerLogs, 3000);
 
-    // Cleanup interval on unmount or when showInstallerLogs changes
+    // Cleanup interval on unmount or when showInstallerLogs or installationComplete changes
     return () => clearInterval(intervalId);
-  }, [showInstallerLogs]);
+  }, [showInstallerLogs, installationComplete]);
 
   const handleEnvironmentChange = (event: SelectChangeEvent<string>) => {
     const envName = event.target.value;
@@ -463,8 +467,32 @@ export default function Home() {
     window.location.reload();
   };
 
+  const getNextVersion = (currentVersion: string | null): string => {
+    if (!currentVersion) {
+      return '0.3.576'; // Default fallback
+    }
+
+    // Remove any non-numerical suffix (e.g., "0.3.586-dev" -> "0.3.586")
+    const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
+    if (!versionMatch) {
+      return '0.3.576'; // Fallback if format doesn't match
+    }
+
+    const numericalVersion = versionMatch[1];
+    const parts = numericalVersion.split('.');
+
+    // Increment the last part
+    const lastPart = parseInt(parts[parts.length - 1], 10);
+    parts[parts.length - 1] = (lastPart + 1).toString();
+
+    return parts.join('.');
+  };
+
   const handleOpenInstallDialog = () => {
-    // Initialize with default YAML
+    // Calculate the next version based on current helm version
+    const nextVersion = getNextVersion(fullHelmVersion);
+
+    // Initialize with YAML containing the next version
     const defaultYaml = `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -473,11 +501,12 @@ metadata:
     sambastack-installer: "true"
 data:
   sambastack.yaml: |
-    version: 0.3.575                     # [CHANGE ME] Helm version of sambastack to install`;
+    version: ${nextVersion}                     # [CHANGE ME] Helm version of sambastack to install`;
     setInstallYaml(defaultYaml);
     setInstallOutput('');
     setInstallError(null);
     setInstallationComplete(false);
+    setYamlModifiedAfterInstall(false); // Reset modification tracking
     setShowInstallDialog(true);
   };
 
@@ -493,9 +522,19 @@ data:
 
   const handleInstallYamlChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInstallYaml(event.target.value);
+    setYamlModifiedAfterInstall(true); // Mark as modified to enable Install button
+
+    // Reset dialog state when user edits after installation (reload from scratch)
+    if (installationComplete) {
+      setInstallationComplete(false);
+      setShowInstallerLogs(false);
+      setInstallOutput('');
+      setInstallError(null);
+    }
   };
 
   const handleInstall = async () => {
+    // Clear previous installation state including success message
     setInstalling(true);
     setInstallError(null);
     setInstallOutput('');
@@ -836,9 +875,11 @@ data:
                   {installerLogs || 'Waiting for logs...'}
                 </Box>
               </Box>
-              <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                Auto-refreshing every 3 seconds
-              </Typography>
+              {!installationComplete && (
+                <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                  Auto-refreshing every 3 seconds
+                </Typography>
+              )}
               {installationComplete && (
                 <Alert severity="success" sx={{ mt: 2 }}>
                   Installation complete! You may close this dialog now to apply the changes.
@@ -851,7 +892,7 @@ data:
           <Button
             variant="contained"
             onClick={handleInstall}
-            disabled={installing || !installYaml.trim()}
+            disabled={installing || (showInstallerLogs && !installationComplete) || !installYaml.trim() || (installationComplete && !yamlModifiedAfterInstall)}
             sx={{
               background: '#A2297D',
               '&:hover': {
