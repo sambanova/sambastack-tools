@@ -81,6 +81,7 @@ export default function Home() {
   const [showInstallerLogs, setShowInstallerLogs] = useState<boolean>(false);
   const [enableUpdates, setEnableUpdates] = useState<boolean>(true);
   const [installationComplete, setInstallationComplete] = useState<boolean>(false);
+  const [yamlModifiedAfterInstall, setYamlModifiedAfterInstall] = useState<boolean>(false);
 
   // Check prerequisites on component mount
   useEffect(() => {
@@ -238,8 +239,10 @@ export default function Home() {
 
   // Auto-refresh installer logs every 3 seconds when enabled
   useEffect(() => {
-    if (!showInstallerLogs) {
-      setInstallerLogs('');
+    if (!showInstallerLogs || installationComplete) {
+      if (!showInstallerLogs) {
+        setInstallerLogs('');
+      }
       return;
     }
 
@@ -255,6 +258,7 @@ export default function Home() {
           const lastLine = lines[lines.length - 1];
           if (lastLine && lastLine.includes('configure_default_ingress')) {
             setInstallationComplete(true);
+            setYamlModifiedAfterInstall(false); // Require YAML modification before next install
           }
         } else {
           setInstallerLogs(`Error: ${data.error || 'Failed to fetch logs'}`);
@@ -271,9 +275,9 @@ export default function Home() {
     // Set up interval to fetch every 3 seconds
     const intervalId = setInterval(fetchInstallerLogs, 3000);
 
-    // Cleanup interval on unmount or when showInstallerLogs changes
+    // Cleanup interval on unmount or when showInstallerLogs or installationComplete changes
     return () => clearInterval(intervalId);
-  }, [showInstallerLogs]);
+  }, [showInstallerLogs, installationComplete]);
 
   const handleEnvironmentChange = (event: SelectChangeEvent<string>) => {
     const envName = event.target.value;
@@ -502,6 +506,7 @@ data:
     setInstallOutput('');
     setInstallError(null);
     setInstallationComplete(false);
+    setYamlModifiedAfterInstall(false); // Reset modification tracking
     setShowInstallDialog(true);
   };
 
@@ -517,6 +522,15 @@ data:
 
   const handleInstallYamlChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInstallYaml(event.target.value);
+    setYamlModifiedAfterInstall(true); // Mark as modified to enable Install button
+
+    // Reset dialog state when user edits after installation (reload from scratch)
+    if (installationComplete) {
+      setInstallationComplete(false);
+      setShowInstallerLogs(false);
+      setInstallOutput('');
+      setInstallError(null);
+    }
   };
 
   const handleInstall = async () => {
@@ -861,9 +875,11 @@ data:
                   {installerLogs || 'Waiting for logs...'}
                 </Box>
               </Box>
-              <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                Auto-refreshing every 3 seconds
-              </Typography>
+              {!installationComplete && (
+                <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                  Auto-refreshing every 3 seconds
+                </Typography>
+              )}
               {installationComplete && (
                 <Alert severity="success" sx={{ mt: 2 }}>
                   Installation complete! You may close this dialog now to apply the changes.
@@ -876,7 +892,7 @@ data:
           <Button
             variant="contained"
             onClick={handleInstall}
-            disabled={installing || (showInstallerLogs && !installationComplete) || !installYaml.trim()}
+            disabled={installing || (showInstallerLogs && !installationComplete) || !installYaml.trim() || (installationComplete && !yamlModifiedAfterInstall)}
             sx={{
               background: '#A2297D',
               '&:hover': {

@@ -240,7 +240,10 @@ export default function BundleDeploymentManager() {
       // Check if the bundle from the query parameter exists in valid bundles
       const bundleExists = validBundles.some((bundle) => bundle.name === bundleParam);
       if (bundleExists) {
-        // Auto-select the bundle
+        // Reset section 3 (hide it by clearing monitoredDeployment)
+        setMonitoredDeployment('');
+
+        // Reset section 2 based on the bundle in the query string
         setSelectedBundle(bundleParam);
 
         // Auto-suggest deployment name
@@ -255,6 +258,9 @@ export default function BundleDeploymentManager() {
         // Generate YAML
         const yaml = generateDeploymentYaml(bundleParam, suggestedName);
         setDeploymentYaml(yaml);
+
+        // Clear deployment result to start fresh
+        setDeploymentResult(null);
       }
     }
   }, [searchParams, validBundles]);
