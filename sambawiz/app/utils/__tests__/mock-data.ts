@@ -17,6 +17,11 @@ export const mockCheckpointMapping: CheckpointMapping = {
     path: '/checkpoints/qwen2.5-72b',
     resource_name: 'qwen2-5-72b-instruct',
   },
+  'Llama-4-Maverick-17B-128E-Instruct': {
+    path: '/checkpoints/llama-4-maverick',
+    resource_name: 'llama-4-maverick-17b-128e-instruct',
+    vision_embedding_checkpoint: '/checkpoints/llama-4-maverick-vision',
+  },
 };
 
 export const mockPefMapping: PefMapping = {
@@ -33,6 +38,9 @@ export const mockPefMapping: PefMapping = {
   'Qwen2.5-72B-Instruct': [
     'COE_Qwen2-5-72B-Instruct_131k_bs1_ss4096',
     'COE_Qwen2-5-72B-Instruct_131k_bs16_ss4096',
+  ],
+  'Llama-4-Maverick-17B-128E-Instruct': [
+    'llama-4-maverick-ss8192-bs1',
   ],
 };
 
@@ -75,6 +83,11 @@ export const mockPefConfigs: PefConfigs = {
   'COE_Qwen2-5-72B-Instruct_131k_bs16_ss4096': {
     ss: '4096',
     bs: '16',
+    latestVersion: '1',
+  },
+  'llama-4-maverick-ss8192-bs1': {
+    ss: '8k',
+    bs: '1',
     latestVersion: '1',
   },
 };

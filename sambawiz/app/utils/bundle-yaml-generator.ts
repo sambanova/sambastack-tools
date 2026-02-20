@@ -37,6 +37,25 @@ export function generateCheckpointName(modelName: string): string {
 }
 
 /**
+ * Generate vision embedding checkpoint name from model name
+ */
+export function generateVisionEmbeddingCheckpointName(modelName: string): string {
+  const checkpointBaseName = modelName
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+
+  // Check if the transformed checkpoint base name ends with "_INSTRUCT"
+  if (checkpointBaseName.endsWith('_INSTRUCT')) {
+    // Remove "_INSTRUCT" suffix from the base name
+    return checkpointBaseName.replace(/_INSTRUCT$/, '') + '_VISION_EMBD_CKPT';
+  }
+
+  return checkpointBaseName + '_VISION_EMBD_CKPT';
+}
+
+/**
  * Generate complete bundle YAML from selected configurations
  */
 export function generateBundleYaml(
@@ -142,16 +161,35 @@ export function generateBundleYaml(
       source: fullCheckpointPath,
       toolSupport: true
     };
+
+    // Add vision embedding checkpoint if present
+    if (checkpointData?.vision_embedding_checkpoint) {
+      const visionEmbeddingCheckpointName = generateVisionEmbeddingCheckpointName(modelName);
+      const visionEmbeddingPath = checkpointData.vision_embedding_checkpoint;
+      const fullVisionEmbeddingPath = checkpointsDir ? `${checkpointsDir}${visionEmbeddingPath}` : visionEmbeddingPath;
+      checkpoints[visionEmbeddingCheckpointName] = {
+        source: fullVisionEmbeddingPath,
+        toolSupport: true
+      };
+    }
   });
 
   // Build Bundle spec.models
-  const bundleModels: { [key: string]: { checkpoint: string; template: string } } = {};
+  const bundleModels: { [key: string]: { checkpoint: string; template: string; vision_embedding_checkpoint?: string } } = {};
   Object.keys(modelConfigs).forEach(modelName => {
     const checkpointName = generateCheckpointName(modelName);
-    bundleModels[modelName] = {
+    const checkpointData = checkpointMapping[modelName];
+    const model: { checkpoint: string; template: string; vision_embedding_checkpoint?: string } = {
       checkpoint: checkpointName,
       template: modelName
     };
+
+    // Add vision embedding checkpoint reference if present
+    if (checkpointData?.vision_embedding_checkpoint) {
+      model.vision_embedding_checkpoint = generateVisionEmbeddingCheckpointName(modelName);
+    }
+
+    bundleModels[modelName] = model;
   });
 
   // Generate YAML strings
@@ -209,9 +247,14 @@ ${Object.entries(checkpoints).map(([name, checkpoint]) => {
 }).join('\n')}
   models:
 ${Object.entries(bundleModels).map(([modelName, model]) => {
-  return `    ${modelName}:
+  let modelStr = `    ${modelName}:
       checkpoint: ${model.checkpoint}
       template: ${model.template}`;
+  if (model.vision_embedding_checkpoint) {
+    modelStr += `
+      vision_embedding_checkpoint: ${model.vision_embedding_checkpoint}`;
+  }
+  return modelStr;
 }).join('\n')}
   secretNames:
   - sambanova-artifact-reader

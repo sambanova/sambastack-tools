@@ -2,8 +2,8 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** February 2026 - Fixed React `act()` warnings in bundle deployment tests
-**Total Tests:** 61 automated + comprehensive manual test plan
+**Last Updated:** February 2026 - Added vision embedding checkpoint support
+**Total Tests:** 67 automated + comprehensive manual test plan
 **Test Status:** ✅ All tests passing with clean console output
 **Focus:** Core business logic, API integration, and new feature validation
 
@@ -169,9 +169,9 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 ### Bundle YAML Generator Tests
 
 **File:** [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts)
-**Functions:** `generateCheckpointName`, `generateBundleYaml`
-**Test Count:** 22
-**Last Updated:** Updated for simplified YAML format (removed batch_size, ckpt_sharing_uuid, num_tokens_at_a_time, draft_expert)
+**Functions:** `generateCheckpointName`, `generateVisionEmbeddingCheckpointName`, `generateBundleYaml`
+**Test Count:** 28
+**Last Updated:** Added vision embedding checkpoint support for multimodal models
 
 #### generateCheckpointName Function (6 tests)
 
@@ -184,7 +184,16 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 | should collapse multiple underscores | Normalizes multiple consecutive underscores |
 | should remove leading and trailing underscores | Trims underscores from ends |
 
-#### generateBundleYaml Function (16 tests)
+#### generateVisionEmbeddingCheckpointName Function (4 tests)
+
+| Test | Description |
+|------|-------------|
+| should generate vision embedding checkpoint name for model without _instruct suffix | Basic conversion for models with hyphen-based naming (e.g., "Llama-4-Maverick-17B-128E-Instruct" → "LLAMA_4_MAVERICK_17B_128E_INSTRUCT_VISION_EMBD_CKPT") |
+| should remove _INSTRUCT suffix for models ending with _instruct | Models with underscore-based "_instruct" suffix have it removed before appending (e.g., "Model_Name_Instruct" → "MODEL_NAME_VISION_EMBD_CKPT") |
+| should handle model names without instruct suffix | Models without instruct suffix get vision embedding checkpoint name directly (e.g., "Custom-Model" → "CUSTOM_MODEL_VISION_EMBD_CKPT") |
+| should replace hyphens and special characters | Character normalization for complex model names (e.g., "my-model.v1-instruct" → "MY_MODEL_V1_INSTRUCT_VISION_EMBD_CKPT") |
+
+#### generateBundleYaml Function (20 tests)
 
 **Basic YAML Structure**
 
@@ -221,6 +230,13 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 | should not include spec_decoding for models without draft models | Models without draft models have no spec_decoding section |
 | should not add spec_decoding when draft model is "skip" | "skip" value prevents spec_decoding configuration |
 | should only add spec_decoding when matching draft config exists | spec_decoding only added when draft model config exists; uses default_config_values for single-config SS, per-config for mixed scenarios |
+
+**Vision Embedding Checkpoint Support**
+
+| Test | Description |
+|------|-------------|
+| should include vision embedding checkpoint when present in checkpoint mapping | Models with `vision_embedding_checkpoint` field get two checkpoint entries (main + vision) and a `vision_embedding_checkpoint` reference in the Bundle models section |
+| should not include vision embedding checkpoint when not present in checkpoint mapping | Models without `vision_embedding_checkpoint` field generate normal YAML without vision-related entries |
 
 **Simplified YAML Format Changes:**
 - ✅ Removed `batch_size` field (embedded in PEF name)
@@ -605,11 +621,11 @@ jest.useFakeTimers(); // Restore for other tests
 
 | Category | Test Count | Notes |
 |----------|-----------|-------|
-| **Automated Unit Tests** | **61** | Business logic and API integration |
+| **Automated Unit Tests** | **67** | Business logic and API integration |
 | **Manual Integration Tests** | **27** | Release 1.1.2 features |
 | **UI Components (Automated)** | **4** | Only API integration tests |
-| **Core Utilities (Automated)** | **57** | Business logic and data processing |
-| **Total Coverage** | **88 tests** | Comprehensive automated + manual testing |
+| **Core Utilities (Automated)** | **63** | Business logic and data processing |
+| **Total Coverage** | **94 tests** | Comprehensive automated + manual testing |
 
 ### Automated Test Breakdown by File
 
@@ -620,9 +636,9 @@ jest.useFakeTimers(); // Restore for other tests
 | bundle-form.test.tsx | 1 | API integration |
 | bundle-deployment.test.tsx | 7 | Status logic (6) + API integration (1) - ✅ React act() warnings fixed |
 | model-availability.test.ts | 9 | Model filtering logic |
-| bundle-yaml-generator.test.ts | 22 | Simplified YAML generation logic |
+| bundle-yaml-generator.test.ts | 28 | YAML generation + vision embedding checkpoint support |
 | pef-config-generator.test.ts | 24 | Kubernetes integration |
-| **Total** | **61** | **All automated tests** |
+| **Total** | **67** | **All automated tests** |
 
 ### Manual Integration Test Breakdown
 
@@ -735,6 +751,31 @@ Tests **do not** cover:
 
 ### Recent Updates (February 2026)
 
+**✅ Added Vision Embedding Checkpoint Support**
+
+Added support for multimodal models that require separate vision embedding checkpoints in the YAML generation.
+
+**Features Added:**
+- New `generateVisionEmbeddingCheckpointName()` function to generate vision embedding checkpoint names
+- Extended `CheckpointMapping` type to include optional `vision_embedding_checkpoint` field
+- Automatic generation of vision embedding checkpoint entries in Bundle YAML
+- Addition of `vision_embedding_checkpoint` field in Bundle models section when present
+
+**Tests Added (6 new tests, 28 total):**
+- 4 tests for `generateVisionEmbeddingCheckpointName()` function (naming conventions)
+- 2 integration tests for Bundle YAML generation with vision embedding checkpoints
+
+**Files Modified:**
+- [bundle-yaml-generator.ts](../bundle-yaml-generator.ts) - Core logic implementation
+- [bundle.ts](../../types/bundle.ts) - Type definitions
+- [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts) - Test coverage
+- [mock-data.ts](mock-data.ts) - Test data
+- [TESTS.md](TESTS.md) - Documentation
+
+**Result:** ✅ All 67 tests pass with vision embedding checkpoint support
+
+---
+
 **✅ Fixed React `act()` Warnings in Bundle Deployment Tests**
 
 The bundle deployment integration test was causing React warnings about state updates not being wrapped in `act()`. This has been resolved:
@@ -774,11 +815,11 @@ The bundle deployment integration test was causing React warnings about state up
 - **Bundle Builder:** 6 tests → 1 test (API integration only)
 - **Bundle Deployment:** 6 UI tests → 1 test (combined fetches)
 
-### Tests Kept (61 tests, 100% of critical logic)
+### Tests Kept (67 tests, 100% of critical logic)
 
 - ✅ All model availability logic tests (9)
 - ✅ All deployment status calculation tests (6)
-- ✅ All YAML generation business logic (22 - updated for simplified format)
+- ✅ All YAML generation business logic (28 - includes vision embedding support)
 - ✅ All PEF configuration parsing (24)
 - ✅ All API integration tests (4)
 
@@ -788,7 +829,7 @@ The bundle deployment integration test was causing React warnings about state up
 
 ## Benefits of This Approach
 
-**✅ Faster test runs:** 43% fewer tests = ~40% faster execution (~3.5s for 61 tests)
+**✅ Faster test runs:** 43% fewer tests = ~40% faster execution (~4s for 67 tests)
 **✅ Easier refactoring:** UI changes don't break tests
 **✅ Less maintenance:** No more updating 20 tests for a UI tweak
 **✅ Better focus:** Every test catches real bugs

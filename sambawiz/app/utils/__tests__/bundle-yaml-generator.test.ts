@@ -1,4 +1,4 @@
-import { generateBundleYaml, generateCheckpointName } from '../bundle-yaml-generator';
+import { generateBundleYaml, generateCheckpointName, generateVisionEmbeddingCheckpointName } from '../bundle-yaml-generator';
 import { mockCheckpointMapping, mockPefConfigs } from './mock-data';
 import type { ConfigSelection } from '../../types/bundle';
 
@@ -32,6 +32,28 @@ describe('bundle-yaml-generator', () => {
     it('should remove leading and trailing underscores', () => {
       const result = generateCheckpointName('-model-name-');
       expect(result).toBe('MODEL_NAME_CKPT');
+    });
+  });
+
+  describe('generateVisionEmbeddingCheckpointName', () => {
+    it('should generate vision embedding checkpoint name and remove -Instruct suffix', () => {
+      const result = generateVisionEmbeddingCheckpointName('Llama-4-Maverick-17B-128E-Instruct');
+      expect(result).toBe('LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT');
+    });
+
+    it('should remove _INSTRUCT suffix for models ending with _instruct', () => {
+      const result = generateVisionEmbeddingCheckpointName('Model_Name_Instruct');
+      expect(result).toBe('MODEL_NAME_VISION_EMBD_CKPT');
+    });
+
+    it('should handle model names without instruct suffix', () => {
+      const result = generateVisionEmbeddingCheckpointName('Custom-Model');
+      expect(result).toBe('CUSTOM_MODEL_VISION_EMBD_CKPT');
+    });
+
+    it('should remove -instruct suffix after transformation', () => {
+      const result = generateVisionEmbeddingCheckpointName('my-model.v1-instruct');
+      expect(result).toBe('MY_MODEL_V1_VISION_EMBD_CKPT');
     });
   });
 
@@ -425,6 +447,63 @@ describe('bundle-yaml-generator', () => {
       // Both PEFs should appear in the YAML (they'll be under the same 1024 SS group)
       expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024');
       expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024');
+    });
+
+    it('should include vision embedding checkpoint when present in checkpoint mapping', () => {
+      const configs: ConfigSelection[] = [
+        {
+          modelName: 'Llama-4-Maverick-17B-128E-Instruct',
+          ss: '8k',
+          bs: '1',
+          pefName: 'llama-4-maverick-ss8192-bs1',
+        },
+      ];
+
+      const yaml = generateBundleYaml(
+        configs,
+        mockCheckpointMapping,
+        mockPefConfigs,
+        'test-bundle',
+        'gs://my-bucket/'
+      );
+
+      // Should include the main checkpoint
+      expect(yaml).toContain('LLAMA_4_MAVERICK_17B_128E_INSTRUCT_CKPT:');
+      expect(yaml).toContain('source: gs://my-bucket//checkpoints/llama-4-maverick');
+
+      // Should include the vision embedding checkpoint (without _INSTRUCT suffix)
+      expect(yaml).toContain('LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT:');
+      expect(yaml).toContain('source: gs://my-bucket//checkpoints/llama-4-maverick-vision');
+
+      // Should include vision_embedding_checkpoint reference in the model
+      expect(yaml).toContain('Llama-4-Maverick-17B-128E-Instruct:');
+      expect(yaml).toContain('checkpoint: LLAMA_4_MAVERICK_17B_128E_INSTRUCT_CKPT');
+      expect(yaml).toContain('vision_embedding_checkpoint: LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT');
+    });
+
+    it('should not include vision embedding checkpoint when not present in checkpoint mapping', () => {
+      const configs: ConfigSelection[] = [
+        {
+          modelName: 'Meta-Llama-3.1-8B-Instruct',
+          ss: '1024',
+          bs: '1',
+          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+        },
+      ];
+
+      const yaml = generateBundleYaml(
+        configs,
+        mockCheckpointMapping,
+        mockPefConfigs,
+        'test-bundle'
+      );
+
+      // Should include the main checkpoint
+      expect(yaml).toContain('META_LLAMA_3_1_8B_INSTRUCT_CKPT:');
+
+      // Should NOT include vision embedding checkpoint
+      expect(yaml).not.toContain('VISION_EMBD_CKPT');
+      expect(yaml).not.toContain('vision_embedding_checkpoint:');
     });
   });
 });
