@@ -399,7 +399,8 @@ export default function Playground() {
     const lowerContent = errorContent.toLowerCase();
     return lowerContent.includes('unauthorized') ||
            lowerContent.includes('invalid api key') ||
-           lowerContent.includes('401');
+           lowerContent.includes('401') ||
+           lowerContent.includes('api key not found in app-config.json');
   };
 
   // Parse error message to separate header and body

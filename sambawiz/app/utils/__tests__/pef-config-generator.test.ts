@@ -62,7 +62,12 @@ describe('pef-config-generator', () => {
     jest.clearAllMocks();
     // Mock existsSync to return true for all file checks (app-config.json and kubeconfig files)
     (existsSync as jest.Mock).mockImplementation(() => true);
-    (readFileSync as jest.Mock).mockReturnValue(JSON.stringify(mockAppConfig));
+    (readFileSync as jest.Mock).mockImplementation((filePath: string) => {
+      if (String(filePath).includes('pef_mapping.json')) {
+        return JSON.stringify({});
+      }
+      return JSON.stringify(mockAppConfig);
+    });
     (execSync as jest.Mock).mockReturnValue(JSON.stringify(mockKubectlOutput));
     // Reset writeFileSync to default mock (no-op)
     (writeFileSync as jest.Mock).mockImplementation(() => undefined);
@@ -258,6 +263,96 @@ describe('pef-config-generator', () => {
       }
     });
 
+    it('should handle DYT PEFs by generating an array of configs from dynamic_dims', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      const individualPefOutput = {
+        metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+        spec: {
+          metadata: {
+            dynamic_dims: {
+              batch_size: { values: [2, 4, 6, 8] },
+              decode_seq: { max: 131072 },
+            },
+          },
+          versions: { '1': {} },
+        },
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(individualPefOutput);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.count).toBe(1);
+      }
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      expect(writtenData['gpt-oss-fp8-ss131072-bs8-dyt-1']).toEqual([
+        { ss: '128k', bs: '2', latestVersion: '1' },
+        { ss: '128k', bs: '4', latestVersion: '1' },
+        { ss: '128k', bs: '6', latestVersion: '1' },
+        { ss: '128k', bs: '8', latestVersion: '1' },
+      ]);
+    });
+
+    it('should skip DYT PEFs missing dynamic_dims data', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'model-dyt-broken' },
+            spec: { versions: { '1': {} } },
+          },
+          {
+            metadata: { name: 'model-ss1024-bs1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      const brokenDytOutput = {
+        metadata: { name: 'model-dyt-broken' },
+        spec: {
+          versions: { '1': {} },
+          // no metadata.dynamic_dims
+        },
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(brokenDytOutput);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      // DYT PEF without dynamic_dims should be skipped
+      expect(writtenData['model-dyt-broken']).toBeUndefined();
+      // Normal PEF should still be processed
+      expect(writtenData['model-ss1024-bs1']).toBeDefined();
+    });
+
     it('should handle kubectl command failure', async () => {
       (execSync as jest.Mock).mockImplementation(() => {
         throw new Error('kubectl command failed');
@@ -380,6 +475,70 @@ describe('pef-config-generator', () => {
         bs: '8',
         latestVersion: '1',
       });
+    });
+
+    it('should remove non-DYT PEFs for a model when a DYT PEF is present', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+            spec: { versions: { '1': {} } },
+          },
+          {
+            metadata: { name: 'gpt-oss-fp8-ss4096-bs1' },
+            spec: { versions: { '1': {} } },
+          },
+          {
+            metadata: { name: 'unrelated-model-ss4096-bs1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      const individualPefOutput = {
+        metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+        spec: {
+          metadata: {
+            dynamic_dims: {
+              batch_size: { values: [2, 4] },
+              decode_seq: { max: 131072 },
+            },
+          },
+          versions: { '1': {} },
+        },
+      };
+
+      const pefMapping = {
+        'some-model': ['gpt-oss-fp8-ss131072-bs8-dyt-1', 'gpt-oss-fp8-ss4096-bs1'],
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(individualPefOutput);
+      });
+
+      (readFileSync as jest.Mock).mockImplementation((filePath: string) => {
+        if (String(filePath).includes('pef_mapping.json')) {
+          return JSON.stringify(pefMapping);
+        }
+        return JSON.stringify(mockAppConfig);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      // DYT PEF should be present
+      expect(writtenData['gpt-oss-fp8-ss131072-bs8-dyt-1']).toBeDefined();
+      // Non-DYT PEF for the same model should be removed
+      expect(writtenData['gpt-oss-fp8-ss4096-bs1']).toBeUndefined();
+      // Unrelated model PEF should still be present
+      expect(writtenData['unrelated-model-ss4096-bs1']).toBeDefined();
     });
 
     it('should handle version numbers as strings', async () => {

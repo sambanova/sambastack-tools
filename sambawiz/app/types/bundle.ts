@@ -5,7 +5,7 @@ export interface PefConfig {
 }
 
 export interface PefConfigs {
-  [pefName: string]: PefConfig;
+  [pefName: string]: PefConfig | PefConfig[];
 }
 
 export interface PefMapping {

@@ -23,7 +23,7 @@ interface PefConfig {
 }
 
 interface PefConfigs {
-  [key: string]: PefConfig;
+  [key: string]: PefConfig | PefConfig[];
 }
 
 interface KubectlPefItem {
@@ -31,6 +31,16 @@ interface KubectlPefItem {
     name?: string;
   };
   spec?: {
+    metadata?: {
+      dynamic_dims?: {
+        batch_size?: {
+          values?: number[];
+        };
+        decode_seq?: {
+          max?: number;
+        };
+      };
+    };
     versions?: Record<string, unknown>;
   };
 }
@@ -159,23 +169,70 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
         continue;
       }
 
-      const parsed = parsePefName(pefName);
+      const versions = item.spec?.versions;
+      const latestVersion = getLatestVersionFromVersions(versions);
 
-      if (parsed) {
-        // Extract versions from spec.versions
-        const versions = item.spec?.versions;
-        const latestVersion = getLatestVersionFromVersions(versions);
+      // DYT PEFs have dynamic batch sizes and SS derived from dynamic_dims
+      const isDyt = pefName.includes('dyt');
 
-        configs[pefName] = {
-          ss: formatSsValue(parsed.ss),
-          bs: parsed.bs.toString(),
-          latestVersion,
-        };
-        processedCount++;
+      if (isDyt) {
+        // For DYT PEFs, fetch individual PEF details since list output may not include dynamic_dims
+        try {
+          const individualOutput = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
+            encoding: 'utf-8',
+            env: { ...process.env, KUBECONFIG: kubeconfigPath },
+          });
+          const individualPef: KubectlPefItem = JSON.parse(individualOutput);
+          const dynamicDims = individualPef.spec?.metadata?.dynamic_dims;
+          const batchSizeValues = dynamicDims?.batch_size?.values;
+          const ssMax = dynamicDims?.decode_seq?.max;
+          const dytLatestVersion = getLatestVersionFromVersions(individualPef.spec?.versions);
+
+          if (batchSizeValues && batchSizeValues.length > 0 && ssMax !== undefined) {
+            const ssFormatted = formatSsValue(ssMax);
+            configs[pefName] = batchSizeValues.map((bs) => ({
+              ss: ssFormatted,
+              bs: bs.toString(),
+              latestVersion: dytLatestVersion,
+            }));
+            processedCount++;
+          } else {
+            console.warn(`[PEF Generator] DYT PEF ${pefName} missing dynamic_dims data, skipping`);
+          }
+        } catch (err) {
+          console.warn(`[PEF Generator] Failed to get details for DYT PEF ${pefName}:`, err);
+        }
+      } else {
+        const parsed = parsePefName(pefName);
+
+        if (parsed) {
+          configs[pefName] = {
+            ss: formatSsValue(parsed.ss),
+            bs: parsed.bs.toString(),
+            latestVersion,
+          };
+          processedCount++;
+        }
       }
     }
 
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
+
+    // If a model has a DYT PEF, remove all non-DYT PEFs for that model
+    const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
+    if (existsSync(pefMappingPath)) {
+      const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
+      for (const pefNames of Object.values(pefMapping)) {
+        const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
+        if (hasDyt) {
+          for (const pefName of pefNames) {
+            if (!pefName.includes('dyt')) {
+              delete configs[pefName];
+            }
+          }
+        }
+      }
+    }
 
     // Write to file
     const outputPath = path.join(process.cwd(), 'app', 'data', 'pef_configs.json');

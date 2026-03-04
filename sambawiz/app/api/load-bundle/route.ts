@@ -18,6 +18,11 @@ interface YamlBundleTemplate {
           [contextLength: string]: {
             configs: Array<{
               pef: string;
+              dynamic_dims?: {
+                batch_size?: {
+                  values?: number[];
+                };
+              };
               spec_decoding?: {
                 draft_model: string;
               };
@@ -136,21 +141,31 @@ export async function GET(request: NextRequest) {
 
           const pefName = pefMatch[1];
 
-          // Look up the PEF in pef_configs.json to get ss and bs
-          const pefConfig = pefConfigs[pefName];
-          if (!pefConfig) {
-            return NextResponse.json({
-              success: false,
-              error: `PEF "${pefName}" not found in pef_configs.json`
-            }, { status: 400 });
+          // Check if this is a DYT config (has dynamic_dims with batch size values)
+          const dytBatchSizes = config.dynamic_dims?.batch_size?.values;
+          if (Array.isArray(dytBatchSizes) && dytBatchSizes.length > 0) {
+            // DYT: create one ConfigSelection per batch size; ss comes from expert key
+            for (const bs of dytBatchSizes) {
+              selectedConfigs.push({ modelName, ss: contextLength, bs: bs.toString(), pefName });
+            }
+          } else {
+            // Non-DYT: look up ss and bs from pef_configs.json
+            const pefConfig = pefConfigs[pefName];
+            if (!pefConfig) {
+              return NextResponse.json({
+                success: false,
+                error: `PEF "${pefName}" not found in pef_configs.json`
+              }, { status: 400 });
+            }
+            const pefEntry = Array.isArray(pefConfig) ? pefConfig[0] : pefConfig;
+            if (!pefEntry) {
+              return NextResponse.json({
+                success: false,
+                error: `PEF "${pefName}" has no entries in pef_configs.json`
+              }, { status: 400 });
+            }
+            selectedConfigs.push({ modelName, ss: pefEntry.ss, bs: pefEntry.bs, pefName });
           }
-
-          selectedConfigs.push({
-            modelName,
-            ss: pefConfig.ss,
-            bs: pefConfig.bs,
-            pefName
-          });
 
           // Determine draft model for this config: per-config overrides default
           const configDraftModel = config.spec_decoding?.draft_model || defaultDraftModel;
