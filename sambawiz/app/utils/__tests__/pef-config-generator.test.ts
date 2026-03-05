@@ -107,6 +107,21 @@ describe('pef-config-generator', () => {
       expect(result).toHaveProperty('error');
     });
 
+    it('should return error with specific message when pef_mapping.json does not exist', async () => {
+      (existsSync as jest.Mock).mockImplementation((filePath: string) => {
+        return !String(filePath).includes('pef_mapping.json');
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBe(
+          'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.'
+        );
+      }
+    });
+
     it('should call kubectl with correct parameters', async () => {
       await generatePefConfigs();
 
@@ -263,7 +278,65 @@ describe('pef-config-generator', () => {
       }
     });
 
-    it('should handle DYT PEFs by generating an array of configs from dynamic_dims', async () => {
+    it('should handle DYT PEFs by generating a cartesian product of selected SS x BS values', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      const individualPefOutput = {
+        metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
+        spec: {
+          metadata: {
+            dynamic_dims: {
+              batch_size: { values: [2, 4, 6, 8] },
+              decode_seq: { min: 8192, max: 131072, step: 4096 },
+            },
+          },
+          versions: { '1': {} },
+        },
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(individualPefOutput);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.count).toBe(1);
+      }
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      // selected_ss = [128k, 64k, 32k] (halving from max, filtered >= 32k)
+      // cartesian product with bs=[2,4,6,8] => 3*4=12 items
+      expect(writtenData['gpt-oss-fp8-ss131072-bs8-dyt-1']).toEqual([
+        { ss: '128k', bs: '2', latestVersion: '1' },
+        { ss: '128k', bs: '4', latestVersion: '1' },
+        { ss: '128k', bs: '6', latestVersion: '1' },
+        { ss: '128k', bs: '8', latestVersion: '1' },
+        { ss: '64k', bs: '2', latestVersion: '1' },
+        { ss: '64k', bs: '4', latestVersion: '1' },
+        { ss: '64k', bs: '6', latestVersion: '1' },
+        { ss: '64k', bs: '8', latestVersion: '1' },
+        { ss: '32k', bs: '2', latestVersion: '1' },
+        { ss: '32k', bs: '4', latestVersion: '1' },
+        { ss: '32k', bs: '6', latestVersion: '1' },
+        { ss: '32k', bs: '8', latestVersion: '1' },
+      ]);
+    });
+
+    it('should fall back to single SS (max) for DYT PEFs without min/step in decode_seq', async () => {
       const listOutput = {
         items: [
           {
@@ -296,9 +369,6 @@ describe('pef-config-generator', () => {
       const result = await generatePefConfigs();
 
       expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.count).toBe(1);
-      }
 
       const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
       const writtenData = JSON.parse(writeCall[1]);
@@ -309,6 +379,52 @@ describe('pef-config-generator', () => {
         { ss: '128k', bs: '6', latestVersion: '1' },
         { ss: '128k', bs: '8', latestVersion: '1' },
       ]);
+    });
+
+    it('should skip DYT PEF when all SS values are filtered out (all below 32k)', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'small-model-dyt-1' },
+            spec: { versions: { '1': {} } },
+          },
+          {
+            metadata: { name: 'model-ss1024-bs1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      // max=16384 (16k): halving gives [16k, 8k, 4k, ...], all < 32k — no valid SS
+      const individualPefOutput = {
+        metadata: { name: 'small-model-dyt-1' },
+        spec: {
+          metadata: {
+            dynamic_dims: {
+              batch_size: { values: [1, 2] },
+              decode_seq: { min: 4096, max: 16384, step: 4096 },
+            },
+          },
+          versions: { '1': {} },
+        },
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(individualPefOutput);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      expect(writtenData['small-model-dyt-1']).toBeUndefined();
+      expect(writtenData['model-ss1024-bs1']).toBeDefined();
     });
 
     it('should skip DYT PEFs missing dynamic_dims data', async () => {
@@ -501,7 +617,7 @@ describe('pef-config-generator', () => {
           metadata: {
             dynamic_dims: {
               batch_size: { values: [2, 4] },
-              decode_seq: { max: 131072 },
+              decode_seq: { min: 8192, max: 131072, step: 4096 },
             },
           },
           versions: { '1': {} },

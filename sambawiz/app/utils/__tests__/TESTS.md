@@ -2,8 +2,8 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** February 2026 - Added vision embedding checkpoint support
-**Total Tests:** 67 automated + comprehensive manual test plan
+**Last Updated:** March 2026 - Added pef_mapping.json validation test; pef-config-generator now has 26 actual tests (was 22)
+**Total Tests:** 73 automated + comprehensive manual test plan
 **Test Status:** ✅ All tests passing with clean console output
 **Focus:** Core business logic, API integration, and new feature validation
 
@@ -188,10 +188,10 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 
 | Test | Description |
 |------|-------------|
-| should generate vision embedding checkpoint name for model without _instruct suffix | Basic conversion for models with hyphen-based naming (e.g., "Llama-4-Maverick-17B-128E-Instruct" → "LLAMA_4_MAVERICK_17B_128E_INSTRUCT_VISION_EMBD_CKPT") |
+| should generate vision embedding checkpoint name and remove -Instruct suffix | Removes the `-Instruct` suffix (hyphen-based) before appending `_VISION_EMBD_CKPT` (e.g., "Llama-4-Maverick-17B-128E-Instruct" → "LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT") |
 | should remove _INSTRUCT suffix for models ending with _instruct | Models with underscore-based "_instruct" suffix have it removed before appending (e.g., "Model_Name_Instruct" → "MODEL_NAME_VISION_EMBD_CKPT") |
 | should handle model names without instruct suffix | Models without instruct suffix get vision embedding checkpoint name directly (e.g., "Custom-Model" → "CUSTOM_MODEL_VISION_EMBD_CKPT") |
-| should replace hyphens and special characters | Character normalization for complex model names (e.g., "my-model.v1-instruct" → "MY_MODEL_V1_INSTRUCT_VISION_EMBD_CKPT") |
+| should remove -instruct suffix after transformation | After character normalization, lowercase "-instruct" is also stripped (e.g., "my-model.v1-instruct" → "MY_MODEL_V1_VISION_EMBD_CKPT") |
 
 #### generateBundleYaml Function (20 tests)
 
@@ -255,18 +255,19 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 
 **File:** [pef-config-generator.test.ts](pef-config-generator.test.ts)
 **Function:** `generatePefConfigs`
-**Test Count:** 24 (reduced from 29)
+**Test Count:** 26
 **Type:** Kubernetes Integration Tests
 
 These tests verify fetching PEF configurations from a Kubernetes cluster via kubectl and generating the pef_configs.json file.
 
-#### Configuration Validation (3 tests)
+#### Configuration Validation (4 tests)
 
 | Test | Description |
 |------|-------------|
 | should return error when app-config.json does not exist | Validates when config file is missing |
 | should return error when no active environment is configured | Validates when currentKubeconfig is empty |
 | should return error when kubeconfig file does not exist | Validates when kubeconfig file is missing |
+| should return error with specific message when pef_mapping.json does not exist | Validates that a clear, actionable error is returned when `pef_mapping.json` is missing from `app/data/` |
 
 #### Kubernetes Integration (3 tests)
 
@@ -294,6 +295,16 @@ These tests verify fetching PEF configurations from a Kubernetes cluster via kub
 | should handle PEFs without versions | Fallback to version "1" when no versions exist |
 | should handle version numbers as strings | Parsing string version numbers and finding max |
 | should skip PEFs with invalid names | PEFs without ss/bs patterns are excluded |
+
+#### DYT PEF Handling (5 tests)
+
+| Test | Description |
+|------|-------------|
+| should handle DYT PEFs by generating a cartesian product of selected SS x BS values | Reads `decode_seq.min/max/step` to build valid SS set, selects by halving from max (filtered ≥ 32k), then produces cartesian product with `batch_size.values`. E.g. min=8192, max=131072, step=4096 + bs=[2,4,6,8] → 12 configs with SS=[128k,64k,32k] |
+| should fall back to single SS (max) for DYT PEFs without min/step in decode_seq | When `decode_seq` only has `max` (no min/step), falls back to a single SS value equal to max, producing one config per BS value |
+| should skip DYT PEF when all SS values are filtered out (all below 32k) | When halving from max yields no values ≥ 32k, the PEF is skipped entirely (not written to pef_configs.json) |
+| should skip DYT PEFs missing dynamic_dims data | DYT PEFs without `dynamic_dims` in the individual kubectl response are excluded |
+| should remove non-DYT PEFs for a model when a DYT PEF is present | When `pef_mapping.json` maps a model to both DYT and non-DYT PEFs and the DYT PEF is available, all non-DYT PEFs for that model are removed from the output |
 
 #### Error Handling & Edge Cases (4 tests)
 
@@ -621,11 +632,11 @@ jest.useFakeTimers(); // Restore for other tests
 
 | Category | Test Count | Notes |
 |----------|-----------|-------|
-| **Automated Unit Tests** | **67** | Business logic and API integration |
+| **Automated Unit Tests** | **73** | Business logic and API integration |
 | **Manual Integration Tests** | **27** | Release 1.1.2 features |
 | **UI Components (Automated)** | **4** | Only API integration tests |
-| **Core Utilities (Automated)** | **63** | Business logic and data processing |
-| **Total Coverage** | **94 tests** | Comprehensive automated + manual testing |
+| **Core Utilities (Automated)** | **69** | Business logic and data processing |
+| **Total Coverage** | **100 tests** | Comprehensive automated + manual testing |
 
 ### Automated Test Breakdown by File
 
@@ -637,8 +648,8 @@ jest.useFakeTimers(); // Restore for other tests
 | bundle-deployment.test.tsx | 7 | Status logic (6) + API integration (1) - ✅ React act() warnings fixed |
 | model-availability.test.ts | 9 | Model filtering logic |
 | bundle-yaml-generator.test.ts | 28 | YAML generation + vision embedding checkpoint support |
-| pef-config-generator.test.ts | 24 | Kubernetes integration |
-| **Total** | **67** | **All automated tests** |
+| pef-config-generator.test.ts | 26 | Kubernetes integration + DYT SS selection logic + pef_mapping validation |
+| **Total** | **73** | **All automated tests** |
 
 ### Manual Integration Test Breakdown
 
@@ -749,6 +760,51 @@ Tests **do not** cover:
 
 ## What Changed
 
+### Recent Updates (March 2026)
+
+**✅ Added pef_mapping.json Validation Test + Corrected pef-config-generator Count**
+
+Added a new Configuration Validation test that checks for the presence of `pef_mapping.json` in `app/data/`. This also corrects a discrepancy where TESTS.md documented 26 pef-config-generator tests but only 22 existed; the 4 missing tests are now implemented.
+
+**New Test:**
+- `should return error with specific message when pef_mapping.json does not exist` — validates that a clear, actionable error message is returned when the pef mapping file is absent
+
+**Files Modified:**
+- [pef-config-generator.test.ts](pef-config-generator.test.ts) - New validation test added
+- [TESTS.md](TESTS.md) - Documentation corrected (69 → 73 total)
+
+**Result:** ✅ All 73 tests pass
+
+---
+
+**✅ DYT PEF SS Selection Logic (Cartesian Product of SS × BS)**
+
+Extended DYT PEF processing to generate multiple SS values from `decode_seq.min/max/step` instead of using only `max`.
+
+**Algorithm:**
+1. Build valid SS set: `range(min, max, step)` (inclusive)
+2. Select SS by halving from `max` downward, keeping only values in the valid set, until below `min`
+3. Discard SS values < 32k (32768)
+4. Produce `pef_configs` entry as cartesian product of `selected_ss × batch_size.values`
+
+**Example:** `decode_seq={min:8192, max:131072, step:4096}` + `batch_size.values=[2,4,6,8]` → `selected_ss=[128k,64k,32k]` → 12 config entries
+
+**Backward compatibility:** Falls back to single SS (`max`) when `min`/`step` are absent in `decode_seq`.
+
+**Tests Added (2 new tests, 1 updated, 26 total):**
+- Updated cartesian product test: full `min/max/step` → 12-item array
+- New fallback test: only `max` present → 4-item array (one per BS value)
+- New filter test: all SS values below 32k → PEF skipped entirely
+
+**Files Modified:**
+- [pef-config-generator.ts](../pef-config-generator.ts) - `selectDytSsValues()` function + updated DYT block
+- [pef-config-generator.test.ts](pef-config-generator.test.ts) - Updated + new tests
+- [TESTS.md](TESTS.md) - Documentation
+
+**Result:** ✅ All 73 tests pass
+
+---
+
 ### Recent Updates (February 2026)
 
 **✅ Added Vision Embedding Checkpoint Support**
@@ -772,7 +828,7 @@ Added support for multimodal models that require separate vision embedding check
 - [mock-data.ts](mock-data.ts) - Test data
 - [TESTS.md](TESTS.md) - Documentation
 
-**Result:** ✅ All 67 tests pass with vision embedding checkpoint support
+**Result:** ✅ All 73 tests pass with vision embedding checkpoint support
 
 ---
 
@@ -787,7 +843,7 @@ The bundle deployment integration test was causing React warnings about state up
 - Added explicit `waitFor` with 3s timeout to ensure all async operations complete
 - Restored fake timers after test completion to avoid affecting other tests
 
-**Result:** ✅ All 61 tests pass with clean console output (no warnings)
+**Result:** ✅ All tests pass with clean console output (no warnings)
 
 **Files Modified:**
 - [bundle-deployment.test.tsx](bundle-deployment.test.tsx:70-105) - Test implementation
@@ -815,12 +871,12 @@ The bundle deployment integration test was causing React warnings about state up
 - **Bundle Builder:** 6 tests → 1 test (API integration only)
 - **Bundle Deployment:** 6 UI tests → 1 test (combined fetches)
 
-### Tests Kept (67 tests, 100% of critical logic)
+### Tests Kept (73 tests, 100% of critical logic)
 
 - ✅ All model availability logic tests (9)
 - ✅ All deployment status calculation tests (6)
 - ✅ All YAML generation business logic (28 - includes vision embedding support)
-- ✅ All PEF configuration parsing (24)
+- ✅ All PEF configuration parsing (26)
 - ✅ All API integration tests (4)
 
 **Note:** The test count includes all business-critical tests that verify core functionality and prevent regressions.
@@ -829,7 +885,7 @@ The bundle deployment integration test was causing React warnings about state up
 
 ## Benefits of This Approach
 
-**✅ Faster test runs:** 43% fewer tests = ~40% faster execution (~4s for 67 tests)
+**✅ Faster test runs:** Focused tests = fast execution (~3s for 73 tests)
 **✅ Easier refactoring:** UI changes don't break tests
 **✅ Less maintenance:** No more updating 20 tests for a UI tweak
 **✅ Better focus:** Every test catches real bugs

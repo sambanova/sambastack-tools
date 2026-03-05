@@ -38,6 +38,8 @@ interface KubectlPefItem {
         };
         decode_seq?: {
           max?: number;
+          min?: number;
+          step?: number;
         };
       };
     };
@@ -106,6 +108,29 @@ function getLatestVersionFromVersions(versions: Record<string, unknown> | undefi
     console.warn('Warning: Failed to parse versions:', error);
     return '1'; // Default to version 1 on error
   }
+}
+
+/**
+ * Select SS values for a DYT PEF using the halving strategy.
+ * Starts from max, halves until below min, keeps only values present in
+ * the valid set (range(min, max, step)), then discards values < 32k (32768).
+ */
+function selectDytSsValues(ssMin: number, ssMax: number, ssStep: number): number[] {
+  const validSsSet = new Set<number>();
+  for (let ss = ssMin; ss <= ssMax; ss += ssStep) {
+    validSsSet.add(ss);
+  }
+
+  const selected: number[] = [];
+  let current = ssMax;
+  while (current >= ssMin) {
+    if (validSsSet.has(current)) {
+      selected.push(current);
+    }
+    current = Math.floor(current / 2);
+  }
+
+  return selected.filter((ss) => ss >= 32768);
 }
 
 /**
@@ -186,16 +211,30 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
           const dynamicDims = individualPef.spec?.metadata?.dynamic_dims;
           const batchSizeValues = dynamicDims?.batch_size?.values;
           const ssMax = dynamicDims?.decode_seq?.max;
+          const ssMin = dynamicDims?.decode_seq?.min;
+          const ssStep = dynamicDims?.decode_seq?.step;
           const dytLatestVersion = getLatestVersionFromVersions(individualPef.spec?.versions);
 
           if (batchSizeValues && batchSizeValues.length > 0 && ssMax !== undefined) {
-            const ssFormatted = formatSsValue(ssMax);
-            configs[pefName] = batchSizeValues.map((bs) => ({
-              ss: ssFormatted,
-              bs: bs.toString(),
-              latestVersion: dytLatestVersion,
-            }));
-            processedCount++;
+            let selectedSsValues: number[];
+            if (ssMin !== undefined && ssStep !== undefined) {
+              selectedSsValues = selectDytSsValues(ssMin, ssMax, ssStep);
+            } else {
+              selectedSsValues = [ssMax];
+            }
+
+            if (selectedSsValues.length === 0) {
+              console.warn(`[PEF Generator] DYT PEF ${pefName} has no selected SS values after filtering, skipping`);
+            } else {
+              configs[pefName] = selectedSsValues.flatMap((ss) =>
+                batchSizeValues.map((bs) => ({
+                  ss: formatSsValue(ss),
+                  bs: bs.toString(),
+                  latestVersion: dytLatestVersion,
+                }))
+              );
+              processedCount++;
+            }
           } else {
             console.warn(`[PEF Generator] DYT PEF ${pefName} missing dynamic_dims data, skipping`);
           }
@@ -220,15 +259,19 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
 
     // If a model has a DYT PEF, remove all non-DYT PEFs for that model
     const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
-    if (existsSync(pefMappingPath)) {
-      const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
-      for (const pefNames of Object.values(pefMapping)) {
-        const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
-        if (hasDyt) {
-          for (const pefName of pefNames) {
-            if (!pefName.includes('dyt')) {
-              delete configs[pefName];
-            }
+    if (!existsSync(pefMappingPath)) {
+      return {
+        success: false,
+        error: 'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.',
+      };
+    }
+    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
+    for (const pefNames of Object.values(pefMapping)) {
+      const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
+      if (hasDyt) {
+        for (const pefName of pefNames) {
+          if (!pefName.includes('dyt')) {
+            delete configs[pefName];
           }
         }
       }

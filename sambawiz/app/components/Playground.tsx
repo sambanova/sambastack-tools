@@ -68,6 +68,8 @@ interface Message {
 export default function Playground() {
   const router = useRouter();
 
+  const inputRef = useRef<HTMLInputElement>(null);
+
   // Generate stable IDs for form fields to prevent hydration mismatches
   const inputMessageId = useId();
   const keycloakUsernameId = useId();
@@ -331,6 +333,7 @@ export default function Playground() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsSending(false);
+      inputRef.current?.focus();
     }
   };
 
@@ -950,6 +953,7 @@ export default function Playground() {
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
                   disabled={isSending}
+                  inputRef={inputRef}
                   variant="outlined"
                   size="small"
                   sx={{
