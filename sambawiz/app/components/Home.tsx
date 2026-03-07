@@ -38,6 +38,37 @@ interface KubeconfigEntry {
   enableUpdates?: boolean;
 }
 
+function incrementVersion(version: string): string {
+  const parts = version.split('.');
+  const lastPart = parseInt(parts[parts.length - 1], 10);
+  parts[parts.length - 1] = (lastPart + 1).toString();
+  return parts.join('.');
+}
+
+function compareVersionStrings(a: string, b: string): number {
+  const aParts = a.split('.').map(Number);
+  const bParts = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const diff = (aParts[i] || 0) - (bParts[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function getNextVersion(currentVersion: string | null, minVersion: string | null): string {
+  const fallback = '0.3.576';
+  if (!currentVersion) return fallback;
+
+  const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
+  if (!versionMatch) return fallback;
+
+  const incremented = incrementVersion(versionMatch[1]);
+  if (minVersion && compareVersionStrings(minVersion, incremented) > 0) {
+    return minVersion;
+  }
+  return incremented;
+}
+
 export default function Home() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -237,14 +268,6 @@ export default function Home() {
   useEffect(() => {
     fetchHelmVersion();
   }, [fetchHelmVersion]);
-
-  // Open upgrade dialog if navigated here with ?openUpgrade=true
-  useEffect(() => {
-    if (searchParams.get('openUpgrade') === 'true') {
-      router.replace('/');
-      handleOpenInstallDialog();
-    }
-  }, [searchParams, router]);
 
   // Auto-refresh installer logs every 3 seconds when enabled
   useEffect(() => {
@@ -476,38 +499,7 @@ export default function Home() {
     window.location.reload();
   };
 
-  const incrementVersion = (version: string): string => {
-    const parts = version.split('.');
-    const lastPart = parseInt(parts[parts.length - 1], 10);
-    parts[parts.length - 1] = (lastPart + 1).toString();
-    return parts.join('.');
-  };
-
-  const compareVersionStrings = (a: string, b: string): number => {
-    const aParts = a.split('.').map(Number);
-    const bParts = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-      const diff = (aParts[i] || 0) - (bParts[i] || 0);
-      if (diff !== 0) return diff;
-    }
-    return 0;
-  };
-
-  const getNextVersion = (currentVersion: string | null, minVersion: string | null): string => {
-    const fallback = '0.3.576';
-    if (!currentVersion) return fallback;
-
-    const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
-    if (!versionMatch) return fallback;
-
-    const incremented = incrementVersion(versionMatch[1]);
-    if (minVersion && compareVersionStrings(minVersion, incremented) > 0) {
-      return minVersion;
-    }
-    return incremented;
-  };
-
-  const handleOpenInstallDialog = () => {
+  const handleOpenInstallDialog = useCallback(() => {
     // Calculate the next version: max(current + 1, minimumHelmVersion)
     const nextVersion = getNextVersion(fullHelmVersion, minimumHelmVersion);
 
@@ -527,7 +519,15 @@ data:
     setInstallationComplete(false);
     setYamlModifiedAfterInstall(false); // Reset modification tracking
     setShowInstallDialog(true);
-  };
+  }, [fullHelmVersion, minimumHelmVersion]);
+
+  // Open upgrade dialog if navigated here with ?openUpgrade=true
+  useEffect(() => {
+    if (searchParams.get('openUpgrade') === 'true') {
+      router.replace('/');
+      handleOpenInstallDialog();
+    }
+  }, [searchParams, router, handleOpenInstallDialog]);
 
   const handleCloseInstallDialog = useCallback(() => {
     setShowInstallDialog(false);

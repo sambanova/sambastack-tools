@@ -55,9 +55,8 @@ export default function BundleBuilderPage() {
   // Fetch deployed bundles when dialog opens with that source
   useEffect(() => {
     if (openDialog && bundleSource === 'deployedBundles') {
-      setDeployedBundlesError('');
       fetch('/api/deployed-bundles')
-        .then(res => res.json())
+        .then(res => { setDeployedBundlesError(''); return res.json(); })
         .then(data => {
           if (data.success) {
             setDeployedBundles(data.bundles);
