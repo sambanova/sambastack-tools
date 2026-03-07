@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useId } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Box,
   Typography,
@@ -40,6 +40,7 @@ interface KubeconfigEntry {
 
 export default function Home() {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   // Generate stable IDs for form fields to prevent hydration mismatches
   const namespaceId = useId();
@@ -72,6 +73,8 @@ export default function Home() {
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [fullHelmVersion, setFullHelmVersion] = useState<string | null>(null);
+  const [helmVersionTooOld, setHelmVersionTooOld] = useState<boolean>(false);
+  const [minimumHelmVersion, setMinimumHelmVersion] = useState<string | null>(null);
   const [showInstallDialog, setShowInstallDialog] = useState<boolean>(false);
   const [installYaml, setInstallYaml] = useState<string>('');
   const [installing, setInstalling] = useState<boolean>(false);
@@ -107,16 +110,6 @@ export default function Home() {
             setShowPrerequisiteDialog(true);
             return;
           }
-        }
-
-        // Check helm version after successful prerequisite check
-        const helmVersionResponse = await fetch('/api/kubeconfig-validate');
-        const helmVersionData = await helmVersionResponse.json();
-
-        if (!helmVersionData.success && helmVersionData.helmVersionError) {
-          setPrerequisiteWarning(helmVersionData.errorDetails || 'Helm version check failed');
-          setShowPrerequisiteDialog(true);
-          return;
         }
 
         // Check app-config.json
@@ -223,8 +216,16 @@ export default function Home() {
 
       if (data.success && data.fullVersion) {
         setFullHelmVersion(data.fullVersion);
+        setHelmVersionTooOld(false);
+        setMinimumHelmVersion(null);
+      } else if (data.helmVersionError && data.version) {
+        setFullHelmVersion(data.version);
+        setHelmVersionTooOld(true);
+        setMinimumHelmVersion(data.minimumVersion || null);
       } else {
         setFullHelmVersion(null);
+        setHelmVersionTooOld(false);
+        setMinimumHelmVersion(null);
       }
     } catch (error) {
       console.error('Failed to fetch helm version:', error);
@@ -236,6 +237,14 @@ export default function Home() {
   useEffect(() => {
     fetchHelmVersion();
   }, [fetchHelmVersion]);
+
+  // Open upgrade dialog if navigated here with ?openUpgrade=true
+  useEffect(() => {
+    if (searchParams.get('openUpgrade') === 'true') {
+      router.replace('/');
+      handleOpenInstallDialog();
+    }
+  }, [searchParams, router]);
 
   // Auto-refresh installer logs every 3 seconds when enabled
   useEffect(() => {
@@ -467,30 +476,40 @@ export default function Home() {
     window.location.reload();
   };
 
-  const getNextVersion = (currentVersion: string | null): string => {
-    if (!currentVersion) {
-      return '0.3.576'; // Default fallback
-    }
-
-    // Remove any non-numerical suffix (e.g., "0.3.586-dev" -> "0.3.586")
-    const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
-    if (!versionMatch) {
-      return '0.3.576'; // Fallback if format doesn't match
-    }
-
-    const numericalVersion = versionMatch[1];
-    const parts = numericalVersion.split('.');
-
-    // Increment the last part
+  const incrementVersion = (version: string): string => {
+    const parts = version.split('.');
     const lastPart = parseInt(parts[parts.length - 1], 10);
     parts[parts.length - 1] = (lastPart + 1).toString();
-
     return parts.join('.');
   };
 
+  const compareVersionStrings = (a: string, b: string): number => {
+    const aParts = a.split('.').map(Number);
+    const bParts = b.split('.').map(Number);
+    for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+      const diff = (aParts[i] || 0) - (bParts[i] || 0);
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  };
+
+  const getNextVersion = (currentVersion: string | null, minVersion: string | null): string => {
+    const fallback = '0.3.576';
+    if (!currentVersion) return fallback;
+
+    const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
+    if (!versionMatch) return fallback;
+
+    const incremented = incrementVersion(versionMatch[1]);
+    if (minVersion && compareVersionStrings(minVersion, incremented) > 0) {
+      return minVersion;
+    }
+    return incremented;
+  };
+
   const handleOpenInstallDialog = () => {
-    // Calculate the next version based on current helm version
-    const nextVersion = getNextVersion(fullHelmVersion);
+    // Calculate the next version: max(current + 1, minimumHelmVersion)
+    const nextVersion = getNextVersion(fullHelmVersion, minimumHelmVersion);
 
     // Initialize with YAML containing the next version
     const defaultYaml = `apiVersion: v1
@@ -753,7 +772,7 @@ data:
         </DialogActions>
       </Dialog>
 
-      {/* Install SambaStack Dialog */}
+      {/* Upgrade SambaStack Dialog */}
       <Dialog
         open={showInstallDialog}
         onClose={handleCloseInstallDialog}
@@ -762,7 +781,7 @@ data:
       >
         <DialogTitle>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Install SambaStack</span>
+            <span>Upgrade SambaStack</span>
             <IconButton
               aria-label="close"
               onClick={handleCloseInstallDialog}
@@ -987,9 +1006,9 @@ data:
               fontSize: 'rem',
             }}
           >
-            Current SambaStack Helm Version: <Box component="span" sx={{ fontFamily: 'monospace', color: 'primary.main' }}>{fullHelmVersion}</Box>
+            Current SambaStack Helm Version: <Box component="span" sx={{ fontFamily: 'monospace', color: helmVersionTooOld ? 'error.main' : 'primary.main' }}>{fullHelmVersion}</Box>
           </Typography>
-          {enableUpdates && (
+          {(helmVersionTooOld || enableUpdates) && (
             <Button
               variant="outlined"
               size="small"
@@ -1005,7 +1024,7 @@ data:
                 },
               }}
             >
-              Update
+              Upgrade
             </Button>
           )}
         </Box>

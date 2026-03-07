@@ -12,6 +12,7 @@ import {
   List,
   ListItem,
   ListItemText,
+  Link,
 } from '@mui/material';
 
 interface KubeconfigErrorDialogProps {
@@ -19,6 +20,8 @@ interface KubeconfigErrorDialogProps {
   onClose: () => void;
   helmCommand?: string;
   errorDetails?: string;
+  showUpgradeLink?: boolean;
+  onUpgrade?: () => void;
 }
 
 export default function KubeconfigErrorDialog({
@@ -26,7 +29,28 @@ export default function KubeconfigErrorDialog({
   onClose,
   helmCommand,
   errorDetails,
+  showUpgradeLink,
+  onUpgrade,
 }: KubeconfigErrorDialogProps) {
+  const renderErrorDetails = () => {
+    if (!errorDetails) return null;
+    if (showUpgradeLink && onUpgrade) {
+      const upgradeIndex = errorDetails.indexOf('upgrade');
+      if (upgradeIndex !== -1) {
+        return (
+          <>
+            {errorDetails.slice(0, upgradeIndex)}
+            <Link component="button" onClick={onUpgrade} sx={{ fontWeight: 600, verticalAlign: 'baseline' }}>
+              upgrade
+            </Link>
+            {errorDetails.slice(upgradeIndex + 'upgrade'.length)}
+          </>
+        );
+      }
+    }
+    return errorDetails;
+  };
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>Kubeconfig Validation Error</DialogTitle>
@@ -72,7 +96,7 @@ export default function KubeconfigErrorDialog({
                 wordBreak: 'break-word',
               }}
             >
-              {errorDetails}
+              {renderErrorDetails()}
             </Box>
           </Box>
         )}

@@ -39,6 +39,7 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import HandymanIcon from '@mui/icons-material/Handyman';
 import SaveIcon from '@mui/icons-material/Save';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type { PefConfigs, PefMapping, CheckpointMapping, ConfigSelection } from '../types/bundle';
 import { generateBundleYaml } from '../utils/bundle-yaml-generator';
 import DocumentationPanel from './DocumentationPanel';
@@ -686,9 +687,24 @@ export default function BundleForm() {
       {/* Configuration Selection Tables */}
       {selectedModels.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-            2. Select Configurations
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              2. Select Configurations
+            </Typography>
+            <Tooltip
+              title={
+                <>
+                  A larger sequence size (SS) supports longer context prompts.<br />
+                  A larger batch size (BS) supports high concurrency.<br />
+                  Configurations with larger SS and larger BS occupy more memory and have a higher time to first token.<br />
+                  It is recommended to have a mix of configurations with small and large SS and BS to support lower latency for big and small workloads.
+                </>
+              }
+              arrow
+            >
+              <HelpOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+            </Tooltip>
+          </Box>
           {selectedModels.map((modelName, idx) => (
             <Box key={modelName} sx={{ mb: idx < selectedModels.length - 1 ? 3 : 0 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 0.5 }}>
@@ -716,6 +732,12 @@ export default function BundleForm() {
                           ))}
                       </Select>
                     </FormControl>
+                    <Tooltip
+                      title="The draft model should be much smaller than this target model and should ideally be trained on similar data so it can generate tokens that this target model is more likely to accept."
+                      arrow
+                    >
+                      <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+                    </Tooltip>
                   </Box>
                 </Box>
               )}
@@ -776,9 +798,17 @@ export default function BundleForm() {
       {/* Selected PEFs Display */}
       {selectedConfigs.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-            3. Selected PEFs
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              3. Selected PEFs
+            </Typography>
+            <Tooltip
+              title="SambaNova's AI stack will run the following Processor Executable Format (PEF) files that are referenced by your selected model configurations."
+              arrow
+            >
+              <HelpOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+            </Tooltip>
+          </Box>
           {Object.keys(selectedPefsByModel).map((modelName) => {
             const modelSelectedConfigs = selectedConfigs.filter((c) => c.modelName === modelName);
             const dytPefNames = [...new Set(
