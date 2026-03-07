@@ -68,6 +68,8 @@ interface Message {
 export default function Playground() {
   const router = useRouter();
 
+  const inputRef = useRef<HTMLInputElement>(null);
+
   // Generate stable IDs for form fields to prevent hydration mismatches
   const inputMessageId = useId();
   const keycloakUsernameId = useId();
@@ -331,6 +333,7 @@ export default function Playground() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsSending(false);
+      inputRef.current?.focus();
     }
   };
 
@@ -399,7 +402,8 @@ export default function Playground() {
     const lowerContent = errorContent.toLowerCase();
     return lowerContent.includes('unauthorized') ||
            lowerContent.includes('invalid api key') ||
-           lowerContent.includes('401');
+           lowerContent.includes('401') ||
+           lowerContent.includes('api key not found in app-config.json');
   };
 
   // Parse error message to separate header and body
@@ -949,6 +953,7 @@ export default function Playground() {
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
                   disabled={isSending}
+                  inputRef={inputRef}
                   variant="outlined"
                   size="small"
                   sx={{

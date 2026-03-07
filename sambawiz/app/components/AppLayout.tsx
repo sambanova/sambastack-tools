@@ -391,6 +391,11 @@ export default function AppLayout({ children }: AppLayoutProps) {
         onClose={() => setShowErrorDialog(false)}
         helmCommand={helmCommand}
         errorDetails={errorDetails}
+        showUpgradeLink={helmVersionError}
+        onUpgrade={() => {
+          setShowErrorDialog(false);
+          router.push('/?openUpgrade=true');
+        }}
       />
       <Box sx={{ display: 'flex', minHeight: '100vh', backgroundColor: 'background.default' }}>
         <Drawer

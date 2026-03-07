@@ -66,7 +66,8 @@
     "gpt-oss-fp8-ss131072-bs2",
     "gpt-oss-fp8-ss32768-bs2",
     "gpt-oss-fp8-ss65536-bs2",
-    "gpt-oss-fp8-ss8192-bs2"
+    "gpt-oss-fp8-ss8192-bs2",
+    "gpt-oss-fp8-ss131072-bs8-dyt-1"
   ],
   "Llama-3.3-Swallow-70B-Instruct-v0.4": [
     "llama-3p1-70b-ss131072-bs1-sd5",
@@ -180,8 +181,5 @@
     "whisper-ss448-bs1",
     "whisper-ss448-bs16",
     "whisper-ss448-bs32"
-  ],
-  "sarashina2-70b": [
-    "sarashina2-70b-ss4096-bs2"
   ]
 }

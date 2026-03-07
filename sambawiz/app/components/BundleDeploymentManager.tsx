@@ -37,6 +37,8 @@ import SaveIcon from '@mui/icons-material/Save';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import Tooltip from '@mui/material/Tooltip';
 import DocumentationPanel from './DocumentationPanel';
 
 interface BundleDeployment {
@@ -265,7 +267,15 @@ export default function BundleDeploymentManager() {
     }
   }, [searchParams, validBundles]);
 
-  // Auto-refresh pod logs every 3 seconds
+  // Returns next poll delay based on how long the last fetch took:
+  // elapsed < 6s → 6s, elapsed < 12s → 12s, else 24s
+  const adaptiveDelay = (elapsedMs: number) => {
+    if (elapsedMs < 6000) return 6000;
+    if (elapsedMs < 12000) return 12000;
+    return 24000;
+  };
+
+  // Auto-refresh cache pod logs with adaptive back-off
   useEffect(() => {
     if (!monitoredDeployment) {
       setPodLogs('');
@@ -273,13 +283,16 @@ export default function BundleDeploymentManager() {
       return;
     }
 
-    const fetchPodLogs = async () => {
-      const podName = `inf-${monitoredDeployment}-cache-0`;
+    const active = { current: true };
+    let timeoutId: ReturnType<typeof setTimeout>;
 
+    const run = async () => {
+      if (!active.current) return;
+      const podName = `inf-${monitoredDeployment}-cache-0`;
+      const start = Date.now();
       try {
         const response = await fetch(`/api/pod-logs?podName=${podName}&lines=5`);
         const data = await response.json();
-
         if (data.success) {
           setPodLogs(data.logs);
           setPodLogsError(null);
@@ -289,19 +302,19 @@ export default function BundleDeploymentManager() {
       } catch {
         setPodLogsError('Failed to connect to the server');
       }
+      if (active.current) {
+        timeoutId = setTimeout(run, adaptiveDelay(Date.now() - start));
+      }
     };
 
-    // Fetch immediately
-    fetchPodLogs();
-
-    // Set up interval to fetch every 3 seconds
-    const intervalId = setInterval(fetchPodLogs, 3000);
-
-    // Cleanup interval on unmount or when monitoredDeployment changes
-    return () => clearInterval(intervalId);
+    run();
+    return () => {
+      active.current = false;
+      clearTimeout(timeoutId);
+    };
   }, [monitoredDeployment]);
 
-  // Auto-refresh default pod logs every 3 seconds
+  // Auto-refresh default pod logs with adaptive back-off
   useEffect(() => {
     if (!monitoredDeployment) {
       setDefaultPodLogs('');
@@ -309,19 +322,20 @@ export default function BundleDeploymentManager() {
       return;
     }
 
-    const fetchDefaultPodLogs = async () => {
+    const active = { current: true };
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const run = async () => {
+      if (!active.current) return;
       const podName = `inf-${monitoredDeployment}-q-default-n-0`;
       const container = 'inf';
-
+      const start = Date.now();
       try {
         const response = await fetch(`/api/pod-logs?podName=${podName}&lines=5&container=${container}`);
         const data = await response.json();
-
         if (data.success) {
-          // Check if the last word is "PodInitializing"
           const logs = data.logs.trim();
           const lastWord = logs.split(/\s+/).pop();
-
           if (lastWord === 'PodInitializing') {
             setDefaultPodLogs('Pod Initializing... Waiting to show logs');
           } else {
@@ -334,49 +348,50 @@ export default function BundleDeploymentManager() {
       } catch {
         setDefaultPodLogsError('Failed to connect to the server');
       }
+      if (active.current) {
+        timeoutId = setTimeout(run, adaptiveDelay(Date.now() - start));
+      }
     };
 
-    // Fetch immediately
-    fetchDefaultPodLogs();
-
-    // Set up interval to fetch every 3 seconds
-    const intervalId = setInterval(fetchDefaultPodLogs, 3000);
-
-    // Cleanup interval on unmount or when monitoredDeployment changes
-    return () => clearInterval(intervalId);
+    run();
+    return () => {
+      active.current = false;
+      clearTimeout(timeoutId);
+    };
   }, [monitoredDeployment]);
 
-  // Auto-refresh pod status every 3 seconds
+  // Auto-refresh pod status with adaptive back-off
   useEffect(() => {
     if (!monitoredDeployment) {
       setPodStatus({ cachePod: null, defaultPod: null });
       return;
     }
 
-    const fetchPodStatus = async () => {
+    const active = { current: true };
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const run = async () => {
+      if (!active.current) return;
+      const start = Date.now();
       try {
         const response = await fetch(`/api/pod-status?deploymentName=${monitoredDeployment}`);
         const data = await response.json();
-
         if (data.success) {
           setPodStatus(data.podStatus);
-
-          // If both pods are ready, we could optionally stop auto-refresh
-          // For now, we'll keep refreshing but the user can see completion status
         }
       } catch (err) {
         console.error('Failed to fetch pod status:', err);
       }
+      if (active.current) {
+        timeoutId = setTimeout(run, adaptiveDelay(Date.now() - start));
+      }
     };
 
-    // Fetch immediately
-    fetchPodStatus();
-
-    // Set up interval to fetch every 3 seconds
-    const intervalId = setInterval(fetchPodStatus, 3000);
-
-    // Cleanup interval on unmount or when monitoredDeployment changes
-    return () => clearInterval(intervalId);
+    run();
+    return () => {
+      active.current = false;
+      clearTimeout(timeoutId);
+    };
   }, [monitoredDeployment]);
 
   // Fetch bundles
@@ -802,9 +817,17 @@ spec:
         {/* Bundle Selection Form */}
         {!loadingBundles && validBundles.length > 0 && (
           <Box>
-            <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-              Select a valid bundle to deploy
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
+              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                Select a valid bundle to deploy
+              </Typography>
+              <Tooltip
+                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Bundle Builder page and select 'Deployed Bundles' as the source."
+                arrow
+              >
+                <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+              </Tooltip>
+            </Box>
 
             {/* Bundle Dropdown */}
             <FormControl fullWidth sx={{ mb: 3 }}>

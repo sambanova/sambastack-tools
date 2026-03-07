@@ -2,10 +2,16 @@ import type { ConfigSelection, CheckpointMapping, PefConfigs } from '../types/bu
 
 interface ModelExpertConfig {
   pef: string;
+  dynamic_dims?: {
+    batch_size: {
+      values: number[];
+    };
+  };
   spec_decoding?: {
     draft_model: string;
   };
   _hasSpecDecoding?: boolean; // Internal flag for tracking spec_decoding configs
+  _isDyt?: boolean; // Internal flag for DYT PEF configs
 }
 
 interface ModelExperts {
@@ -91,7 +97,27 @@ export function generateBundleYaml(
         experts[config.ss] = { configs: [] };
       }
 
-      const version = pefConfigs[config.pefName]?.latestVersion || '1';
+      const pefConfigValue = pefConfigs[config.pefName];
+      const isDyt = Array.isArray(pefConfigValue);
+      const version = isDyt
+        ? (pefConfigValue.find((e) => e.ss === config.ss && e.bs === config.bs)?.latestVersion || '1')
+        : (pefConfigValue?.latestVersion || '1');
+
+      if (isDyt) {
+        // For DYT PEFs: merge all selected batch sizes for this SS into one config entry
+        const pefRef = `${config.pefName}:${version}`;
+        const existingEntry = experts[config.ss].configs.find(e => e._isDyt && e.pef === pefRef);
+        if (existingEntry?.dynamic_dims) {
+          existingEntry.dynamic_dims.batch_size.values.push(parseInt(config.bs, 10));
+        } else {
+          experts[config.ss].configs.push({
+            pef: pefRef,
+            _isDyt: true,
+            dynamic_dims: { batch_size: { values: [parseInt(config.bs, 10)] } },
+          });
+        }
+        return; // Skip spec_decoding logic for DYT configs
+      }
 
       // Check if this config will have spec_decoding (i.e., is a target model with matching draft config)
       let hasMatchingDraftConfig = false;
@@ -209,6 +235,14 @@ ${Object.entries(model.experts).map(([ss, expert]) => {
   let expertStr = `        ${ss}:
           configs:
 ${expert.configs.map(config => {
+  if (config._isDyt && config.dynamic_dims) {
+    let configStr = `          - dynamic_dims:\n              batch_size:\n                values:`;
+    config.dynamic_dims.batch_size.values.forEach(bs => {
+      configStr += `\n                - ${bs}`;
+    });
+    configStr += `\n            pef: ${config.pef}`;
+    return configStr;
+  }
   let configStr = `          - pef: ${config.pef}`;
   if (config.spec_decoding) {
     configStr += `

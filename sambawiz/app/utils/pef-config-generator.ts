@@ -23,7 +23,7 @@ interface PefConfig {
 }
 
 interface PefConfigs {
-  [key: string]: PefConfig;
+  [key: string]: PefConfig | PefConfig[];
 }
 
 interface KubectlPefItem {
@@ -31,6 +31,18 @@ interface KubectlPefItem {
     name?: string;
   };
   spec?: {
+    metadata?: {
+      dynamic_dims?: {
+        batch_size?: {
+          values?: number[];
+        };
+        decode_seq?: {
+          max?: number;
+          min?: number;
+          step?: number;
+        };
+      };
+    };
     versions?: Record<string, unknown>;
   };
 }
@@ -99,6 +111,29 @@ function getLatestVersionFromVersions(versions: Record<string, unknown> | undefi
 }
 
 /**
+ * Select SS values for a DYT PEF using the halving strategy.
+ * Starts from max, halves until below min, keeps only values present in
+ * the valid set (range(min, max, step)), then discards values < 32k (32768).
+ */
+function selectDytSsValues(ssMin: number, ssMax: number, ssStep: number): number[] {
+  const validSsSet = new Set<number>();
+  for (let ss = ssMin; ss <= ssMax; ss += ssStep) {
+    validSsSet.add(ss);
+  }
+
+  const selected: number[] = [];
+  let current = ssMax;
+  while (current >= ssMin) {
+    if (validSsSet.has(current)) {
+      selected.push(current);
+    }
+    current = Math.floor(current / 2);
+  }
+
+  return selected.filter((ss) => ss >= 32768);
+}
+
+/**
  * Generate PEF configs and write to app/data/pef_configs.json
  * Returns object with success status and PEF count, or null if skipped/failed
  */
@@ -159,23 +194,88 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
         continue;
       }
 
-      const parsed = parsePefName(pefName);
+      const versions = item.spec?.versions;
+      const latestVersion = getLatestVersionFromVersions(versions);
 
-      if (parsed) {
-        // Extract versions from spec.versions
-        const versions = item.spec?.versions;
-        const latestVersion = getLatestVersionFromVersions(versions);
+      // DYT PEFs have dynamic batch sizes and SS derived from dynamic_dims
+      const isDyt = pefName.includes('dyt');
 
-        configs[pefName] = {
-          ss: formatSsValue(parsed.ss),
-          bs: parsed.bs.toString(),
-          latestVersion,
-        };
-        processedCount++;
+      if (isDyt) {
+        // For DYT PEFs, fetch individual PEF details since list output may not include dynamic_dims
+        try {
+          const individualOutput = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
+            encoding: 'utf-8',
+            env: { ...process.env, KUBECONFIG: kubeconfigPath },
+          });
+          const individualPef: KubectlPefItem = JSON.parse(individualOutput);
+          const dynamicDims = individualPef.spec?.metadata?.dynamic_dims;
+          const batchSizeValues = dynamicDims?.batch_size?.values;
+          const ssMax = dynamicDims?.decode_seq?.max;
+          const ssMin = dynamicDims?.decode_seq?.min;
+          const ssStep = dynamicDims?.decode_seq?.step;
+          const dytLatestVersion = getLatestVersionFromVersions(individualPef.spec?.versions);
+
+          if (batchSizeValues && batchSizeValues.length > 0 && ssMax !== undefined) {
+            let selectedSsValues: number[];
+            if (ssMin !== undefined && ssStep !== undefined) {
+              selectedSsValues = selectDytSsValues(ssMin, ssMax, ssStep);
+            } else {
+              selectedSsValues = [ssMax];
+            }
+
+            if (selectedSsValues.length === 0) {
+              console.warn(`[PEF Generator] DYT PEF ${pefName} has no selected SS values after filtering, skipping`);
+            } else {
+              configs[pefName] = selectedSsValues.flatMap((ss) =>
+                batchSizeValues.map((bs) => ({
+                  ss: formatSsValue(ss),
+                  bs: bs.toString(),
+                  latestVersion: dytLatestVersion,
+                }))
+              );
+              processedCount++;
+            }
+          } else {
+            console.warn(`[PEF Generator] DYT PEF ${pefName} missing dynamic_dims data, skipping`);
+          }
+        } catch (err) {
+          console.warn(`[PEF Generator] Failed to get details for DYT PEF ${pefName}:`, err);
+        }
+      } else {
+        const parsed = parsePefName(pefName);
+
+        if (parsed) {
+          configs[pefName] = {
+            ss: formatSsValue(parsed.ss),
+            bs: parsed.bs.toString(),
+            latestVersion,
+          };
+          processedCount++;
+        }
       }
     }
 
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
+
+    // If a model has a DYT PEF, remove all non-DYT PEFs for that model
+    const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
+    if (!existsSync(pefMappingPath)) {
+      return {
+        success: false,
+        error: 'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.',
+      };
+    }
+    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
+    for (const pefNames of Object.values(pefMapping)) {
+      const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
+      if (hasDyt) {
+        for (const pefName of pefNames) {
+          if (!pefName.includes('dyt')) {
+            delete configs[pefName];
+          }
+        }
+      }
+    }
 
     // Write to file
     const outputPath = path.join(process.cwd(), 'app', 'data', 'pef_configs.json');
