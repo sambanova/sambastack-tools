@@ -36,6 +36,7 @@ import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { getBundleDeploymentStatus } from './BundleDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
+import checkpointMapping from '../data/checkpoint_mapping.json';
 
 interface BundleDeployment {
   name: string;
@@ -63,6 +64,7 @@ interface Message {
   timestamp: Date;
   metrics?: Metrics;
   isError?: boolean;
+  embeddingData?: number[];
 }
 
 export default function Playground() {
@@ -96,6 +98,7 @@ export default function Playground() {
   const [isSending, setIsSending] = useState<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedErrorId, setCopiedErrorId] = useState<string | null>(null);
+  const [copiedEmbeddingId, setCopiedEmbeddingId] = useState<string | null>(null);
 
   // View Code dialog state
   const [viewCodeDialogOpen, setViewCodeDialogOpen] = useState<boolean>(false);
@@ -257,6 +260,10 @@ export default function Playground() {
     return status === 'Deployed';
   });
 
+  const isEmbeddingModel = selectedModel
+    ? (checkpointMapping as Record<string, { model_type?: string }>)[selectedModel]?.model_type === 'embedding'
+    : false;
+
   // Handle send message
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || !selectedDeployment || !selectedModel) {
@@ -270,56 +277,75 @@ export default function Playground() {
       timestamp: new Date(),
     };
 
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
+    setMessages((prev) => [...prev, userMessage]);
     setInputMessage('');
     setIsSending(true);
 
     try {
-      // Build conversation history for API
-      const conversationHistory = [
-        {
-          role: 'system',
-          content: 'You are a helpful assistant',
-        },
-        ...updatedMessages.map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        })),
-      ];
+      if (isEmbeddingModel) {
+        // Embeddings: no conversation history, one input at a time
+        const response = await fetch('/api/embeddings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input: inputMessage, model: selectedModel }),
+        });
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          messages: conversationHistory,
-          model: selectedModel,
-        }),
-      });
+        const data = await response.json();
 
-      const data = await response.json();
-
-      if (data.success) {
-        const assistantMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: data.content,
-          timestamp: new Date(),
-          metrics: data.metrics || undefined,
-        };
-        setMessages((prev) => [...prev, assistantMessage]);
+        if (data.success) {
+          const assistantMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: `${data.embedding.length}-dimensional embedding`,
+            timestamp: new Date(),
+            embeddingData: data.embedding,
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+        } else {
+          const errorMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: data.error,
+            timestamp: new Date(),
+            isError: true,
+          };
+          setMessages((prev) => [...prev, errorMessage]);
+        }
       } else {
-        // Show error message as an assistant response
-        const errorMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: data.error,
-          timestamp: new Date(),
-          isError: true,
-        };
-        setMessages((prev) => [...prev, errorMessage]);
+        // Chat: build conversation history
+        const updatedMessages = [...messages, userMessage];
+        const conversationHistory = [
+          { role: 'system', content: 'You are a helpful assistant' },
+          ...updatedMessages.map((msg) => ({ role: msg.role, content: msg.content })),
+        ];
+
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: conversationHistory, model: selectedModel }),
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+          const assistantMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: data.content,
+            timestamp: new Date(),
+            metrics: data.metrics || undefined,
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+        } else {
+          const errorMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: data.error,
+            timestamp: new Date(),
+            isError: true,
+          };
+          setMessages((prev) => [...prev, errorMessage]);
+        }
       }
     } catch (err) {
       console.error('Error sending message:', err);
@@ -343,6 +369,15 @@ export default function Playground() {
     setCopiedErrorId(messageId);
     setTimeout(() => {
       setCopiedErrorId(null);
+    }, 2000);
+  };
+
+  // Handle copy embedding array to clipboard
+  const handleCopyEmbedding = (messageId: string, embedding: number[]) => {
+    navigator.clipboard.writeText(JSON.stringify(embedding));
+    setCopiedEmbeddingId(messageId);
+    setTimeout(() => {
+      setCopiedEmbeddingId(null);
     }, 2000);
   };
 
@@ -639,10 +674,13 @@ export default function Playground() {
                 >
                   <SmartToyIcon sx={{ fontSize: 60, mb: 2, opacity: 0.3 }} />
                   <Typography variant="h6" sx={{ mb: 1 }}>
-                    Start a conversation
+                    {isEmbeddingModel ? 'Generate embeddings' : 'Start a conversation'}
                   </Typography>
                   <Typography variant="body2">
-                    Chatting with <strong>{selectedModel}</strong> in {selectedDeployment}
+                    {isEmbeddingModel
+                      ? <>Enter text to embed with <strong>{selectedModel}</strong></>
+                      : <>Chatting with <strong>{selectedModel}</strong> in {selectedDeployment}</>
+                    }
                   </Typography>
                 </Box>
               ) : (
@@ -806,6 +844,51 @@ export default function Playground() {
                               </Box>
                             );
                           })()
+                        ) : message.embeddingData ? (
+                          // Embedding Response Box
+                          <Box
+                            sx={{
+                              p: 2,
+                              borderRadius: 2,
+                              backgroundColor: 'white',
+                              boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                              minWidth: 280,
+                            }}
+                          >
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                              <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+                                {message.embeddingData.length}-dimensional embedding
+                              </Typography>
+                              <IconButton
+                                size="small"
+                                onClick={() => handleCopyEmbedding(message.id, message.embeddingData!)}
+                                sx={{ color: copiedEmbeddingId === message.id ? 'success.main' : 'text.secondary' }}
+                                title={copiedEmbeddingId === message.id ? 'Copied!' : 'Copy array'}
+                              >
+                                <ContentCopyIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </Box>
+                            <Typography
+                              variant="body2"
+                              sx={{
+                                fontFamily: 'monospace',
+                                fontSize: '0.75rem',
+                                color: 'text.secondary',
+                                wordBreak: 'break-all',
+                                backgroundColor: 'grey.50',
+                                borderRadius: 1,
+                                p: 1,
+                              }}
+                            >
+                              [{message.embeddingData.slice(0, 8).map((v) => v.toFixed(8)).join(', ')}, ...]
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{ display: 'block', mt: 1, opacity: 0.7 }}
+                            >
+                              {message.timestamp.toLocaleTimeString()}
+                            </Typography>
+                          </Box>
                         ) : (
                           // Normal Message Box
                           <Box
@@ -948,7 +1031,7 @@ export default function Playground() {
                   fullWidth
                   multiline
                   maxRows={4}
-                  placeholder="Type your message..."
+                  placeholder={isEmbeddingModel ? 'Enter text to embed...' : 'Type your message...'}
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
@@ -1037,6 +1120,7 @@ export default function Playground() {
         apiKey={apiKey}
         apiDomain={apiDomain}
         modelName={selectedModel}
+        isEmbedding={isEmbeddingModel}
       />
 
       {/* API Key Instructions Dialog */}

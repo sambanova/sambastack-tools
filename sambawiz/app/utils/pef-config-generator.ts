@@ -14,6 +14,7 @@ interface AppConfig {
   checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
+  betaFeatures?: string[];
 }
 
 interface PefConfig {
@@ -31,6 +32,7 @@ interface KubectlPefItem {
     name?: string;
   };
   spec?: {
+    task_name?: string;
     metadata?: {
       dynamic_dims?: {
         batch_size?: {
@@ -257,7 +259,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
 
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
 
-    // If a model has a DYT PEF, remove all non-DYT PEFs for that model
+    // Apply DYT precedence logic based on betaFeatures config
     const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
     if (!existsSync(pefMappingPath)) {
       return {
@@ -265,15 +267,46 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
         error: 'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.',
       };
     }
+    const dytEnabled = Array.isArray(config.betaFeatures) && config.betaFeatures.includes('dyt');
     const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
     for (const pefNames of Object.values(pefMapping)) {
       const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
       if (hasDyt) {
         for (const pefName of pefNames) {
-          if (!pefName.includes('dyt')) {
+          if (dytEnabled ? !pefName.includes('dyt') : pefName.includes('dyt')) {
             delete configs[pefName];
           }
         }
+      }
+    }
+
+    // Detect embedding (and other typed) models and update checkpoint_mapping.json
+    const checkpointMappingPath = path.join(process.cwd(), 'app', 'data', 'checkpoint_mapping.json');
+    if (existsSync(checkpointMappingPath)) {
+      const checkpointMapping: Record<string, Record<string, unknown>> = JSON.parse(
+        readFileSync(checkpointMappingPath, 'utf-8')
+      );
+      let checkpointMappingUpdated = false;
+
+      for (const item of items) {
+        const taskName = item.spec?.task_name;
+        const pefName = item.metadata?.name;
+        if (!taskName || !pefName) continue;
+
+        // Find the model name whose PEF list contains this PEF
+        const modelName = Object.keys(pefMapping).find((model) => pefMapping[model].includes(pefName));
+        if (!modelName) continue;
+
+        if (checkpointMapping[modelName] && checkpointMapping[modelName].model_type !== taskName) {
+          checkpointMapping[modelName].model_type = taskName;
+          checkpointMappingUpdated = true;
+          console.log(`[PEF Generator] Set model_type="${taskName}" for ${modelName}`);
+        }
+      }
+
+      if (checkpointMappingUpdated) {
+        writeFileSync(checkpointMappingPath, JSON.stringify(checkpointMapping, null, 2), 'utf-8');
+        console.log('[PEF Generator] ✓ Updated checkpoint_mapping.json with model_type fields');
       }
     }
 

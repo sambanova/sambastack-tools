@@ -32,6 +32,16 @@ interface BundleTemplateModels {
 }
 
 /**
+ * Parse expert key (e.g. "4k", "16k", "128") to a numeric value for comparison
+ */
+function parseExpertKey(key: string): number {
+  if (key.endsWith('k')) {
+    return parseFloat(key.slice(0, -1)) * 1024;
+  }
+  return parseFloat(key);
+}
+
+/**
  * Generate checkpoint name from model name
  */
 export function generateCheckpointName(modelName: string): string {
@@ -173,7 +183,24 @@ export function generateBundleYaml(
       });
     }
 
-    templateModels[modelName] = { experts };
+    // Rename the smallest expert key to 'default'
+    const expertKeys = Object.keys(experts);
+    if (expertKeys.length > 0) {
+      const minKey = expertKeys.reduce((min, key) =>
+        parseExpertKey(key) < parseExpertKey(min) ? key : min
+      );
+      if (minKey !== 'default') {
+        const renamedExperts: ModelExperts = {};
+        expertKeys.forEach(key => {
+          renamedExperts[key === minKey ? 'default' : key] = experts[key];
+        });
+        templateModels[modelName] = { experts: renamedExperts };
+      } else {
+        templateModels[modelName] = { experts };
+      }
+    } else {
+      templateModels[modelName] = { experts };
+    }
   });
 
   // Build Bundle spec.checkpoints

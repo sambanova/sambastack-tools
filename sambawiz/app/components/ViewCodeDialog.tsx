@@ -23,6 +23,7 @@ interface ViewCodeDialogProps {
   apiKey: string;
   apiDomain: string;
   modelName: string;
+  isEmbedding?: boolean;
 }
 
 interface TabPanelProps {
@@ -53,6 +54,7 @@ export default function ViewCodeDialog({
   apiKey,
   apiDomain,
   modelName,
+  isEmbedding = false,
 }: ViewCodeDialogProps) {
   const [selectedTab, setSelectedTab] = useState(0);
   const [copiedCurl, setCopiedCurl] = useState(false);
@@ -68,7 +70,15 @@ export default function ViewCodeDialog({
   // Hide API key in display
   const displayApiKey = '•'.repeat(Math.min(apiKey.length, 32));
 
-  const curlCodeDisplay = `curl -H "Authorization: Bearer ${displayApiKey}" \\
+  const curlCodeDisplay = isEmbedding
+    ? `curl ${normalizedApiDomain}/v1/embeddings \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${displayApiKey}" \\
+  -d '{
+    "input": "The quick brown fox jumps over the lazy dog",
+    "model": "${modelName}"
+  }'`
+    : `curl -H "Authorization: Bearer ${displayApiKey}" \\
      -H "Content-Type: application/json" \\
      -d '{
 	"stream": false,
@@ -86,7 +96,15 @@ export default function ViewCodeDialog({
 	}' \\
      -X POST ${normalizedApiDomain}/v1/chat/completions`;
 
-  const curlCodeActual = `curl -H "Authorization: Bearer ${apiKey}" \\
+  const curlCodeActual = isEmbedding
+    ? `curl ${normalizedApiDomain}/v1/embeddings \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -d '{
+    "input": "The quick brown fox jumps over the lazy dog",
+    "model": "${modelName}"
+  }'`
+    : `curl -H "Authorization: Bearer ${apiKey}" \\
      -H "Content-Type: application/json" \\
      -d '{
 	"stream": false,
@@ -104,7 +122,21 @@ export default function ViewCodeDialog({
 	}' \\
      -X POST ${normalizedApiDomain}/v1/chat/completions`;
 
-  const pythonCodeDisplay = `from sambanova import SambaNova
+  const pythonCodeDisplay = isEmbedding
+    ? `from sambanova import SambaNova
+
+client = SambaNova(
+    base_url="${normalizedApiDomain}/v1",
+    api_key="${displayApiKey}",
+)
+
+response = client.embeddings.create(
+    model="${modelName}",
+    input="The quick brown fox jumps over the lazy dog"
+)
+
+print(response)`
+    : `from sambanova import SambaNova
 
 client = SambaNova(
     api_key="${displayApiKey}",
@@ -123,7 +155,21 @@ response = client.chat.completions.create(
 
 print(response.choices[0].message.content)`;
 
-  const pythonCodeActual = `from sambanova import SambaNova
+  const pythonCodeActual = isEmbedding
+    ? `from sambanova import SambaNova
+
+client = SambaNova(
+    base_url="${normalizedApiDomain}/v1",
+    api_key="${apiKey}",
+)
+
+response = client.embeddings.create(
+    model="${modelName}",
+    input="The quick brown fox jumps over the lazy dog"
+)
+
+print(response)`
+    : `from sambanova import SambaNova
 
 client = SambaNova(
     api_key="${apiKey}",
