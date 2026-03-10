@@ -1,0 +1,26 @@
+{
+  "Model-A-7B": {
+    "path": "mock/path/ckpts/model-a-7b",
+    "resource_name": "model-a-7b"
+  },
+  "Model-B-70B": {
+    "path": "mock/path/ckpts/model-b-70b",
+    "resource_name": "model-b-70b"
+  },
+  "Model-C-Embedding": {
+    "path": "mock/path/ckpts/model-c-embedding",
+    "resource_name": "model-c-embedding",
+    "model_type": "embedding"
+  },
+  "Model-D-Vision": {
+    "path": "mock/path/ckpts/model-d-vision",
+    "resource_name": "model-d-vision",
+    "vision_embedding_checkpoint": "mock/path/ckpts/model-d-vision-embed",
+    "model_type": "mllama"
+  },
+  "Model-E-Audio": {
+    "path": "mock/path/ckpts/model-e-audio",
+    "resource_name": "model-e-audio",
+    "model_type": "audio_whisper"
+  }
+}

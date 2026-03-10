@@ -6,6 +6,8 @@ const config: Config = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
+    // Use mock file for gitignored checkpoint_mapping.json
+    'checkpoint_mapping\\.json$': '<rootDir>/app/utils/__tests__/checkpoint_mapping.mock.json',
     // Handle CSS imports (with CSS modules)
     '^.+\\.module\\.(css|sass|scss)$': 'identity-obj-proxy',
     // Handle CSS imports (without CSS modules)
