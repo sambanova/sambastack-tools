@@ -505,5 +505,54 @@ describe('bundle-yaml-generator', () => {
       expect(yaml).not.toContain('VISION_EMBD_CKPT');
       expect(yaml).not.toContain('vision_embedding_checkpoint:');
     });
+
+    it('should rename smallest SS expert key to "default" for embedding models', () => {
+      const configs: ConfigSelection[] = [
+        {
+          modelName: 'E5-Mistral-7B-Instruct',
+          ss: '4k',
+          bs: '1',
+          pefName: 'E5-Mistral-7B-Instruct_4k_bs1',
+        },
+        {
+          modelName: 'E5-Mistral-7B-Instruct',
+          ss: '8k',
+          bs: '1',
+          pefName: 'E5-Mistral-7B-Instruct_8k_bs1',
+        },
+      ];
+
+      const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+
+      // Smallest SS (4k) should be renamed to 'default'
+      expect(yaml).toContain('default:');
+      expect(yaml).not.toContain('4k:');
+      // Larger SS key stays as-is
+      expect(yaml).toContain('8k:');
+    });
+
+    it('should NOT rename smallest SS expert key to "default" for non-embedding models', () => {
+      const configs: ConfigSelection[] = [
+        {
+          modelName: 'Meta-Llama-3.1-8B-Instruct',
+          ss: '1024',
+          bs: '1',
+          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+        },
+        {
+          modelName: 'Meta-Llama-3.1-8B-Instruct',
+          ss: '2048',
+          bs: '1',
+          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
+        },
+      ];
+
+      const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+
+      // SS keys should remain unchanged
+      expect(yaml).toContain('1024:');
+      expect(yaml).toContain('2048:');
+      expect(yaml).not.toContain('default:');
+    });
   });
 });

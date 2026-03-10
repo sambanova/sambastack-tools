@@ -17,6 +17,7 @@ export interface CheckpointMapping {
     path: string;
     resource_name: string;
     vision_embedding_checkpoint?: string;
+    model_type?: string;
   };
 }
 

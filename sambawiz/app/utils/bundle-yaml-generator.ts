@@ -183,9 +183,10 @@ export function generateBundleYaml(
       });
     }
 
-    // Rename the smallest expert key to 'default'
+    // Rename the smallest expert key to 'default' only for embedding models
+    const isEmbeddingModel = checkpointMapping[modelName]?.model_type === 'embedding';
     const expertKeys = Object.keys(experts);
-    if (expertKeys.length > 0) {
+    if (isEmbeddingModel && expertKeys.length > 0) {
       const minKey = expertKeys.reduce((min, key) =>
         parseExpertKey(key) < parseExpertKey(min) ? key : min
       );

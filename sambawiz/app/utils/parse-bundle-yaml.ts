@@ -106,8 +106,19 @@ export function parseBundleYamlContent(yamlContent: string): ParsedBundleState |
 
         const dytBatchSizes = config.dynamic_dims?.batch_size?.values;
         if (Array.isArray(dytBatchSizes) && dytBatchSizes.length > 0) {
+          // 'default' was the renamed minimum-SS expert in old-format YAMLs.
+          // Recover the actual SS so non-embedding models get their real expert key.
+          let effectiveSs = contextLength;
+          if (contextLength === 'default') {
+            const pefEntry = pefConfigs[pefName];
+            if (Array.isArray(pefEntry) && pefEntry.length > 0) {
+              const ssToNum = (ss: string) => ss.endsWith('k') ? parseFloat(ss) * 1024 : parseFloat(ss);
+              const minEntry = pefEntry.reduce((a, b) => ssToNum(a.ss) < ssToNum(b.ss) ? a : b);
+              effectiveSs = minEntry.ss;
+            }
+          }
           for (const bs of dytBatchSizes) {
-            selectedConfigs.push({ modelName, ss: contextLength, bs: bs.toString(), pefName });
+            selectedConfigs.push({ modelName, ss: effectiveSs, bs: bs.toString(), pefName });
           }
         } else {
           const pefConfig = pefConfigs[pefName];

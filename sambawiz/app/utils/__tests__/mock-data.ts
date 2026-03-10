@@ -22,6 +22,11 @@ export const mockCheckpointMapping: CheckpointMapping = {
     resource_name: 'llama-4-maverick-17b-128e-instruct',
     vision_embedding_checkpoint: '/checkpoints/llama-4-maverick-vision',
   },
+  'E5-Mistral-7B-Instruct': {
+    path: '/checkpoints/e5-mistral-7b',
+    resource_name: 'e5-mistral-7b-instruct',
+    model_type: 'embedding',
+  },
 };
 
 export const mockPefMapping: PefMapping = {
@@ -86,6 +91,16 @@ export const mockPefConfigs: PefConfigs = {
     latestVersion: '1',
   },
   'llama-4-maverick-ss8192-bs1': {
+    ss: '8k',
+    bs: '1',
+    latestVersion: '1',
+  },
+  'E5-Mistral-7B-Instruct_4k_bs1': {
+    ss: '4k',
+    bs: '1',
+    latestVersion: '1',
+  },
+  'E5-Mistral-7B-Instruct_8k_bs1': {
     ss: '8k',
     bs: '1',
     latestVersion: '1',

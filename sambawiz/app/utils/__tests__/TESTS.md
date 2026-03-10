@@ -2,9 +2,9 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** March 2026 - Added pef_mapping.json validation test; pef-config-generator now has 26 actual tests (was 22)
-**Total Tests:** 73 automated + comprehensive manual test plan
-**Test Status:** ✅ All tests passing with clean console output
+**Last Updated:** March 2026 - Restricted smallest-SS-to-"default" expert key renaming to embedding models only; fixed pef-config-generator DYT precedence test; bundle-yaml-generator now has 30 tests (was 28)
+**Total Tests:** 75 automated + comprehensive manual test plan
+**Test Status:** ✅ All 75 tests passing with clean console output
 **Focus:** Core business logic, API integration, and new feature validation
 
 ## Table of Contents
@@ -170,8 +170,8 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 
 **File:** [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts)
 **Functions:** `generateCheckpointName`, `generateVisionEmbeddingCheckpointName`, `generateBundleYaml`
-**Test Count:** 28
-**Last Updated:** Added vision embedding checkpoint support for multimodal models
+**Test Count:** 30
+**Last Updated:** Added embedding model expert key renaming tests
 
 #### generateCheckpointName Function (6 tests)
 
@@ -193,7 +193,7 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 | should handle model names without instruct suffix | Models without instruct suffix get vision embedding checkpoint name directly (e.g., "Custom-Model" → "CUSTOM_MODEL_VISION_EMBD_CKPT") |
 | should remove -instruct suffix after transformation | After character normalization, lowercase "-instruct" is also stripped (e.g., "my-model.v1-instruct" → "MY_MODEL_V1_VISION_EMBD_CKPT") |
 
-#### generateBundleYaml Function (20 tests)
+#### generateBundleYaml Function (22 tests)
 
 **Basic YAML Structure**
 
@@ -237,6 +237,13 @@ These tests verify which models are available based on checkpoint mappings, PEF 
 |------|-------------|
 | should include vision embedding checkpoint when present in checkpoint mapping | Models with `vision_embedding_checkpoint` field get two checkpoint entries (main + vision) and a `vision_embedding_checkpoint` reference in the Bundle models section |
 | should not include vision embedding checkpoint when not present in checkpoint mapping | Models without `vision_embedding_checkpoint` field generate normal YAML without vision-related entries |
+
+**Embedding Model Expert Key Renaming**
+
+| Test | Description |
+|------|-------------|
+| should rename smallest SS expert key to "default" for embedding models | For models with `model_type: "embedding"` in checkpoint_mapping, the smallest SS key (e.g. `4k`) is renamed to `default` in the generated YAML; larger keys remain unchanged |
+| should NOT rename smallest SS expert key to "default" for non-embedding models | For non-embedding models, all SS keys retain their original values (e.g. `1024`, `2048`) and no `default` key is emitted |
 
 **Simplified YAML Format Changes:**
 - ✅ Removed `batch_size` field (embedded in PEF name)
@@ -632,11 +639,11 @@ jest.useFakeTimers(); // Restore for other tests
 
 | Category | Test Count | Notes |
 |----------|-----------|-------|
-| **Automated Unit Tests** | **73** | Business logic and API integration |
+| **Automated Unit Tests** | **75** | Business logic and API integration |
 | **Manual Integration Tests** | **27** | Release 1.1.2 features |
 | **UI Components (Automated)** | **4** | Only API integration tests |
-| **Core Utilities (Automated)** | **69** | Business logic and data processing |
-| **Total Coverage** | **100 tests** | Comprehensive automated + manual testing |
+| **Core Utilities (Automated)** | **71** | Business logic and data processing |
+| **Total Coverage** | **102 tests** | Comprehensive automated + manual testing |
 
 ### Automated Test Breakdown by File
 
@@ -647,9 +654,9 @@ jest.useFakeTimers(); // Restore for other tests
 | bundle-form.test.tsx | 1 | API integration |
 | bundle-deployment.test.tsx | 7 | Status logic (6) + API integration (1) - ✅ React act() warnings fixed |
 | model-availability.test.ts | 9 | Model filtering logic |
-| bundle-yaml-generator.test.ts | 28 | YAML generation + vision embedding checkpoint support |
+| bundle-yaml-generator.test.ts | 30 | YAML generation + vision embedding checkpoint support + embedding expert key renaming |
 | pef-config-generator.test.ts | 26 | Kubernetes integration + DYT SS selection logic + pef_mapping validation |
-| **Total** | **73** | **All automated tests** |
+| **Total** | **75** | **All automated tests** |
 
 ### Manual Integration Test Breakdown
 
@@ -762,6 +769,30 @@ Tests **do not** cover:
 
 ### Recent Updates (March 2026)
 
+**✅ Restricted Smallest-SS Expert Key Renaming to Embedding Models Only**
+
+The `generateBundleYaml` function previously renamed the smallest SS expert key to `"default"` for all models. This was incorrect — only embedding models (those with `model_type: "embedding"` in `checkpoint_mapping.json`) should have this renaming applied.
+
+**Change:** Added `isEmbeddingModel` check in `bundle-yaml-generator.ts` before applying the rename. Added `model_type?: string` to the `CheckpointMapping` type.
+
+**Tests Added (2 new tests, 30 total):**
+- `should rename smallest SS expert key to "default" for embedding models` — verifies that the smallest SS key (e.g. `4k`) becomes `default` for embedding models, while larger keys remain unchanged
+- `should NOT rename smallest SS expert key to "default" for non-embedding models` — verifies that SS keys are unchanged for non-embedding models
+
+**Bug Fixed:** `pef-config-generator.test.ts` — "should remove non-DYT PEFs for a model when a DYT PEF is present" was failing because the test did not include `betaFeatures: ['dyt']` in the mock app config. The DYT precedence logic requires this flag to keep DYT PEFs and remove non-DYT ones.
+
+**Files Modified:**
+- [bundle-yaml-generator.ts](../bundle-yaml-generator.ts) - `isEmbeddingModel` guard added
+- [bundle.ts](../../types/bundle.ts) - `model_type?: string` added to `CheckpointMapping`
+- [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts) - 2 new tests
+- [mock-data.ts](mock-data.ts) - `E5-Mistral-7B-Instruct` embedding entry added
+- [pef-config-generator.test.ts](pef-config-generator.test.ts) - Fixed missing `betaFeatures: ['dyt']` in mock config
+- [TESTS.md](TESTS.md) - Documentation
+
+**Result:** ✅ All 75 tests pass
+
+---
+
 **✅ Added pef_mapping.json Validation Test + Corrected pef-config-generator Count**
 
 Added a new Configuration Validation test that checks for the presence of `pef_mapping.json` in `app/data/`. This also corrects a discrepancy where TESTS.md documented 26 pef-config-generator tests but only 22 existed; the 4 missing tests are now implemented.
@@ -871,11 +902,11 @@ The bundle deployment integration test was causing React warnings about state up
 - **Bundle Builder:** 6 tests → 1 test (API integration only)
 - **Bundle Deployment:** 6 UI tests → 1 test (combined fetches)
 
-### Tests Kept (73 tests, 100% of critical logic)
+### Tests Kept (75 tests, 100% of critical logic)
 
 - ✅ All model availability logic tests (9)
 - ✅ All deployment status calculation tests (6)
-- ✅ All YAML generation business logic (28 - includes vision embedding support)
+- ✅ All YAML generation business logic (30 - includes vision embedding + embedding expert key support)
 - ✅ All PEF configuration parsing (26)
 - ✅ All API integration tests (4)
 
@@ -885,7 +916,7 @@ The bundle deployment integration test was causing React warnings about state up
 
 ## Benefits of This Approach
 
-**✅ Faster test runs:** Focused tests = fast execution (~3s for 73 tests)
+**✅ Faster test runs:** Focused tests = fast execution (~3s for 75 tests)
 **✅ Easier refactoring:** UI changes don't break tests
 **✅ Less maintenance:** No more updating 20 tests for a UI tweak
 **✅ Better focus:** Every test catches real bugs

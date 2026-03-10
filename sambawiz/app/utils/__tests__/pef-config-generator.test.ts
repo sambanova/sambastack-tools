@@ -639,7 +639,7 @@ describe('pef-config-generator', () => {
         if (String(filePath).includes('pef_mapping.json')) {
           return JSON.stringify(pefMapping);
         }
-        return JSON.stringify(mockAppConfig);
+        return JSON.stringify({ ...mockAppConfig, betaFeatures: ['dyt'] });
       });
 
       const result = await generatePefConfigs();
