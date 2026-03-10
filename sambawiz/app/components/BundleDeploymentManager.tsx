@@ -822,7 +822,7 @@ spec:
                 Select a valid bundle to deploy
               </Typography>
               <Tooltip
-                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Bundle Builder page and select 'Deployed Bundles' as the source."
+                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Bundle Builder page and select 'Remote Environment' as the source."
                 arrow
               >
                 <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
