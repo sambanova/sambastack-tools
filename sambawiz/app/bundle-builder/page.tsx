@@ -188,7 +188,7 @@ export default function BundleBuilderPage() {
               <FormControlLabel
                 value="deployedBundles"
                 control={<Radio size="small" />}
-                label="Deployed Bundles"
+                label="Remote Environment"
               />
             </RadioGroup>
 
