@@ -176,6 +176,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
     const kubectlOutput = execSync(`kubectl -n ${namespace} get pef -o json`, {
       encoding: 'utf-8',
       env: { ...process.env, KUBECONFIG: kubeconfigPath },
+      maxBuffer: 100 * 1024 * 1024, // 100MB to handle large PEF lists
     });
 
     // Parse JSON output
@@ -208,6 +209,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
           const individualOutput = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
             encoding: 'utf-8',
             env: { ...process.env, KUBECONFIG: kubeconfigPath },
+            maxBuffer: 2 * 1024 * 1024, // 100MB to handle large PEF output
           });
           const individualPef: KubectlPefItem = JSON.parse(individualOutput);
           const dynamicDims = individualPef.spec?.metadata?.dynamic_dims;
