@@ -16,6 +16,7 @@ import {
   RadioGroup,
   FormControlLabel,
   Radio,
+  Alert,
 } from '@mui/material';
 import AppLayout from '../components/AppLayout';
 import BundleForm from '../components/BundleForm';
@@ -34,6 +35,40 @@ export default function BundleBuilderPage() {
   const [deployedBundles, setDeployedBundles] = useState<string[]>([]);
   const [selectedDeployedBundle, setSelectedDeployedBundle] = useState('');
   const [deployedBundlesError, setDeployedBundlesError] = useState('');
+
+  // Load error shown inline in the dialog (after clicking LOAD)
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Warning shown when the selected bundle has unsupported PEFs (pre-validation)
+  const [loadWarning, setLoadWarning] = useState<string | null>(null);
+
+  // Pre-validate the selected bundle to warn about unsupported PEFs
+  useEffect(() => {
+    if (!openDialog) return;
+    setLoadWarning(null);
+
+    const currentSelection = bundleSource === 'savedArtifacts' ? selectedFile : selectedDeployedBundle;
+    if (!currentSelection) return;
+
+    const validate = async () => {
+      try {
+        let data;
+        if (bundleSource === 'savedArtifacts') {
+          const res = await fetch(`/api/load-bundle?fileName=${encodeURIComponent(selectedFile)}`);
+          data = await res.json();
+        } else {
+          const res = await fetch(`/api/load-deployed-bundle?bundleName=${encodeURIComponent(selectedDeployedBundle)}`);
+          data = await res.json();
+        }
+        if (!data.success && data.error?.includes('not found in pef_configs.json')) {
+          setLoadWarning(data.error);
+        }
+      } catch {
+        // ignore pre-validation errors silently
+      }
+    };
+
+    validate();
+  }, [openDialog, bundleSource, selectedFile, selectedDeployedBundle]);
 
   // Fetch saved artifacts when dialog opens with that source
   useEffect(() => {
@@ -80,51 +115,64 @@ export default function BundleBuilderPage() {
 
   const handleCloseDialog = () => {
     setOpenDialog(false);
+    setLoadError(null);
+    setLoadWarning(null);
   };
 
   const handleSourceChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setBundleSource(event.target.value as BundleSource);
+    setLoadError(null);
+    setLoadWarning(null);
   };
 
   const handleFileChange = (event: SelectChangeEvent) => {
     setSelectedFile(event.target.value);
+    setLoadError(null);
   };
 
   const handleDeployedBundleChange = (event: SelectChangeEvent) => {
     setSelectedDeployedBundle(event.target.value);
+    setLoadError(null);
+  };
+
+  const dispatchLoadAndClose = (data: { bundleName: string; selectedModels: string[]; selectedConfigs: unknown[]; draftModels: Record<string, string> }) => {
+    window.dispatchEvent(new CustomEvent('loadBundleState', {
+      detail: {
+        bundleName: data.bundleName,
+        selectedModels: data.selectedModels,
+        selectedConfigs: data.selectedConfigs,
+        draftModels: data.draftModels
+      }
+    }));
+    handleCloseDialog();
+  };
+
+  const fetchBundle = async (convert: boolean) => {
+    if (bundleSource === 'savedArtifacts') {
+      if (!selectedFile) return null;
+      const response = await fetch(`/api/load-bundle?fileName=${encodeURIComponent(selectedFile)}${convert ? '&convert=true' : ''}`);
+      return response.json();
+    } else {
+      if (!selectedDeployedBundle) return null;
+      const response = await fetch(`/api/load-deployed-bundle?bundleName=${encodeURIComponent(selectedDeployedBundle)}${convert ? '&convert=true' : ''}`);
+      return response.json();
+    }
   };
 
   const handleLoadBundle = async () => {
     try {
-      let data;
-
-      if (bundleSource === 'savedArtifacts') {
-        if (!selectedFile) return;
-        const response = await fetch(`/api/load-bundle?fileName=${encodeURIComponent(selectedFile)}`);
-        data = await response.json();
-      } else {
-        if (!selectedDeployedBundle) return;
-        const response = await fetch(`/api/load-deployed-bundle?bundleName=${encodeURIComponent(selectedDeployedBundle)}`);
-        data = await response.json();
-      }
+      const data = await fetchBundle(true);
+      if (!data) return;
 
       if (data.success) {
-        window.dispatchEvent(new CustomEvent('loadBundleState', {
-          detail: {
-            bundleName: data.bundleName,
-            selectedModels: data.selectedModels,
-            selectedConfigs: data.selectedConfigs,
-            draftModels: data.draftModels
-          }
-        }));
-        handleCloseDialog();
+        dispatchLoadAndClose(data);
       } else {
         console.error('Failed to load bundle:', data.error);
-        alert(`Failed to load bundle: ${data.error}`);
+        setLoadError(data.error);
       }
     } catch (err) {
       console.error('Error loading bundle:', err);
-      alert('Failed to load bundle. Please check the console for details.');
+      setLoadError('Failed to load bundle. Please check the console for details.');
     }
   };
 
@@ -253,6 +301,16 @@ export default function BundleBuilderPage() {
               </>
             )}
           </Box>
+          {loadWarning && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {loadWarning}{' If you proceed to load this bundle, all PEFs that are not supported will be removed.'}
+            </Alert>
+          )}
+          {loadError && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {loadError}
+            </Alert>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCloseDialog}>Cancel</Button>

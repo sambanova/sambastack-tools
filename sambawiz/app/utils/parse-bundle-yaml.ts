@@ -50,7 +50,12 @@ export interface ParsedBundleState {
 
 export type ParseError = { error: string };
 
-export function parseBundleYamlContent(yamlContent: string): ParsedBundleState | ParseError {
+export interface ParseOptions {
+  /** When true, silently skip configs whose PEF is not in pef_configs.json instead of returning an error */
+  skipUnknownPefs?: boolean;
+}
+
+export function parseBundleYamlContent(yamlContent: string, options?: ParseOptions): ParsedBundleState | ParseError {
   const documents = yaml.loadAll(yamlContent) as Array<Record<string, unknown>>;
 
   const bundleTemplate = documents.find(
@@ -123,6 +128,7 @@ export function parseBundleYamlContent(yamlContent: string): ParsedBundleState |
         } else {
           const pefConfig = pefConfigs[pefName];
           if (!pefConfig) {
+            if (options?.skipUnknownPefs) continue;
             return { error: `PEF "${pefName}" not found in pef_configs.json` };
           }
           const pefEntry = Array.isArray(pefConfig) ? pefConfig[0] : pefConfig;
