@@ -125,7 +125,8 @@ export async function GET(request: NextRequest) {
     const combinedYaml = `${bundleTemplateClean}---\n${bundleClean}`;
 
     // Parse using the same logic as saved artifacts
-    const result = parseBundleYamlContent(combinedYaml);
+    const convert = request.nextUrl.searchParams.get('convert') === 'true';
+    const result = parseBundleYamlContent(combinedYaml, { skipUnknownPefs: convert });
     if ('error' in result) {
       return NextResponse.json({ success: false, error: result.error }, { status: 400 });
     }

@@ -189,6 +189,28 @@ export default function Playground() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Restore focus to input after sending completes
+  useEffect(() => {
+    if (!isSending) {
+      inputRef.current?.focus();
+    }
+  }, [isSending]);
+
+  // Auto-select deployment when there is only one option
+  useEffect(() => {
+    if (selectedDeployment) return;
+    const deployed = bundleDeployments.filter((deployment) => {
+      const podStatusInfo = deploymentStatuses[deployment.name];
+      if (!podStatusInfo) return false;
+      const status = getBundleDeploymentStatus(podStatusInfo.cachePod, podStatusInfo.defaultPod);
+      return status === 'Deployed';
+    });
+    if (deployed.length === 1) {
+      setSelectedDeployment(deployed[0].name);
+      fetchModelsForDeployment(deployed[0].name);
+    }
+  }, [bundleDeployments, deploymentStatuses, selectedDeployment]);
+
   // Fetch models for a deployment
   const fetchModelsForDeployment = async (deploymentName: string) => {
     setLoadingModels(true);
@@ -359,7 +381,6 @@ export default function Playground() {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsSending(false);
-      inputRef.current?.focus();
     }
   };
 
