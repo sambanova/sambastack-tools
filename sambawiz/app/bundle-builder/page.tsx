@@ -44,12 +44,12 @@ export default function BundleBuilderPage() {
   // Pre-validate the selected bundle to warn about unsupported PEFs
   useEffect(() => {
     if (!openDialog) return;
-    setLoadWarning(null);
 
     const currentSelection = bundleSource === 'savedArtifacts' ? selectedFile : selectedDeployedBundle;
-    if (!currentSelection) return;
 
     const validate = async () => {
+      setLoadWarning(null);
+      if (!currentSelection) return;
       try {
         let data;
         if (bundleSource === 'savedArtifacts') {

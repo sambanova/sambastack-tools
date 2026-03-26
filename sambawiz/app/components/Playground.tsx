@@ -209,7 +209,7 @@ export default function Playground() {
       setSelectedDeployment(deployed[0].name);
       fetchModelsForDeployment(deployed[0].name);
     }
-  }, [bundleDeployments, deploymentStatuses]);
+  }, [bundleDeployments, deploymentStatuses, selectedDeployment]);
 
   // Fetch models for a deployment
   const fetchModelsForDeployment = async (deploymentName: string) => {
