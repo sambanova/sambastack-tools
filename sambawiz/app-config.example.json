@@ -16,5 +16,8 @@
       "apiDomain": "https://api-another-environment.example.com/",
       "apiKey": "another-api-key-here"
     }
+  },
+  "checkpoint_overrides": {
+    "Llama-4-Maverick-17B-128E-Instruct": "1"
   }
 }
