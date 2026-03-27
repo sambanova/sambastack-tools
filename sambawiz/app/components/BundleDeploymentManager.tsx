@@ -214,7 +214,10 @@ export default function BundleDeploymentManager() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
-    loadSavedState();
+    // Skip loading saved state if a bundle is specified in the URL query param
+    if (!searchParams.get('bundle')) {
+      loadSavedState();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -431,7 +434,9 @@ spec:
     - free
   owner: no-reply@sambanova.ai
   secretNames:
-  - sambanova-artifact-reader`;
+  - sambanova-artifact-reader
+  engineConfig:
+    startupTimeout: 7200`;
   };
 
   // Handle bundle selection

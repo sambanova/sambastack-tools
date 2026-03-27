@@ -48,7 +48,6 @@ export default function AppLayout({ children }: AppLayoutProps) {
   const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
-  const [checkpointMappingMissing, setCheckpointMappingMissing] = useState<boolean>(false);
 
   // Validate kubeconfig on component mount
   useEffect(() => {
@@ -81,16 +80,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
           setHelmVersionError(data.helmVersionError || false);
         }
 
-        // Check if checkpoint_mapping.json exists
-        const checkpointResponse = await fetch('/api/check-checkpoint-mapping');
-        const checkpointData = await checkpointResponse.json();
 
-        if (checkpointData.success && !checkpointData.exists) {
-          setCheckpointMappingMissing(true);
-          setValidationError('checkpoint_mapping.json file not found in app/data/ folder. Please obtain it from your SambaNova contact and copy it into that folder. Navigation to Bundle Builder is disabled.');
-        } else {
-          setCheckpointMappingMissing(false);
-        }
       } catch (error) {
         console.error('Failed to validate kubeconfig:', error);
         setValidationError('Failed to validate kubeconfig');
@@ -151,9 +141,9 @@ export default function AppLayout({ children }: AppLayoutProps) {
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
         <ListItemButton
           selected={selectedItem === 'bundle-builder'}
-          disabled={helmVersionError || checkpointMappingMissing}
+          disabled={helmVersionError}
           onClick={() => {
-            if (!helmVersionError && !checkpointMappingMissing) {
+            if (!helmVersionError) {
               router.push('/bundle-builder');
             }
           }}
@@ -170,7 +160,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
               },
             },
             '&:hover': {
-              backgroundColor: (helmVersionError || checkpointMappingMissing) ? 'transparent' : 'rgb(232, 229, 234)',
+              backgroundColor: helmVersionError ? 'transparent' : 'rgb(232, 229, 234)',
               borderRadius: 2,
             },
             '&.Mui-disabled': {
@@ -293,6 +283,33 @@ export default function AppLayout({ children }: AppLayoutProps) {
 
       {/* Spacer to push version display to bottom */}
       <Box sx={{ flexGrow: 1 }} />
+
+      {/* Fallback home button when kubeconfig validation failed and not on home page */}
+      {validationError && pathname !== '/' && (
+        <Box
+          onClick={() => router.push('/')}
+          sx={{
+            mx: 2,
+            mt: 2,
+            p: 1.5,
+            borderRadius: 2,
+            backgroundColor: 'rgb(232, 229, 234)',
+            border: '1px solid rgb(209, 204, 213)',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease-in-out',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            '&:hover': {
+              backgroundColor: 'rgb(220, 217, 224)',
+              border: '1px solid rgb(199, 194, 203)',
+              transform: 'scale(1.02)',
+            },
+          }}
+        >
+          <HomeIcon sx={{ fontSize: '1.25rem', color: 'primary.main' }} />
+        </Box>
+      )}
 
       {/* Environment version display - clickable to go to home */}
       {envVersion && envName && (

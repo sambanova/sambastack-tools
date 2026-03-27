@@ -36,7 +36,6 @@ import { Visibility, VisibilityOff } from '@mui/icons-material';
 import { getBundleDeploymentStatus } from './BundleDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
-import checkpointMapping from '../data/checkpoint_mapping.json';
 
 interface BundleDeployment {
   name: string;
@@ -85,6 +84,8 @@ export default function Playground() {
   }>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [checkpointMapping, setCheckpointMapping] = useState<Record<string, { model_type?: string }>>({});
 
   // Model selection state
   const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -165,6 +166,10 @@ export default function Playground() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchEnvironmentConfig();
+    fetch('/api/checkpoint-mapping')
+      .then((r) => r.json())
+      .then((data) => { if (data.success) setCheckpointMapping(data.data); })
+      .catch(() => {});
   }, []);
 
   // Fetch environment configuration
@@ -283,7 +288,7 @@ export default function Playground() {
   });
 
   const isEmbeddingModel = selectedModel
-    ? (checkpointMapping as Record<string, { model_type?: string }>)[selectedModel]?.model_type === 'embedding'
+    ? checkpointMapping[selectedModel]?.model_type === 'embedding'
     : false;
 
   // Handle send message

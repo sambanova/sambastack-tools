@@ -445,18 +445,14 @@ export default function Home() {
     setSaveError(null);
 
     try {
-      // Check if checkpoint_mapping.json exists
-      const checkpointResponse = await fetch('/api/check-checkpoint-mapping');
-      const checkpointData = await checkpointResponse.json();
+      // Generate checkpoint_mapping.json from the cluster's model resources
+      const generateResponse = await fetch('/api/generate-checkpoint-mapping', {
+        method: 'POST',
+      });
+      const generateData = await generateResponse.json();
 
-      if (checkpointData.success && !checkpointData.exists) {
-        setSaveError('checkpoint_mapping.json file not found in app/data/ folder. Please obtain it from your SambaNova contact and copy it into that folder before applying configuration.');
-        setSaving(false);
-        return;
-      }
-
-      if (!checkpointData.success) {
-        setSaveError('Failed to verify checkpoint mapping file. Please try again.');
+      if (!generateData.success) {
+        setSaveError(`Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`);
         setSaving(false);
         return;
       }
