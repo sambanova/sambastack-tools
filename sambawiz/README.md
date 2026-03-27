@@ -54,7 +54,6 @@ SambaWiz provides an intuitive interface to:
 - Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
 - Valid `kubeconfig.yaml` for your SambaStack environment
 - Node.js 18+ and npm
-- `checkpoint_mapping.json` file and the root directory for checkpoints (provided by your SambaNova contact)
 - `kubectl` and `helm` CLI tools installed and configured (must be in your PATH as the application uses these commands via Node.js)
 
 ## Getting Started
@@ -94,8 +93,7 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpoint_mapping.json` must be obtained from your SambaNova contact and placed in the `app/data/` folder
-- `checkpointsDir`: GCS checkpoint directory path relative to which the checkpoints in `checkpoint_mapping.json` can be found
+- `checkpointsDir`: GCS checkpoint directory path relative to which the checkpoints (whose paths begin with `version/x.x.x/...`) can be found
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments
   - Each environment has:
@@ -134,12 +132,6 @@ The application uses several configuration files:
 - `app`: Current version of SambaWiz
 - `minimum-sambastack-helm`: Minimum SambaStack Helm chart version required
 - Version requirements are enforced during kubeconfig validation
-
-**Data Configuration Files** in `app/data/`:
-- `pef_mapping.json`: Maps model names to their available PEF configurations
-- `checkpoint_mapping.json`: Maps model names to their checkpoint GCS paths (this is provided by your SambaNova contact)
-
-These files are included with the application and typically don't require modification.
 
 ### 5. Run Development Server
 
@@ -212,7 +204,6 @@ sambawiz/
 │   │   └── BundleForm.tsx          # Main form component
 │   ├── data/
 │   │   ├── pef_mapping.json        # Model to PEF mappings
-│   │   └── checkpoint_mapping.json # Model to checkpoint mappings
 │   ├── utils/
 │   │   └── bundle-yaml-generator.ts # YAML generation logic
 │   ├── lib/
@@ -370,7 +361,7 @@ Tests explicitly **do not** cover:
 
 2. **Check `app-config.json` fields**
    - Ensure all required fields are populated:
-     - `checkpointsDir`: Must be set to a valid GCS bucket path that serves as a root folder for the relative paths in `checkpoint_mapping.json`. If this path is invalid, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
+     - `checkpointsDir`: Must be set to a valid GCS bucket path that serves as a root folder for the checkpoint paths. If this path is invalid, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
      - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
      - `kubeconfigs`: Must contain at least one environment with:
        - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
