@@ -66,6 +66,9 @@
     "e5-mistral-7b-ss4096-bs4",
     "e5-mistral-7b-ss4096-bs8"
   ],
+  "gemma-3-12b-it": [
+    "gemma3-12b-ss131072-bs8-dyt-1"
+  ],
   "gpt-oss-120b": [
     "gpt-oss-fp8-ss131072-bs2",
     "gpt-oss-fp8-ss32768-bs2",

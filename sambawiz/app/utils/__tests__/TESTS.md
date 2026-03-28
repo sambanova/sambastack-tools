@@ -2,7 +2,7 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** March 2026 - Restricted smallest-SS-to-"default" expert key renaming to embedding models only; fixed pef-config-generator DYT precedence test; bundle-yaml-generator now has 30 tests (was 28)
+**Last Updated:** 2026-03-27 - DYT always enabled (removed betaFeatures gate); removed checkpoint_mapping.json checks from Home/AppLayout; checkpoint mapping loaded dynamically in Playground; removed stale Checkpoint Mapping Validation manual test section
 **Total Tests:** 75 automated + comprehensive manual test plan
 **Test Status:** ✅ All 75 tests passing with clean console output
 **Focus:** Core business logic, API integration, and new feature validation
@@ -488,32 +488,6 @@ Environment in `app-config.json` should include:
 
 ---
 
-### 5. Checkpoint Mapping Validation
-
-**Feature:** API endpoint to check if checkpoint mapping file exists
-**API Routes:** `/api/check-checkpoint-mapping` (GET)
-**File:** `app/data/checkpoint_mapping.json`
-
-#### Test Coverage
-
-| Test ID | Description | Type | Status |
-|---------|-------------|------|--------|
-| 5.1 | Check existing checkpoint mapping | API | ✓ Manual |
-| 5.2 | Check missing checkpoint mapping | API | ✓ Manual |
-| 5.3 | UI integration (if implemented) | UI | ⏭ Pending |
-
-#### Key Validations
-
-- Returns `{ success: true, exists: true }` when file exists
-- Returns `{ success: true, exists: false }` when file missing
-- Used for setup validation and user guidance
-
-#### Purpose
-
-Helps users identify if required checkpoint mapping data is present before attempting bundle operations.
-
----
-
 ### Integration Test Execution
 
 #### Prerequisites
@@ -549,10 +523,6 @@ Helps users identify if required checkpoint mapping data is present before attem
    - Navigate to Playground
    - Verify link appearance and functionality
    - Add API key and verify link disappears
-
-5. **Checkpoint Mapping:**
-   - Call API endpoint: `curl http://localhost:3000/api/check-checkpoint-mapping`
-   - Verify response based on file presence
 
 #### Automated API Testing
 
@@ -737,9 +707,6 @@ curl http://localhost:3000/api/saved-artifacts
 
 # Load bundle
 curl "http://localhost:3000/api/load-bundle?fileName=test-bundle.yaml"
-
-# Checkpoint mapping
-curl http://localhost:3000/api/check-checkpoint-mapping
 
 # Installer logs
 curl "http://localhost:3000/api/installer-logs?lines=20"

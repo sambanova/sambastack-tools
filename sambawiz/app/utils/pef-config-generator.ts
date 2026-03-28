@@ -14,7 +14,6 @@ interface AppConfig {
   checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
-  betaFeatures?: string[];
 }
 
 interface PefConfig {
@@ -261,7 +260,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
 
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
 
-    // Apply DYT precedence logic based on betaFeatures config
+    // Apply DYT precedence logic (DYT is always enabled)
     const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
     if (!existsSync(pefMappingPath)) {
       return {
@@ -269,7 +268,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
         error: 'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.',
       };
     }
-    const dytEnabled = Array.isArray(config.betaFeatures) && config.betaFeatures.includes('dyt');
+    const dytEnabled = true;
     const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
     for (const pefNames of Object.values(pefMapping)) {
       const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
