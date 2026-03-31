@@ -1,0 +1,72 @@
+apiVersion: sambanova.ai/v1alpha1
+kind: BundleTemplate
+metadata:
+  name: bt-30-march-bt
+spec:
+  models:
+    DeepSeek-R1-0528:
+      experts:
+        128k:
+          configs:
+          - pef: deepseek-ss131072-bs1:1
+        16k:
+          configs:
+          - pef: deepseek-ss16384-bs1:1
+        32k:
+          configs:
+          - pef: deepseek-ss32768-bs1:2
+    Meta-Llama-3.1-405B-Instruct:
+      experts:
+        16k:
+          configs:
+          - pef: llama-3p1-405b-ss16384-bs1-sd5:1
+        4k:
+          configs:
+          - pef: llama-3p1-405b-ss4096-bs1-sd11:1
+        4k:
+          configs:
+          - pef: llama-3p1-405b-ss4096-bs2-sd5:1
+    Meta-Llama-3.2-1B-Instruct:
+      experts:
+        16k:
+          configs:
+          - pef: llama-3p1-1b-ss16384-bs1:1
+        4k:
+          configs:
+          - pef: llama-3p1-1b-ss4096-bs1:1
+        4k:
+          configs:
+          - pef: llama-3p1-1b-ss4096-bs2:2
+  owner: no-reply@sambanova.ai
+  secretNames:
+  - sambanova-artifact-reader
+  usePefCRs: true
+---
+apiVersion: sambanova.ai/v1alpha1
+kind: Bundle
+metadata:
+  name: b-30-march-bt
+spec:
+  checkpoints:
+    DEEPSEEK_R1_0528_CKPT:
+      source: gs://ext-sambastack-artifacts-prod-0/version/deepseek-0.0.4/pefs-checkpoints/ckpts/DeepSeek-R1-0528-per-tensor-RDU-packed
+      toolSupport: true
+    META_LLAMA_3_1_405B_INSTRUCT_CKPT:
+      source: gs://ext-sambastack-artifacts-prod-0/version/0.1.0/pefs-checkpoints/ckpts/Meta-Llama-3.1-405B-Instruct_0913
+      toolSupport: true
+    META_LLAMA_3_2_1B_INSTRUCT_CKPT:
+      source: gs://ext-sambastack-artifacts-prod-0/version/0.1.0/pefs-checkpoints/ckpts/meta-llama-Llama-3.2-1B-Instruct_untie
+      toolSupport: true
+  models:
+    DeepSeek-R1-0528:
+      checkpoint: DEEPSEEK_R1_0528_CKPT
+      template: DeepSeek-R1-0528
+    Meta-Llama-3.1-405B-Instruct:
+      checkpoint: META_LLAMA_3_1_405B_INSTRUCT_CKPT
+      template: Meta-Llama-3.1-405B-Instruct
+    Meta-Llama-3.2-1B-Instruct:
+      checkpoint: META_LLAMA_3_2_1B_INSTRUCT_CKPT
+      template: Meta-Llama-3.2-1B-Instruct
+  secretNames:
+  - sambanova-artifact-reader
+  template: bt-30-march-bt

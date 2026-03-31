@@ -10,11 +10,18 @@
     "type-check": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "dev-cli": "tsx bin/cli.ts",
+    "dev:cli": "tsx --watch bin/cli.ts",
+    "cli:watch": "tsx --watch bin/cli.ts",
+    "cli:build": "tsc --outDir dist --skipLibCheck bin/cli.ts",
+    "cli:type-check": "tsc --noEmit bin/cli.ts",
+    "cli:lint": "eslint bin/cli.ts bin/cli-utils.ts"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@inquirer/prompts": "^8.3.2",
     "@kubernetes/client-node": "^1.4.0",
     "@mui/icons-material": "^7.3.6",
     "@mui/material": "^7.3.6",
