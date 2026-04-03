@@ -36,8 +36,7 @@
 - [Quick Start](#quick-start)
 - [Menus](#menus)
   - [Main Menu](#main-menu)
-  - [Add / Edit Environment](#add--edit-environment)
-  - [Validate Setup & Environment](#validate-setup--environment)
+  - [Manage Environments](#manage-environments)
   - [Bundle Builder](#bundle-builder)
   - [Bundle Deployment](#bundle-deployment)
   - [Check Deployment Progress](#check-deployment-progress)
@@ -67,6 +66,8 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 
 ## Navigation
 
+### Menu navigation
+
 | Key | Action |
 |---|---|
 | `↑` `↓` | Move cursor up / down |
@@ -74,6 +75,20 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 | `Space` | Toggle checkbox *(multi-select menus only)* |
 | `q` or `Esc` | Go back / cancel |
 | `Ctrl+C` | Force exit |
+
+### Text input fields
+
+| Key | Action |
+|---|---|
+| `←` `→` | Move cursor left / right within text |
+| `Backspace` | Delete character before cursor |
+| `Ctrl+A` | Jump to start of line |
+| `Ctrl+E` | Jump to end of line |
+| `Home` / `End` | Jump to start / end of line |
+| `Enter` | Confirm input |
+| `Esc` | Cancel without saving |
+
+> Default values are pre-populated in the field and fully editable — use arrow keys to position and type to change.
 
 ---
 
@@ -86,7 +101,6 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 | `helm` | Installed and on `PATH` |
 | Kubernetes cluster | SambaStack installed, Helm chart ≥ `0.5.6` |
 | `app-config.json` | Configured with at least one valid environment |
-| Kubeconfig file | Valid `.yaml` placed in the `kubeconfigs/` directory |
 
 ---
 
@@ -105,39 +119,25 @@ npm install
 cp app-config.example.json app-config.json
 ```
 
-Edit `app-config.json`:
+Edit `app-config.json` with your `checkpointsDir` at minimum:
 
 ```json
 {
   "checkpointsDir": "gs://your-bucket/path/to/checkpoints/",
-  "currentKubeconfig": "my-env",
-  "kubeconfigs": {
-    "my-env": {
-      "file": "kubeconfigs/my-env.yaml",
-      "namespace": "default",
-      "apiDomain": "https://api.my-env.example.com/",
-      "apiKey": "your-api-key-here",
-      "uiDomain": "https://ui.my-env.example.com/"
-    }
-  }
+  "currentKubeconfig": "",
+  "kubeconfigs": {}
 }
 ```
 
 > **Important:** `app-config.json` is gitignored. Never commit it — it contains cluster credentials.
 
-### Step 3 — Add your kubeconfig
-
-```bash
-cp /path/to/your/kubeconfig.yaml ./kubeconfigs/my-env.yaml
-```
-
-> All files inside `kubeconfigs/` are gitignored except `kubeconfig_example.yaml`.
-
-### Step 4 — Launch the CLI
+### Step 3 — Launch the CLI
 
 ```bash
 npm run dev-cli
 ```
+
+Add your first environment from the **Manage Environments** menu. You can paste a base64-encoded kubeconfig directly — no manual file copying needed.
 
 ---
 
@@ -151,11 +151,8 @@ The main menu appears after launch and shows the active environment in brackets.
   › Main Menu  [my-env]
   ↑↓ navigate   Enter select   q / Esc to go back
 
-  ▶  ➕  Add / Edit Environment
-       Manage kubeconfig environments
-
-     🧭  Validate Setup & Environment
-       Check kubeconfig, helm, API key
+  ▶  ⚙️   Manage Environments
+       Add, activate, edit, delete and validate
 
      🧱  Bundle Builder
        Create and validate bundles
@@ -172,13 +169,11 @@ The main menu appears after launch and shows the active environment in brackets.
      ⏹️   Exit
 ```
 
-Select any option with `Enter`. The environment badge updates automatically when you switch environments.
-
 ---
 
-### ➕ Add / Edit Environment
+### ⚙️ Manage Environments
 
-Manage all environments in `app-config.json` without editing the file directly.
+All environment management — adding, activating, editing, deleting, and validating — is in one place.
 
 #### Step 1 — Select environment or add new
 
@@ -187,8 +182,9 @@ Manage all environments in `app-config.json` without editing the file directly.
 
   ▶  ➕  Add new environment
 
-     ●  my-env  ← active
      ○  staging-env
+     ○  sambastack-dev-2
+     ●  my-env  ← active
 
      ← Back
 ```
@@ -196,67 +192,108 @@ Manage all environments in `app-config.json` without editing the file directly.
 | Entry | Description |
 |---|---|
 | `➕ Add new environment` | Opens guided prompts to create a new entry |
-| `● name ← active` | Currently selected environment |
+| `● name ← active` | Currently active environment |
 | `○ name` | Another configured environment |
 
-#### Step 2 — Choose action for an existing environment
+#### Step 2 — Actions for an existing environment
 
 ```
   › my-env:
 
-  ▶  ✏️   Edit
+  ▶  ⚡  Activate
+     🔍  Validate
+     ✏️   Edit
      🗑️   Delete
      ← Back
 ```
 
+> **Activate** is only shown for non-active environments. After Edit or Validate the sub-menu stays open — only Activate, Delete, or Back return to the main menu.
+
 ---
 
-#### Adding a New Environment
+#### ➕ Adding a New Environment
 
-Select **➕ Add new environment** and fill in each prompt. Press `Esc` at any field to cancel without saving.
+Select **➕ Add new environment**. The CLI walks through 6 steps. Press `Esc` at any field to cancel without saving.
 
 ```
-  › Environment name  Esc cancel: my-env
+  1/6  Environment name  Esc cancel: my-env
 
-  › Kubeconfig file path (relative to project root)  Esc cancel: kubeconfigs/my-env.yaml
+  Paste the base64-encoded kubeconfig or enter a file path.
+  The file will be saved as kubeconfigs/kubeconfig-my-env.yaml
 
-  › Namespace  (default)  Esc cancel: default
+  2/6  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
 
-  › API Domain (optional)  Esc cancel: https://api.my-env.example.com/
+  3/6  Namespace  Esc cancel: default
 
-  › API Key (optional)  Esc cancel:
+  4/6  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
+
+  5/6  API Domain (optional)  Esc cancel: https://api.my-env.example.com/
+
+  6/6  API Key (optional)  Esc cancel: your-api-key-here
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| Environment name | Yes | Key used in `kubeconfigs` object |
-| Kubeconfig file path | Yes | Relative to project root, e.g. `kubeconfigs/my-env.yaml` |
+| Environment name | Yes | Unique name, no spaces |
+| Kubeconfig | Yes | Base64-encoded string **or** path to a `.yaml` file |
 | Namespace | Yes | Kubernetes namespace (defaults to `default`) |
+| UI Domain | No | SambaStack UI URL |
 | API Domain | No | Required for Playground chat |
 | API Key | No | Required for Playground chat |
+
+**Kubeconfig input** — the CLI auto-detects the format:
+- If it contains `/`, `\`, `~`, or ends in `.yaml` → treated as a file path (copied in)
+- Otherwise → treated as a base64 string and decoded
+
+The kubeconfig is always saved as `kubeconfigs/kubeconfig-<name>.yaml`.
 
 On success:
 
 ```
-  ✅ Environment "my-env" added.
+  ✅ Environment "my-env" added and set as active.
+  Kubeconfig        kubeconfigs/kubeconfig-my-env.yaml
+  UI Domain         https://ui.my-env.example.com/
+  API Domain        https://api.my-env.example.com/
+
+  ✔  Checkpoint mapping generated  (19 models)
 ```
+
+The checkpoint mapping (`app/data/checkpoint_mapping.json`) is generated automatically from the cluster — Bundle Builder is ready immediately.
 
 ---
 
-#### Editing an Environment
+#### ⚡ Activating an Environment
 
-Select an existing environment → **✏️ Edit**. Each field shows the current value as a default — press `Enter` to keep it or type a new value.
+Select any non-active environment → **⚡ Activate**.
+
+```
+  ✅ "my-env" is now the active environment.
+  ✔  Checkpoint mapping generated  (19 models)
+```
+
+The checkpoint mapping is regenerated from the newly activated cluster so Bundle Builder always reflects the correct models.
+
+---
+
+#### ✏️ Editing an Environment
+
+Select an environment → **✏️ Edit**. Every field is pre-populated with its current value — use `←` `→` to navigate, type to change, `Enter` to confirm.
 
 ```
   Editing: my-env  (Enter to keep current value)
 
-  › Kubeconfig file  (kubeconfigs/my-env.yaml)  Esc cancel:
-  › Namespace  (default)  Esc cancel:
-  › API Domain  (https://api.my-env.example.com/)  Esc cancel:
-  › API Key  (abcd••••1234)  Esc cancel:
+  › Kubeconfig file  Esc cancel: kubeconfigs/kubeconfig-my-env.yaml
+
+  › Namespace  Esc cancel: default
+
+  › UI Domain  Esc cancel: https://ui.my-env.example.com/
+
+  › API Domain  Esc cancel: https://api.my-env.example.com/
+
+  › API Key  Esc cancel: your-api-key-here
 ```
 
-On success:
+On success the sub-menu reappears so you can validate or continue editing.
 
 ```
   ✅ Environment "my-env" updated.
@@ -264,47 +301,21 @@ On success:
 
 ---
 
-#### Deleting an Environment
+#### 🔍 Validating an Environment
 
-Select an existing environment → **🗑️ Delete**. A confirmation prompt prevents accidental deletion.
-
-```
-  › Delete environment "my-env"? [y/N]  Esc cancel:
-```
-
-> **Note:** If you delete the active environment, the CLI automatically switches to the next available one. If none remain, `currentKubeconfig` is set to `null` and you must add a new environment.
-
----
-
-### 🧭 Validate Setup & Environment
-
-Runs a full connectivity and configuration check for any environment.
-
-#### Step 1 — Select environment to validate
+Select an environment → **🔍 Validate**. Runs a full connectivity and configuration check.
 
 ```
-  › Select environment to validate:
+  ╭──────────────────────────────────────────────────────────╮
+  │ 🧭  Validate Setup & Environment                         │
+  ╰──────────────────────────────────────────────────────────╯
 
-  ▶  ● my-env       ns:default  ← active
-     ○ staging-env  ns:staging
-     ← Back
-```
-
-Environments with a missing kubeconfig are flagged:
-
-```
-     ● broken-env   ns:default  kubeconfig missing
-```
-
-#### Step 2 — Validation results
-
-```
   Environment    my-env
   Namespace      default
   ────────────────────────────────────────────────────────
 
-  ✔  Kubeconfig         kubeconfigs/my-env.yaml
-  ✔  Helm               v3.14.0+g4f8a2b1
+  ✔  Kubeconfig         kubeconfigs/kubeconfig-my-env.yaml
+  ✔  Helm               v4.0.1+g12500dd
   ✔  SambaStack         0.5.8  (min: 0.5.6)
   ✔  Kubernetes         connection OK
   ⚠  Namespace          using default
@@ -312,9 +323,11 @@ Environments with a missing kubeconfig are flagged:
   API Domain     https://api.my-env.example.com/
   API Key        abcd••••••••1234
 
-  ✔  API reachable      (12 models)
-       DeepSeek-R1-0528, Llama-4-Maverick-17B +10 more
-  ✔  API key valid      (tested with DeepSeek-R1-0528)
+  ℹ  /v1/models not exposed on this cluster  (API key check will confirm auth)
+  ✔  API key valid      (auth passed)
+
+  UI Domain      https://ui.my-env.example.com/
+  ✔  UI Domain reachable  (200)
 
   ────────────────────────────────────────────────────────
   ✅ All checks passed!
@@ -323,36 +336,44 @@ Environments with a missing kubeconfig are flagged:
 | Icon | Meaning |
 |---|---|
 | `✔` | Check passed |
-| `✖` | Check failed |
+| `✖` | Check failed — blocks `allPassed` |
 | `⚠` | Warning (non-blocking) |
+| `ℹ` | Informational |
 
 | Check | What is verified |
 |---|---|
 | Kubeconfig | File exists at the configured path |
 | Helm | `helm` binary found on `PATH` |
-| SambaStack | `helm list -n sambastack` chart version ≥ minimum required |
+| SambaStack | Chart version found via `helm list -A`; falls back to per-namespace if RBAC denies `-A`; version compared to minimum in `VERSION` file |
 | Kubernetes | `kubectl cluster-info` responds within 8 s |
 | Namespace | Namespace exists on cluster (skipped for `default`) |
-| API Domain | `GET /v1/models` returns HTTP 2xx |
+| API Domain | `GET /v1/models` — 2xx shows model list; 404 shown as info (not an error) |
 | API Key | `POST /v1/chat/completions` passes authentication |
-| UI Domain *(optional)* | HTTP reachable if `uiDomain` is set |
+| UI Domain | Any HTTP response = reachable; only a connection failure is an error |
 
-If the SambaStack chart version is below the minimum:
+After validation the sub-menu reappears so you can edit and re-validate.
+
+---
+
+#### 🗑️ Deleting an Environment
+
+Select an environment → **🗑️ Delete**. A confirmation prompt prevents accidental deletion.
 
 ```
-  ✖  SambaStack 0.4.27  (minimum: 0.5.6)
-     The installed SambaStack Helm chart version (0.4.27) is older than
-     the minimum required version (0.5.6). Please upgrade your SambaStack
-     installation.
+  › Delete environment "my-env"? [y/N]  Esc cancel:
+
+  ✅ Environment "my-env" deleted.
 ```
 
-> Selecting a **different** environment switches the active environment and re-runs validation for the new one.
+> If you delete the active environment, `currentKubeconfig` is set to the next available one. If none remain it is set to `null` and you must add a new environment.
 
 ---
 
 ### 🧱 Bundle Builder
 
 Guides you through selecting models, configuring PEF settings, generating YAML, and optionally applying the bundle to the cluster.
+
+> Bundle Builder requires a valid `checkpoint_mapping.json`. This is generated automatically when you Add or Activate an environment.
 
 #### Workflow
 
@@ -468,7 +489,7 @@ When a draft model is selected, matching SS/BS configs are added automatically:
 #### Step 5 — Name the bundle
 
 ```
-  › Bundle name  (my-bundle-4721)  Esc cancel: deepseek-prod
+  › Bundle name  Esc cancel: deepseek-prod
 ```
 
 Sets resource names:
@@ -787,20 +808,41 @@ If the bundle has exactly one model, it is selected automatically:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `checkpointsDir` | string | **Yes** | GCS path prefix. Must end with `/` |
+| `checkpointsDir` | string | **Yes** | GCS path prefix for checkpoints. Must end with `/` |
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
-| `checkpoint_overrides` | object | No | Override checkpoint version per model |
+| `checkpoint_overrides` | object | No | Override checkpoint version per model e.g. `{ "Model-Name": "1" }` |
 
 ### Per-environment fields
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `file` | string | **Yes** | Kubeconfig YAML path relative to project root |
+| `file` | string | **Yes** | Kubeconfig YAML path relative to project root. Saved as `kubeconfigs/kubeconfig-<name>.yaml` when added via CLI |
 | `namespace` | string | **Yes** | Kubernetes namespace |
+| `uiDomain` | string | No | SambaStack UI URL (connectivity check in Validate) |
 | `apiDomain` | string | Playground | API base URL e.g. `https://api.example.com/` |
 | `apiKey` | string | Playground | Bearer token for API requests |
-| `uiDomain` | string | No | SambaStack UI URL (optional connectivity check) |
+
+### Example
+
+```json
+{
+  "checkpointsDir": "gs://your-bucket/checkpoints/",
+  "currentKubeconfig": "my-env",
+  "kubeconfigs": {
+    "my-env": {
+      "file": "kubeconfigs/kubeconfig-my-env.yaml",
+      "namespace": "default",
+      "uiDomain": "https://ui.my-env.example.com/",
+      "apiDomain": "https://api.my-env.example.com/",
+      "apiKey": "your-api-key-here"
+    }
+  },
+  "checkpoint_overrides": {
+    "Llama-4-Maverick-17B-128E-Instruct": "1"
+  }
+}
+```
 
 ---
 
@@ -827,37 +869,45 @@ The file must be in the project root (`sambawiz/`).
 
 ---
 
-**Kubeconfig file not found**
+**Kubeconfig file not found when activating**
 
-Verify the `file` path in `app-config.json` resolves correctly:
+The `file` path in `app-config.json` must resolve correctly relative to the project root. When adding via CLI the file is saved automatically as `kubeconfigs/kubeconfig-<name>.yaml`.
 
 ```bash
 ls -la kubeconfigs/
 ```
-
-Paths are relative to project root — e.g. `kubeconfigs/my-env.yaml`.
 
 ---
 
 **Kubernetes connection fails / times out**
 
 ```bash
-kubectl get nodes --kubeconfig ./kubeconfigs/my-env.yaml
+kubectl get nodes --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 kubectl version --client
 helm version
 ```
 
-Ensure you are on the correct network or VPN. The CLI uses an 8-second timeout.
+Ensure you are on the correct network or VPN. The CLI uses an 8-second timeout for cluster-info.
 
 ---
 
-**SambaStack version too old**
+**SambaStack version check skipped**
 
-```
-helm list -n sambastack -o json
+The CLI tries `helm list -A` first. If cluster-wide RBAC is denied it falls back to `helm list -n <namespace>`, `helm list -n sambastack`, and `helm list -n default` in sequence.
+
+If all attempts fail, validate your kubeconfig has sufficient permissions:
+
+```bash
+helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 ```
 
-Compare the chart version to `minimum-sambastack-helm` in [VERSION](VERSION). Upgrade SambaStack if below the minimum.
+Check chart version against `minimum-sambastack-helm` in [VERSION](VERSION).
+
+---
+
+**No models available in Bundle Builder**
+
+`checkpoint_mapping.json` is empty or missing. It is generated automatically when you Add or Activate an environment. If the cluster was unreachable at that time, go to **Manage Environments** → select env → **Activate** to regenerate it.
 
 ---
 
@@ -865,7 +915,7 @@ Compare the chart version to `minimum-sambastack-helm` in [VERSION](VERSION). Up
 
 | HTTP code | Cause |
 |---|---|
-| 401 / 403 | `apiKey` invalid or expired — update in `app-config.json` |
+| 401 / 403 | `apiKey` invalid or expired — update via Edit in Manage Environments |
 | 404 | `apiDomain` URL wrong or model not deployed |
 | Connection error | `apiDomain` unreachable — check network / VPN |
 
