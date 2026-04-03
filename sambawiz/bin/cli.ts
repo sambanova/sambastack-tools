@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+/* eslint-disable @typescript-eslint/no-explicit-any */
 declare const process: any;
 
 // Allow self-signed SSL certificates for internal APIs
@@ -161,6 +162,73 @@ function buildDeploymentYaml(bundleName: string): { yaml: string; deploymentName
 
 const APP_DIR     = path.join(__dirname, '..', 'app');
 const DATA_DIR    = path.join(APP_DIR, 'data');
+
+// ─── generateCheckpointMapping() ─────────────────────────────────────────────
+
+function stripGcsPrefix(p: string): string {
+  return p.replace(/^gs:\/\/[^/]+\//, '').replace(/\/$/, '');
+}
+
+function highestVersion(versions: Record<string, any>): string {
+  const keys = Object.keys(versions);
+  return keys.sort((a, b) => {
+    const ap = a.split('.').map(Number);
+    const bp = b.split('.').map(Number);
+    for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+      const d = (ap[i] || 0) - (bp[i] || 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  })[keys.length - 1];
+}
+
+async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, checkpointOverrides: Record<string, string> = {}): Promise<{ count: number }> {
+  spinner.start('Generating checkpoint mapping from cluster...');
+  await tick();
+
+  const env = { ...process.env, KUBECONFIG: kubeconfigPath };
+  const raw = execSync(`kubectl -n ${namespace} get models -o json`, {
+    env,
+    encoding: 'utf-8',
+    timeout: 60000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const modelsData = JSON.parse(raw);
+  const mapping: Record<string, any> = {};
+
+  for (const item of modelsData.items || []) {
+    const modelName    = item.spec?.name;
+    const resourceName = item.metadata?.name;
+    const checkpoints  = item.spec?.checkpoints;
+    if (!modelName || !resourceName || !checkpoints) continue;
+
+    const firstKey = Object.keys(checkpoints)[0];
+    if (!firstKey) continue;
+
+    const versions = checkpoints[firstKey].versions;
+    if (!versions || Object.keys(versions).length === 0) continue;
+
+    const override = checkpointOverrides[modelName];
+    const selVer   = (override && versions[override]) ? override : highestVersion(versions);
+    const verData  = versions[selVer];
+    if (!verData?.source) continue;
+
+    const entry: any = {
+      path:          stripGcsPrefix(verData.source),
+      resource_name: resourceName,
+    };
+    if (verData.vision_embedding_checkpoint) {
+      entry.vision_embedding_checkpoint = stripGcsPrefix(verData.vision_embedding_checkpoint);
+    }
+    mapping[modelName] = entry;
+  }
+
+  const outputPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
+  writeFileSync(outputPath, JSON.stringify(mapping, null, 2) + '\n');
+  spinner.succeed(`Checkpoint mapping generated  ${chalk.reset(`(${Object.keys(mapping).length} models)`)}`);
+  return { count: Object.keys(mapping).length };
+}
 const CONFIG_PATH = path.join(__dirname, '..', 'app-config.json');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -456,10 +524,7 @@ async function multiSelect(_rl: any, message: string, choices: Choice[]): Promis
 const ESC = '\x1b';
 
 async function input(_rl: any, message: string, defaultValue = ''): Promise<string> {
-  const prompt = defaultValue
-    ? `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)} ${chalk.reset(`(${defaultValue})`)}  ${chalk.gray('Esc cancel')}: `
-    : `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)}  ${chalk.gray('Esc cancel')}: `;
-
+  const prompt = `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)}  ${chalk.gray('Esc cancel')}: `;
   process.stdout.write(prompt);
 
   // Save and remove ALL existing stdin listeners so readline cannot double-echo
@@ -472,7 +537,17 @@ async function input(_rl: any, message: string, defaultValue = ''): Promise<stri
   process.stdin.setRawMode(true);
   process.stdin.resume();
 
-  let buffer = '';
+  // Pre-populate buffer with defaultValue so user can edit it directly
+  let buffer  = defaultValue;
+  let cursor  = defaultValue.length;
+  if (defaultValue) process.stdout.write(chalk.reset(defaultValue));
+
+  // Redraw from cursor: erase to end, rewrite tail, move cursor back
+  const redraw = (fromCursor: number) => {
+    const tail = buffer.slice(fromCursor);
+    process.stdout.write('\x1b[K' + tail);                  // erase to EOL, write tail
+    if (tail.length > 0) process.stdout.write(`\x1b[${tail.length}D`); // move cursor back
+  };
 
   const result: string = await new Promise((resolve) => {
     const cleanup = (val: string) => {
@@ -483,20 +558,50 @@ async function input(_rl: any, message: string, defaultValue = ''): Promise<stri
 
     const onData = (chunk: Buffer) => {
       const code = chunk[0];
+
+      // Esc (bare or with null byte)
       if (code === 0x1b && (chunk.length === 1 || (chunk.length === 2 && chunk[1] === 0x00))) {
-        cleanup(ESC);                              // Esc (bare or with null byte)
-      } else if (code === 0x1b) {                  // Escape sequence (arrow keys etc) — ignore
-        // do nothing
-      } else if (code === 0x03) {                  // Ctrl+C
         cleanup(ESC);
-      } else if (code === 0x0d || code === 0x0a) { // Enter
-        cleanup(buffer.trim() || defaultValue);
-      } else if (code === 0x7f || code === 0x08) { // Backspace
-        if (buffer.length > 0) { buffer = buffer.slice(0, -1); process.stdout.write('\b \b'); }
-      } else if (code >= 0x20) {                   // Printable
+
+      // Escape sequences
+      } else if (code === 0x1b && chunk[1] === 0x5b) {
+        const arrow = chunk[2];
+        if (arrow === 0x43) {                              // right arrow
+          if (cursor < buffer.length) { cursor++; process.stdout.write('\x1b[C'); }
+        } else if (arrow === 0x44) {                       // left arrow
+          if (cursor > 0) { cursor--; process.stdout.write('\x1b[D'); }
+        } else if (arrow === 0x48 || chunk[2] === 0x31) {  // Home
+          if (cursor > 0) { process.stdout.write(`\x1b[${cursor}D`); cursor = 0; }
+        } else if (arrow === 0x46 || chunk[2] === 0x34) {  // End
+          if (cursor < buffer.length) { process.stdout.write(`\x1b[${buffer.length - cursor}C`); cursor = buffer.length; }
+        }
+
+      } else if (code === 0x03) {                          // Ctrl+C
+        cleanup(ESC);
+
+      } else if (code === 0x01) {                          // Ctrl+A — go to start
+        if (cursor > 0) { process.stdout.write(`\x1b[${cursor}D`); cursor = 0; }
+
+      } else if (code === 0x05) {                          // Ctrl+E — go to end
+        if (cursor < buffer.length) { process.stdout.write(`\x1b[${buffer.length - cursor}C`); cursor = buffer.length; }
+
+      } else if (code === 0x0d || code === 0x0a) {         // Enter
+        cleanup(buffer.trim());
+
+      } else if (code === 0x7f || code === 0x08) {         // Backspace
+        if (cursor > 0) {
+          buffer = buffer.slice(0, cursor - 1) + buffer.slice(cursor);
+          cursor--;
+          process.stdout.write('\x1b[D');                  // move left
+          redraw(cursor);
+        }
+
+      } else if (code >= 0x20) {                           // Printable character
         const ch = chunk.toString('utf8');
-        buffer += ch;
+        buffer = buffer.slice(0, cursor) + ch + buffer.slice(cursor);
+        cursor += ch.length;
         process.stdout.write(ch);
+        redraw(cursor);
       }
     };
 
@@ -521,7 +626,7 @@ async function confirm(rl: any, message: string, defaultTrue = true): Promise<bo
 // ─── addEnvironmentMenu() ────────────────────────────────────────────────────
 
 async function addEnvironmentMenu(rl: any) {
-  sectionHeader('Add / Edit Environment', '➕');
+  sectionHeader('Manage Environments', '⚙️');
 
   const appConfig = requireJson(CONFIG_PATH);
   const allEnvs   = Object.keys(appConfig.kubeconfigs || {});
@@ -540,71 +645,177 @@ async function addEnvironmentMenu(rl: any) {
   if (!selected || selected === 'back') return;
 
   if (selected === 'add') {
-    const name = await input(rl, 'Environment name');
+    // ── Step 1: Environment name ──────────────────────────────────────────────
+    const name = await input(rl, '1/6  Environment name');
     if (!name || name === ESC) return;
-    const file      = await input(rl, 'Kubeconfig file path (relative to project root)');
-    if (!file || file === ESC) return;
-    const ns        = await input(rl, 'Namespace', 'default');
+    if (/\s/.test(name)) { errorMsg('Environment name cannot contain spaces.'); return; }
+    if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
+
+    // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
+    process.stdout.write(chalk.gray('\n  Paste the base64-encoded kubeconfig or enter a file path.\n  The file will be saved as kubeconfigs/kubeconfig-' + name + '.yaml\n\n'));
+    const kubeconfigInput = await input(rl, '2/6  Kubeconfig (base64 or file path)');
+    if (!kubeconfigInput || kubeconfigInput === ESC) return;
+
+    // ── Step 3: Namespace ─────────────────────────────────────────────────────
+    const ns = await input(rl, '3/6  Namespace', 'default');
     if (ns === ESC) return;
-    const apiDomain = await input(rl, 'API Domain (optional)');
+
+    // ── Step 4: UI Domain ─────────────────────────────────────────────────────
+    const uiDomain = await input(rl, '4/6  UI Domain (optional)');
+    if (uiDomain === ESC) return;
+
+    // ── Step 5: API Domain ────────────────────────────────────────────────────
+    const apiDomain = await input(rl, '5/6  API Domain (optional)');
     if (apiDomain === ESC) return;
-    const apiKey    = await input(rl, 'API Key (optional)');
+
+    // ── Step 6: API Key ───────────────────────────────────────────────────────
+    const apiKey = await input(rl, '6/6  API Key (optional)');
     if (apiKey === ESC) return;
 
+    // ── Save kubeconfig file ──────────────────────────────────────────────────
+    const kubeconfigsDir = path.join(__dirname, '..', 'kubeconfigs');
+    if (!existsSync(kubeconfigsDir)) {
+      try { execSync(`mkdir -p "${kubeconfigsDir}"`); } catch {}
+    }
+    const destRelative = `kubeconfigs/kubeconfig-${name}.yaml`;
+    const destPath     = path.join(__dirname, '..', destRelative);
+
+    const looksLikePath = kubeconfigInput.includes('/') || kubeconfigInput.includes('\\') ||
+                          kubeconfigInput.startsWith('~') || /\.(yaml|yml)$/i.test(kubeconfigInput);
+
+    if (looksLikePath) {
+      const srcPath = path.isAbsolute(kubeconfigInput)
+        ? kubeconfigInput
+        : kubeconfigInput.startsWith('~')
+          ? kubeconfigInput.replace(/^~/, process.env.HOME || '')
+          : path.join(process.cwd(), kubeconfigInput);
+      if (!existsSync(srcPath)) { errorMsg(`File not found: ${srcPath}`); return; }
+      try { writeFileSync(destPath, readFileSync(srcPath, 'utf-8')); }
+      catch (e: any) { errorMsg(`Failed to copy kubeconfig: ${e.message}`); return; }
+    } else {
+      try {
+        const decoded = Buffer.from(kubeconfigInput.trim(), 'base64').toString('utf-8');
+        if (!decoded.includes('apiVersion') && !decoded.includes('clusters')) {
+          errorMsg('Decoded content does not look like a valid kubeconfig. Check your base64 string.'); return;
+        }
+        writeFileSync(destPath, decoded);
+      } catch (e: any) { errorMsg(`Failed to decode base64: ${e.message}`); return; }
+    }
+
+    // ── Write app-config.json ─────────────────────────────────────────────────
     appConfig.kubeconfigs = appConfig.kubeconfigs || {};
-    appConfig.kubeconfigs[name] = { file, namespace: ns || 'default' };
-    if (apiDomain) appConfig.kubeconfigs[name].apiDomain = apiDomain;
-    if (apiKey)    appConfig.kubeconfigs[name].apiKey    = apiKey;
-    if (!appConfig.currentKubeconfig) appConfig.currentKubeconfig = name;
+    appConfig.kubeconfigs[name] = {
+      file:      destRelative,
+      namespace: ns || 'default',
+      uiDomain:  uiDomain  || '',
+      apiDomain: apiDomain || '',
+      apiKey:    apiKey    || '',
+    };
+    appConfig.currentKubeconfig = name;
 
     writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
-    successMsg(`Environment "${name}" added.`);
+    successMsg(`Environment "${name}" added and set as active.`);
+    infoRow('Kubeconfig', destRelative);
+    if (uiDomain)  infoRow('UI Domain',  uiDomain);
+    if (apiDomain) infoRow('API Domain', apiDomain);
+    process.stdout.write('\n');
+
+    // ── Auto-generate checkpoint mapping ──────────────────────────────────────
+    try {
+      const overrides: Record<string, string> = appConfig.checkpoint_overrides || {};
+      await generateCheckpointMapping(destPath, ns || 'default', overrides);
+    } catch (e: any) {
+      spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
+      process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n  Run Validate to diagnose cluster connectivity.\n\n`));
+    }
     return;
   }
 
-  // Step 2: action on selected env
+  // Step 2: action loop — stays in sub-menu until Back/Activate/Delete
   const envName = selected;
-  const action  = await select(rl, `${envName}:`, [
-    { name: '✏️   Edit',           value: 'edit' },
-    { name: chalk.red('🗑️   Delete'), value: 'delete' },
-    { name: chalk.reset('← Back'), value: 'back' },
-  ]);
-  if (!action || action === 'back') return;
+  while (true) {
+    const freshConfig = requireJson(CONFIG_PATH);
+    const isCurrent   = envName === freshConfig.currentKubeconfig;
+    const actionChoices: Choice[] = [];
+    if (!isCurrent) actionChoices.push({ name: chalk.cyan('⚡  Activate'), value: 'activate' });
+    actionChoices.push({ name: '🔍  Validate',         value: 'validate' });
+    actionChoices.push({ name: '✏️   Edit',             value: 'edit' });
+    actionChoices.push({ name: chalk.red('🗑️   Delete'), value: 'delete' });
+    actionChoices.push({ name: chalk.reset('← Back'),   value: 'back' });
 
-  if (action === 'edit') {
-    const ec = appConfig.kubeconfigs[envName] || {};
-    process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(envName)}  (Enter to keep current value)\n\n`));
+    const action = await select(rl, `${envName}:`, actionChoices);
+    if (!action || action === 'back') break;
 
-    const file      = await input(rl, 'Kubeconfig file',   ec.file      || '');
-    if (file === ESC) return;
-    const ns        = await input(rl, 'Namespace',         ec.namespace || 'default');
-    if (ns === ESC) return;
-    const apiDomain = await input(rl, 'API Domain',        ec.apiDomain || '');
-    if (apiDomain === ESC) return;
-    const apiKey    = await input(rl, 'API Key',           ec.apiKey    || '');
-    if (apiKey === ESC) return;
+    if (action === 'activate') {
+      const ec    = freshConfig.kubeconfigs[envName];
+      const kFile = ec?.file;
+      if (!kFile || !existsSync(path.join(__dirname, '..', kFile))) {
+        errorMsg(`Kubeconfig file not found for "${envName}": ${kFile || '(not set)'}`);
+        continue;
+      }
+      freshConfig.currentKubeconfig = envName;
+      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      successMsg(`"${envName}" is now the active environment.`);
+      const kPath  = path.join(__dirname, '..', kFile);
+      const ns     = ec.namespace || 'default';
+      const overrides: Record<string, string> = freshConfig.checkpoint_overrides || {};
+      try {
+        await generateCheckpointMapping(kPath, ns, overrides);
+      } catch (e: any) {
+        spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
+        process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n  Run Validate to diagnose cluster connectivity.\n\n`));
+      }
+      break; // leave sub-menu after activate
 
-    appConfig.kubeconfigs[envName] = {
-      ...ec,
-      file:      file      || ec.file,
-      namespace: ns        || ec.namespace,
-      apiDomain: apiDomain || ec.apiDomain,
-      apiKey:    apiKey    || ec.apiKey,
-    };
-    writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
-    successMsg(`Environment "${envName}" updated.`);
+    } else if (action === 'validate') {
+      const ec    = freshConfig.kubeconfigs[envName];
+      if (!ec) { errorMsg(`Environment "${envName}" not found.`); continue; }
+      const ns    = ec.namespace || 'default';
+      const kPath = path.join(__dirname, '..', ec.file || '');
+      if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
+      await runValidationChecks(envName, ec, ns);
+      // stay in sub-menu after validate
 
-  } else if (action === 'delete') {
-    const ok = await confirm(rl, chalk.red(`Delete environment "${envName}"?`), false);
-    if (!ok) { process.stdout.write(chalk.reset('  Cancelled.\n\n')); return; }
+    } else if (action === 'edit') {
+      const ec = freshConfig.kubeconfigs[envName] || {};
+      process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(envName)}  (Enter to keep current value)\n\n`));
 
-    delete appConfig.kubeconfigs[envName];
-    if (appConfig.currentKubeconfig === envName) {
-      const remaining = Object.keys(appConfig.kubeconfigs);
-      appConfig.currentKubeconfig = remaining[0] || null;
+      const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
+      if (file === ESC) continue;
+      const ns        = await input(rl, 'Namespace',        ec.namespace || 'default');
+      if (ns === ESC) continue;
+      const uiDomain  = await input(rl, 'UI Domain',        ec.uiDomain  || '');
+      if (uiDomain === ESC) continue;
+      const apiDomain = await input(rl, 'API Domain',       ec.apiDomain || '');
+      if (apiDomain === ESC) continue;
+      const apiKey    = await input(rl, 'API Key',          ec.apiKey    || '');
+      if (apiKey === ESC) continue;
+
+      freshConfig.kubeconfigs[envName] = {
+        ...ec,
+        file:      file      || ec.file,
+        namespace: ns        || ec.namespace,
+        uiDomain:  uiDomain,
+        apiDomain: apiDomain,
+        apiKey:    apiKey,
+      };
+      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      successMsg(`Environment "${envName}" updated.`);
+      // stay in sub-menu after edit
+
+    } else if (action === 'delete') {
+      const ok = await confirm(rl, chalk.red(`Delete environment "${envName}"?`), false);
+      if (!ok) { process.stdout.write(chalk.reset('  Cancelled.\n\n')); continue; }
+
+      delete freshConfig.kubeconfigs[envName];
+      if (freshConfig.currentKubeconfig === envName) {
+        const remaining = Object.keys(freshConfig.kubeconfigs);
+        freshConfig.currentKubeconfig = remaining[0] || null;
+      }
+      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      successMsg(`Environment "${envName}" deleted.`);
+      break; // leave sub-menu after delete
     }
-    writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
-    successMsg(`Environment "${envName}" deleted.`);
   }
 }
 
@@ -702,8 +913,7 @@ async function startCli() {
   while (!exitLoop) {
     const envBadge = chalk.hex(BRAND)(`[${currentEnv}]`);
     const action = await select(rl, `Main Menu  ${envBadge}`, [
-      { name: `➕  Add / Edit Environment`,           value: 'add_env',        hint: 'Manage kubeconfig environments' },
-      { name: `🧭  Validate Setup & Environment`,     value: 'validate_env',   hint: 'Check kubeconfig, helm, API key' },
+      { name: `⚙️   Manage Environments`,               value: 'add_env',        hint: 'Add, activate, edit, delete and validate' },
       { name: `🧱  Bundle Builder`,                   value: 'bundle_builder', hint: 'Create and validate bundles' },
       { name: `🚀  Bundle Deployment`,                  value: 'bundle_deploy',  hint: 'Deploy or delete bundles' },
       { name: `📈  Check Deployment Progress`,         value: 'monitor_deploy', hint: 'Live pod status monitor' },
@@ -719,19 +929,6 @@ async function startCli() {
         // Reload config in case environment changed
         { const r = loadEnvConfig(); if (!r.error) ({ appConfig: liveAppConfig, envConfig, namespace, currentEnv } = r); }
         break;
-      case 'validate_env': {
-        let switchedEnv = await validateEnvironment(rl, envConfig, namespace);
-        while (switchedEnv) {
-          liveAppConfig.currentKubeconfig = switchedEnv;
-          writeFileSync(CONFIG_PATH, JSON.stringify(liveAppConfig, null, 2) + '\n');
-          const r = loadEnvConfig();
-          if (r.error) { errorMsg(r.error); break; }
-          ({ appConfig: liveAppConfig, envConfig, namespace, currentEnv } = r);
-          successMsg(`Switched to: ${currentEnv}  (namespace: ${namespace})`);
-          switchedEnv = await validateEnvironment(rl, envConfig, namespace);
-        }
-        break;
-      }
       case 'bundle_builder':
         await bundleBuilderMenu(rl, liveAppConfig, namespace);
         break;
@@ -754,42 +951,13 @@ async function startCli() {
   rl.close();
 }
 
-// ─── validateEnvironment() ───────────────────────────────────────────────────
+// ─── runValidationChecks() ───────────────────────────────────────────────────
 
-async function validateEnvironment(rl: any, envConfig: any, namespace: string): Promise<string | null> {
-  const appConfig  = requireJson(CONFIG_PATH);
-  const currentEnv = appConfig.currentKubeconfig;
-
+async function runValidationChecks(envName: string, envConfig: any, namespace: string) {
   sectionHeader('Validate Setup & Environment', '🧭');
 
-  const allEnvs = Object.keys(appConfig.kubeconfigs || {});
-  const envChoices: Choice[] = allEnvs.map(env => {
-    const isCurrent = env === currentEnv;
-    const ec = appConfig.kubeconfigs[env];
-    const ns = ec.namespace || 'default';
-    const hasKube = ec.file && existsSync(path.join(__dirname, '..', ec.file));
-    let name: string;
-    if (isCurrent)    name = `${chalk.green('●')} ${chalk.green.bold(env)} ${chalk.reset(`ns:${ns}`)} ${chalk.cyan('← active')}`;
-    else if (!hasKube) name = `${chalk.red('●')} ${env} ${chalk.reset(`ns:${ns}`)} ${chalk.yellow('kubeconfig missing')}`;
-    else               name = `${chalk.reset('○')} ${env} ${chalk.reset(`ns:${ns}`)}`;
-    return { name, value: env };
-  });
-  envChoices.push({ name: chalk.reset('← Back'), value: 'back' });
-
-  const selectedEnv = await select(rl, 'Select environment to validate:', envChoices);
-  if (!selectedEnv || selectedEnv === 'back') return null;
-
-  if (selectedEnv !== currentEnv) {
-    const kFile = appConfig.kubeconfigs[selectedEnv]?.file;
-    if (!kFile || !existsSync(path.join(__dirname, '..', kFile))) {
-      errorMsg(`Kubeconfig missing for "${selectedEnv}": ${kFile || '(not set)'}`);
-      return null;
-    }
-    return selectedEnv;
-  }
-
   process.stdout.write('\n');
-  infoRow('Environment', currentEnv);
+  infoRow('Environment', envName);
   infoRow('Namespace',   namespace);
   process.stdout.write('\n');
   hr();
@@ -825,11 +993,28 @@ async function validateEnvironment(rl: any, envConfig: any, namespace: string): 
   await tick();
   try {
     const minVer  = getMinHelmVersion();
-    const raw     = execSync('helm list -n sambastack -o json', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+    const kPath   = path.join(__dirname, '..', kFile);
+    const helmEnv = { ...process.env, KUBECONFIG: kPath };
+    // Try all namespaces first; fall back to common sambastack namespaces if cluster-wide list is denied
+    let raw: string;
+    try {
+      raw = execSync('helm list -A -o json', { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+    } catch {
+      // -A may be forbidden — try known namespaces directly
+      const tryNs = [namespace, 'sambastack', 'default'].filter(Boolean);
+      let found = false;
+      for (const ns of tryNs) {
+        try {
+          raw = execSync(`helm list -n ${ns} -o json`, { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+          found = true; break;
+        } catch { /* try next */ }
+      }
+      if (!found) throw new Error('helm list failed in all tried namespaces');
+    }
     const releases: any[] = JSON.parse(raw);
     const release = releases.find((r: any) => typeof r.chart === 'string' && r.chart.toLowerCase().startsWith('sambastack'));
     if (!release) {
-      spinner.warn('SambaStack release not found in namespace "sambastack"');
+      spinner.warn('SambaStack release not found in any namespace');
     } else {
       const chartVer = release.chart.replace(/^sambastack-/i, '');
       if (minVer && compareVersions(chartVer, minVer) < 0) {
@@ -913,6 +1098,8 @@ async function validateEnvironment(rl: any, envConfig: any, namespace: string): 
       } else if (code === 401 || code === 403) {
         spinner.fail(`/v1/models → ${code}  API key may be invalid`);
         allPassed = false;
+      } else if (code === 404) {
+        spinner.info('/v1/models not exposed on this cluster  (API key check will confirm auth)');
       } else {
         spinner.warn(`/v1/models → ${code}`);
       }
@@ -960,8 +1147,15 @@ async function validateEnvironment(rl: any, envConfig: any, namespace: string): 
         `curl -sk -o /dev/null -w "%{http_code}" --head "${envConfig.uiDomain}"`,
         { encoding: 'utf-8', timeout: 10000 }
       ).trim());
-      if (code >= 200 && code < 400) spinner.succeed('UI Domain reachable');
-      else spinner.warn(`UI Domain → ${code}`);
+      if (code === 0) {
+        spinner.fail('UI Domain unreachable — no response');
+        allPassed = false;
+      } else if (code === 401 || code === 403) {
+        spinner.warn(`UI Domain → ${code}  (server reachable, auth required)`);
+      } else {
+        // Any HTTP response (including 404) means the server is up
+        spinner.succeed(`UI Domain reachable  ${chalk.reset(`(${code})`)}`);
+      }
     } catch (e: any) {
       spinner.fail(`UI Domain unreachable: ${e.message.split('\n')[0]}`);
       allPassed = false;
@@ -972,8 +1166,6 @@ async function validateEnvironment(rl: any, envConfig: any, namespace: string): 
   hr();
   if (allPassed) successMsg('All checks passed!');
   else errorMsg('Some checks failed — review app-config.json');
-
-  return null;
 }
 
 // tiny async tick so spinner renders at least once
@@ -1639,12 +1831,15 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
       process.stdout.write(chalk.reset('\n  ◌  Thinking...\r'));
 
+      const t0  = Date.now();
       const res = execSync(
         `curl -sk -w "\\n%{http_code}" -X POST "${apiUrl}" ` +
         `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
         `-d @"${tmpPayload}"`,
         { encoding: 'utf-8', timeout: 120000 }
       );
+      const totalMs = Date.now() - t0;
+
       const parts    = res.trimEnd().split('\n');
       const httpCode = safeParseInt(parts.pop());
       const body     = parts.join('\n');
@@ -1656,7 +1851,27 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
         const rawMsg = data.choices?.[0]?.message?.content || '';
         const msg    = rawMsg.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
         const ts     = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        process.stdout.write(`\n  ${chalk.hex(BRAND).bold('◈  Assistant')}  ${chalk.reset(ts)}\n`);
+
+        // ── Performance metrics ──
+        const usage        = data.usage || {};
+        const completionTokens: number = usage.completion_tokens || 0;
+        const totalSec     = totalMs / 1000;
+        const ttft: number = data.time_info?.time_to_first_token ?? data.ttft ?? 0;
+        const tps          = completionTokens > 0 && totalSec > 0
+          ? (completionTokens / totalSec).toFixed(2)
+          : null;
+
+        process.stdout.write(`\n  ${chalk.hex(BRAND).bold('◈  Assistant')}  ${chalk.reset(ts)}`);
+
+        if (tps || ttft || totalSec) {
+          const parts: string[] = [];
+          if (tps)      parts.push(chalk.green.bold(`${tps} t/s`));
+          if (totalSec) parts.push(chalk.reset(`${totalSec.toFixed(2)}s total`));
+          if (ttft)     parts.push(chalk.reset(`${ttft.toFixed(2)}s to first token`));
+          process.stdout.write(`   ${chalk.gray('·')}   ${parts.join(chalk.gray('   ·   '))}`);
+        }
+        process.stdout.write('\n');
+
         hr();
         process.stdout.write(`  ${msg}\n`);
         hr();
