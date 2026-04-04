@@ -37,6 +37,11 @@
 - [Menus](#menus)
   - [Main Menu](#main-menu)
   - [Manage Environments](#manage-environments)
+    - [Add New Environment](#add-new-environment)
+    - [Activate an Environment](#activate-an-environment)
+    - [Validate an Environment](#validate-an-environment)
+    - [Edit an Environment](#edit-an-environment)
+    - [Delete an Environment](#delete-an-environment)
   - [Bundle Builder](#bundle-builder)
   - [Bundle Deployment](#bundle-deployment)
   - [Check Deployment Progress](#check-deployment-progress)
@@ -80,7 +85,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 
 | Key | Action |
 |---|---|
-| `←` `→` | Move cursor left / right within text |
+| `←` `→` | Move cursor within text |
 | `Backspace` | Delete character before cursor |
 | `Ctrl+A` | Jump to start of line |
 | `Ctrl+E` | Jump to end of line |
@@ -88,7 +93,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 | `Enter` | Confirm input |
 | `Esc` | Cancel without saving |
 
-> Default values are pre-populated in the field and fully editable — use arrow keys to position and type to change.
+> Default values are pre-populated and fully editable — use arrow keys to position, type to change.
 
 ---
 
@@ -129,7 +134,7 @@ Edit `app-config.json` with your `checkpointsDir` at minimum:
 }
 ```
 
-> **Important:** `app-config.json` is gitignored. Never commit it — it contains cluster credentials.
+> `app-config.json` is gitignored. Never commit it — it contains cluster credentials.
 
 ### Step 3 — Launch the CLI
 
@@ -145,7 +150,7 @@ Add your first environment from the **Manage Environments** menu. You can paste 
 
 ### Main Menu
 
-The main menu appears after launch and shows the active environment in brackets.
+Shown after launch. The active environment name appears in brackets.
 
 ```
   › Main Menu  [my-env]
@@ -173,11 +178,13 @@ The main menu appears after launch and shows the active environment in brackets.
 
 ### ⚙️ Manage Environments
 
-All environment management — adding, activating, editing, deleting, and validating — is in one place.
-
-#### Step 1 — Select environment or add new
+All environment management is in one place. Select an environment to see available actions.
 
 ```
+  ╭──────────────────────────────────────────────────────────╮
+  │ ⚙️  Manage Environments                                  │
+  ╰──────────────────────────────────────────────────────────╯
+
   › Select environment:
 
   ▶  ➕  Add new environment
@@ -189,37 +196,37 @@ All environment management — adding, activating, editing, deleting, and valida
      ← Back
 ```
 
-| Entry | Description |
+| Indicator | Meaning |
 |---|---|
-| `➕ Add new environment` | Opens guided prompts to create a new entry |
-| `● name ← active` | Currently active environment |
-| `○ name` | Another configured environment |
+| `●  name  ← active` | Currently active environment |
+| `○  name` | Configured but not active |
+| `➕  Add new environment` | Create a new entry |
 
-#### Step 2 — Actions for an existing environment
+Selecting an existing environment opens its sub-menu:
 
 ```
   › my-env:
 
-  ▶  ⚡  Activate
+  ▶  ⚡  Activate       ← only shown when not active
      🔍  Validate
      ✏️   Edit
      🗑️   Delete
      ← Back
 ```
 
-> **Activate** is only shown for non-active environments. After Edit or Validate the sub-menu stays open — only Activate, Delete, or Back return to the main menu.
+> After **Edit** or **Validate** the sub-menu stays open. **Activate**, **Delete**, and **Back** exit to the environment list.
 
 ---
 
-#### ➕ Adding a New Environment
+#### ➕ Add New Environment
 
-Select **➕ Add new environment**. The CLI walks through 6 steps. Press `Esc` at any field to cancel without saving.
+A 6-step guided flow. Press `Esc` at any step to cancel without saving.
 
 ```
   1/6  Environment name  Esc cancel: my-env
 
-  Paste the base64-encoded kubeconfig or enter a file path.
-  The file will be saved as kubeconfigs/kubeconfig-my-env.yaml
+       Paste the base64-encoded kubeconfig or enter a file path.
+       The file will be saved as kubeconfigs/kubeconfig-my-env.yaml
 
   2/6  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
 
@@ -232,20 +239,18 @@ Select **➕ Add new environment**. The CLI walks through 6 steps. Press `Esc` a
   6/6  API Key (optional)  Esc cancel: your-api-key-here
 ```
 
-| Field | Required | Description |
+| Field | Required | Notes |
 |---|---|---|
-| Environment name | Yes | Unique name, no spaces |
-| Kubeconfig | Yes | Base64-encoded string **or** path to a `.yaml` file |
-| Namespace | Yes | Kubernetes namespace (defaults to `default`) |
+| Environment name | Yes | No spaces allowed. Must be unique. |
+| Kubeconfig | Yes | Base64 string **or** file path. Saved as `kubeconfigs/kubeconfig-<name>.yaml` |
+| Namespace | Yes | Defaults to `default` |
 | UI Domain | No | SambaStack UI URL |
-| API Domain | No | Required for Playground chat |
-| API Key | No | Required for Playground chat |
+| API Domain | No | Required for Playground |
+| API Key | No | Required for Playground |
 
-**Kubeconfig input** — the CLI auto-detects the format:
-- If it contains `/`, `\`, `~`, or ends in `.yaml` → treated as a file path (copied in)
-- Otherwise → treated as a base64 string and decoded
-
-The kubeconfig is always saved as `kubeconfigs/kubeconfig-<name>.yaml`.
+**Kubeconfig auto-detection:**
+- Contains `/`, `\`, `~`, or ends in `.yaml` → treated as a file path
+- Otherwise → decoded as base64
 
 On success:
 
@@ -255,55 +260,34 @@ On success:
   UI Domain         https://ui.my-env.example.com/
   API Domain        https://api.my-env.example.com/
 
-  ✔  Checkpoint mapping generated  (19 models)
+  ✔  Checkpoint mapping generated
 ```
 
-The checkpoint mapping (`app/data/checkpoint_mapping.json`) is generated automatically from the cluster — Bundle Builder is ready immediately.
+`checkpoint_mapping.json` is generated automatically from the cluster so Bundle Builder is ready immediately.
 
 ---
 
-#### ⚡ Activating an Environment
+#### ⚡ Activate an Environment
 
-Select any non-active environment → **⚡ Activate**.
+Sets an environment as active and regenerates `checkpoint_mapping.json`.
 
 ```
   ✅ "my-env" is now the active environment.
-  ✔  Checkpoint mapping generated  (19 models)
+
+  ✔  Checkpoint mapping generated
 ```
 
-The checkpoint mapping is regenerated from the newly activated cluster so Bundle Builder always reflects the correct models.
-
----
-
-#### ✏️ Editing an Environment
-
-Select an environment → **✏️ Edit**. Every field is pre-populated with its current value — use `←` `→` to navigate, type to change, `Enter` to confirm.
+If the kubeconfig file is missing:
 
 ```
-  Editing: my-env  (Enter to keep current value)
-
-  › Kubeconfig file  Esc cancel: kubeconfigs/kubeconfig-my-env.yaml
-
-  › Namespace  Esc cancel: default
-
-  › UI Domain  Esc cancel: https://ui.my-env.example.com/
-
-  › API Domain  Esc cancel: https://api.my-env.example.com/
-
-  › API Key  Esc cancel: your-api-key-here
-```
-
-On success the sub-menu reappears so you can validate or continue editing.
-
-```
-  ✅ Environment "my-env" updated.
+  ❌ Kubeconfig file not found for "my-env": kubeconfigs/kubeconfig-my-env.yaml
 ```
 
 ---
 
-#### 🔍 Validating an Environment
+#### 🔍 Validate an Environment
 
-Select an environment → **🔍 Validate**. Runs a full connectivity and configuration check.
+Runs a full connectivity and configuration check. If all checks pass, `checkpoint_mapping.json` is also regenerated.
 
 ```
   ╭──────────────────────────────────────────────────────────╮
@@ -312,7 +296,7 @@ Select an environment → **🔍 Validate**. Runs a full connectivity and config
 
   Environment    my-env
   Namespace      default
-  ────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────
 
   ✔  Kubeconfig         kubeconfigs/kubeconfig-my-env.yaml
   ✔  Helm               v4.0.1+g12500dd
@@ -329,35 +313,66 @@ Select an environment → **🔍 Validate**. Runs a full connectivity and config
   UI Domain      https://ui.my-env.example.com/
   ✔  UI Domain reachable  (200)
 
-  ────────────────────────────────────────────────────────
+  ──────────────────────────────────────────────────────────
   ✅ All checks passed!
+
+  ✔  Checkpoint mapping generated
 ```
 
 | Icon | Meaning |
 |---|---|
-| `✔` | Check passed |
-| `✖` | Check failed — blocks `allPassed` |
+| `✔` | Passed |
+| `✖` | Failed (blocks overall pass) |
 | `⚠` | Warning (non-blocking) |
 | `ℹ` | Informational |
 
 | Check | What is verified |
 |---|---|
-| Kubeconfig | File exists at the configured path |
+| Kubeconfig | File exists at configured path |
 | Helm | `helm` binary found on `PATH` |
-| SambaStack | Chart version found via `helm list -A`; falls back to per-namespace if RBAC denies `-A`; version compared to minimum in `VERSION` file |
+| SambaStack | Chart version via `helm list -A`; falls back per-namespace if RBAC denies `-A`; compared to `VERSION` file minimum |
 | Kubernetes | `kubectl cluster-info` responds within 8 s |
-| Namespace | Namespace exists on cluster (skipped for `default`) |
-| API Domain | `GET /v1/models` — 2xx shows model list; 404 shown as info (not an error) |
-| API Key | `POST /v1/chat/completions` passes authentication |
-| UI Domain | Any HTTP response = reachable; only a connection failure is an error |
+| Namespace | Exists on cluster (skipped for `default`) |
+| API `/v1/models` | 2xx = lists models; 404 = info (not an error); 401/403 = key invalid |
+| API key | `POST /v1/chat/completions` auth check |
+| UI Domain | Any HTTP response = reachable; connection failure = error |
 
-After validation the sub-menu reappears so you can edit and re-validate.
+If SambaStack chart is below the minimum:
+
+```
+  ✖  SambaStack 0.4.27  (minimum: 0.5.6)
+     The installed SambaStack Helm chart version (0.4.27) is older than
+     the minimum required version (0.5.6). Please upgrade your SambaStack
+     installation.
+```
 
 ---
 
-#### 🗑️ Deleting an Environment
+#### ✏️ Edit an Environment
 
-Select an environment → **🗑️ Delete**. A confirmation prompt prevents accidental deletion.
+All fields are pre-populated with current values — use `←` `→` to navigate, type to change, `Enter` to keep.
+
+```
+  Editing: my-env  (Enter to keep current value)
+
+  › Kubeconfig file  Esc cancel: kubeconfigs/kubeconfig-my-env.yaml
+
+  › Namespace  Esc cancel: default
+
+  › UI Domain  Esc cancel: https://ui.my-env.example.com/
+
+  › API Domain  Esc cancel: https://api.my-env.example.com/
+
+  › API Key  Esc cancel: your-api-key-here
+
+  ✅ Environment "my-env" updated.
+```
+
+Sub-menu stays open after saving so you can validate or continue editing.
+
+---
+
+#### 🗑️ Delete an Environment
 
 ```
   › Delete environment "my-env"? [y/N]  Esc cancel:
@@ -365,29 +380,15 @@ Select an environment → **🗑️ Delete**. A confirmation prompt prevents acc
   ✅ Environment "my-env" deleted.
 ```
 
-> If you delete the active environment, `currentKubeconfig` is set to the next available one. If none remain it is set to `null` and you must add a new environment.
+> If the deleted environment was active, `currentKubeconfig` is automatically set to the next available environment. If none remain, it is set to `null`.
 
 ---
 
 ### 🧱 Bundle Builder
 
-Guides you through selecting models, configuring PEF settings, generating YAML, and optionally applying the bundle to the cluster.
+Guides you through selecting models, configuring PEF settings, previewing YAML, and optionally applying the bundle to the cluster.
 
-> Bundle Builder requires a valid `checkpoint_mapping.json`. This is generated automatically when you Add or Activate an environment.
-
-#### Workflow
-
-```
-  Select models  →  Select PEF configs  →  Optional draft model
-        ↓
-  Bundle summary  →  YAML preview  →  Name the bundle
-        ↓
-  Edit / Save / Continue  →  Apply to cluster? (optional)
-        ↓
-  Poll validation status (up to 90 s)
-```
-
----
+> Requires `checkpoint_mapping.json`. This is generated automatically when you Add, Activate, or successfully Validate an environment.
 
 #### Step 1 — Select models
 
@@ -397,33 +398,31 @@ Guides you through selecting models, configuring PEF settings, generating YAML, 
   ▶  ✅  Finish and Create Bundle
 
      DeepSeek-R1-0528
-     DeepSeek-R1
+     DeepSeek-V3-0324
      Llama-4-Maverick-17B-128E-Instruct
      Meta-Llama-3.1-405B-Instruct
-     Qwen2.5-72B-Instruct
+     Qwen3-32B
      ...
 
      ✕  Cancel
 ```
 
-- Select a model to configure its PEF settings
-- Add as many models as needed to the same bundle
-- Select **✅ Finish and Create Bundle** when done
-- Select **✕ Cancel** or press `q` / `Esc` to exit
+Only models present in **both** `checkpoint_mapping.json` and `pef_mapping.json` are shown. Select models one at a time, adding as many as needed. Select **✅ Finish and Create Bundle** when done.
 
 ---
 
 #### Step 2 — Select PEF configurations
 
-A multi-select list shows all available PEF configs for the chosen model:
+Multi-select (`Space` to toggle):
 
 ```
   › Configurations for DeepSeek-R1-0528:
   Space toggle   Enter confirm   q / Esc to go back
 
-   ❯  ○  SS: 128k  │ BS: 8   │ deepseek-ss131072-bs8
-      ○  SS: 16k   │ BS: 1   │ deepseek-ss16384-bs1
+      ○  SS: 128k  │ BS: 8   │ deepseek-ss131072-bs8
+   ❯  ◉  SS: 16k   │ BS: 1   │ deepseek-ss16384-bs1
       ○  SS: 32k   │ BS: 4   │ deepseek-ss32768-bs4
+
       ✅  Done - Confirm Selection
       ✕  Back
 ```
@@ -431,18 +430,18 @@ A multi-select list shows all available PEF configs for the chosen model:
 | Column | Meaning |
 |---|---|
 | SS | Sequence size (context window) |
-| BS | Batch size (throughput vs latency trade-off) |
-| PEF name | Internal Processor Executable Format identifier |
+| BS | Batch size |
+| PEF name | Processor Executable Format identifier |
 
-- `Space` to toggle (`◉` selected / `○` unselected)
-- `Enter` on **Done** to confirm selections
-- `Enter` on **Back** or press `q` / `Esc` to return without adding
+```
+  ✅ Added 2 config(s) for DeepSeek-R1-0528
+```
 
 ---
 
 #### Step 3 — Draft model for speculative decoding *(optional)*
 
-If the selected model supports speculative decoding, you are offered a draft model:
+Shown only when the selected model supports speculative decoding:
 
 ```
   ⚡ DeepSeek-R1-0528 supports speculative decoding.
@@ -457,7 +456,7 @@ If the selected model supports speculative decoding, you are offered a draft mod
      ← Back
 ```
 
-When a draft model is selected, matching SS/BS configs are added automatically:
+If a matching draft is found, its configs are added automatically:
 
 ```
   ✅ Auto-added 1 draft config(s) for DeepSeek-R1
@@ -469,6 +468,10 @@ When a draft model is selected, matching SS/BS configs are added automatically:
 #### Step 4 — Bundle summary & YAML preview
 
 ```
+  ╭──────────────────────────────────────────────────────────╮
+  │ 📋  Bundle Summary                                       │
+  ╰──────────────────────────────────────────────────────────╯
+
   1.  DeepSeek-R1-0528                       SS:128k  BS:8
   2.  DeepSeek-R1                            SS:128k  BS:8
 
@@ -492,7 +495,7 @@ When a draft model is selected, matching SS/BS configs are added automatically:
   › Bundle name  Esc cancel: deepseek-prod
 ```
 
-Sets resource names:
+Resource names generated:
 - `BundleTemplate` → `bt-deepseek-prod`
 - `Bundle` → `b-deepseek-prod`
 
@@ -512,7 +515,7 @@ Sets resource names:
 | Option | Description |
 |---|---|
 | ✏️ Edit in editor | Opens `$EDITOR` (fallback: `vi`) — changes read back automatically |
-| 💾 Save to file | Prompts for filename and writes the YAML |
+| 💾 Save to file | Prompts for filename and writes YAML |
 | ⏭️ Continue to deploy | Proceeds without saving |
 | ✕ Cancel | Exits without applying |
 
@@ -522,15 +525,15 @@ Sets resource names:
 
 ```
   › Apply to cluster to validate? [Y/n]  Esc cancel:
-```
 
-If confirmed, the CLI runs `kubectl apply` and polls bundle status every 3 s:
+  ✔  Applying bundle to cluster...
+  ✔  Bundle applied — polling for validation status...
 
-```
   ◉  Pending  ValidationInProgress: Checking PEF files  [9s]
   ◉  Ready    ValidationSucceeded: All checks passed    [21s]
 
   ✅ Bundle Validation Succeeded!
+     Validated: ValidationSucceeded — All checks passed
 ```
 
 On failure:
@@ -555,9 +558,7 @@ On timeout (90 s):
 
 Deploy and delete bundle resources on the cluster.
 
-#### Current deployments summary
-
-Every visit shows the current cluster state at the top:
+Every visit shows the current deployment state:
 
 ```
   Current Deployments:
@@ -572,17 +573,17 @@ Every visit shows the current cluster state at the top:
      ← Back
 ```
 
-| Icon | Status |
+| Icon | Meaning |
 |---|---|
 | `●` green | Running / Deployed |
 | `◌` yellow | Pending |
-| `○` red | Not running |
+| `○` red | Not running / failed |
 
 ---
 
 #### Deploying a Bundle
 
-**1 — Select bundle**
+**1 — Fetch and list bundles**
 
 ```
   ℹ  Found 3 bundle(s)
@@ -590,7 +591,11 @@ Every visit shows the current cluster state at the top:
   · b-deepseek-prod    ✔ valid
   · b-llama-staging    ⚠ unvalidated
   · b-qwen-test        ✔ valid
+```
 
+**2 — Select bundle to deploy**
+
+```
   › Select bundle to deploy:
 
   ▶  ● b-deepseek-prod    validated
@@ -598,7 +603,7 @@ Every visit shows the current cluster state at the top:
      ← Back
 ```
 
-**2 — Deployment YAML preview**
+**3 — Review deployment YAML**
 
 ```
   Deployment YAML:
@@ -615,7 +620,7 @@ Every visit shows the current cluster state at the top:
   ────────────────────────────────────────
 ```
 
-**3 — Confirm and deploy**
+**4 — Confirm and deploy**
 
 ```
   › Deploy bd-deepseek-prod? [Y/n]  Esc cancel:
@@ -642,7 +647,7 @@ Answering `y` jumps straight into the live monitor.
      ← Back
 ```
 
-**2 — Select resources (multi-select)**
+**2 — Select resources** (multi-select with `Space`)
 
 ```
   › Select BundleDeployment(s) to delete:
@@ -665,15 +670,15 @@ Answering `y` jumps straight into the live monitor.
   ✔  Deleted bd-deepseek-prod
 ```
 
-> **Warning:** Deletion is permanent and immediate. There is no undo.
+> Deletion is permanent and immediate. There is no undo.
 
 ---
 
 ### 📈 Check Deployment Progress
 
-Live monitor for a `BundleDeployment`. Polls pod status every 5 s.
+Live monitor for a `BundleDeployment`. Polls every 5 s.
 
-#### Step 1 — Select deployment
+**1 — Select deployment**
 
 ```
   ℹ  Found 2 deployment(s)
@@ -685,7 +690,7 @@ Live monitor for a `BundleDeployment`. Polls pod status every 5 s.
      ← Back
 ```
 
-#### Step 2 — Live status display
+**2 — Live status**
 
 ```
   ╭──────────────────────────────────────────────────────────╮
@@ -704,7 +709,7 @@ Live monitor for a `BundleDeployment`. Polls pod status every 5 s.
 When fully ready:
 
 ```
-  ●  Deployed     elapsed: 3m 0s
+  ●  Deployed    elapsed: 3m 0s
   ────────────────────────────────────────
   Cache pod         ✔ 1/1   Running    age: 3m
   Inference pod     ✔ 1/1   Running    age: 3m
@@ -714,19 +719,19 @@ When fully ready:
 
 | Status | Meaning |
 |---|---|
-| `● Deployed` | Both cache and inference pods are ready |
-| `◌ Deploying` | Pods exist but not all containers are ready |
+| `● Deployed` | Both cache and inference pods ready |
+| `◌ Deploying` | Pods exist but not all ready |
 | `○ Not Deployed` | No matching pods found |
 
-Press `q` or `Esc` to stop monitoring and return to the menu.
+Press `q` or `Esc` to stop and return to menu.
 
 ---
 
 ### 🤖 Playground — Chat Console
 
-Interactive chat with a deployed model directly from the terminal.
+Interactive chat with a deployed model.
 
-#### Step 1 — Select bundle
+**1 — Select bundle**
 
 ```
   ℹ  Found 2 deployment(s)
@@ -739,7 +744,7 @@ Interactive chat with a deployed model directly from the terminal.
      ← Back
 ```
 
-Only **fully deployed** bundles appear. Bundles still deploying are listed with their current status:
+Only fully deployed bundles appear. If none are ready:
 
 ```
   ⚠ No fully deployed bundles ready.
@@ -750,9 +755,9 @@ Only **fully deployed** bundles appear. Bundles still deploying are listed with 
   › Model name manually (leave empty to go back)  Esc cancel:
 ```
 
-#### Step 2 — Select model
+**2 — Select model**
 
-If a bundle contains multiple models:
+If a bundle has multiple models:
 
 ```
   › Select model from bd-deepseek-prod:
@@ -762,13 +767,13 @@ If a bundle contains multiple models:
      ← Back
 ```
 
-If the bundle has exactly one model, it is selected automatically:
+Single-model bundles are selected automatically:
 
 ```
   ●  Using model: DeepSeek-R1-0528
 ```
 
-#### Step 3 — Chat session
+**3 — Chat session**
 
 ```
   ╭────────────────────────────────────────────────────────────╮
@@ -783,8 +788,7 @@ If the bundle has exactly one model, it is selected automatically:
   ◈  Assistant  14:32   ·   279.84 t/s   ·   5.39s total   ·   0.53s to first token
   ──────────────────────────────────────────────────────────────
   Quantum entanglement is when two particles become linked
-  so that measuring one instantly affects the other, no matter
-  how far apart they are...
+  so that measuring one instantly affects the other...
   ──────────────────────────────────────────────────────────────
 
   › You  Esc cancel:
@@ -794,8 +798,8 @@ If the bundle has exactly one model, it is selected automatically:
 |---|---|
 | Multi-turn history | Full conversation context sent with every message |
 | `<think>` stripping | DeepSeek-R1 chain-of-thought blocks removed from output |
-| Performance metrics | Tokens/sec · total duration · time to first token shown per response |
-| Timestamp | Each response shows the local time |
+| Performance metrics | Tokens/sec · total duration · time to first token |
+| Timestamp | Local time shown per response |
 | Error handling | HTTP errors shown inline with suggested fixes |
 
 **To exit:** type `exit`, `quit`, `q`, or `/back` — or press `Esc`.
@@ -808,7 +812,7 @@ If the bundle has exactly one model, it is selected automatically:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `checkpointsDir` | string | **Yes** | GCS path prefix for checkpoints. Must end with `/` |
+| `checkpointsDir` | string | **Yes** | GCS path prefix. Must end with `/` |
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
 | `checkpoint_overrides` | object | No | Override checkpoint version per model e.g. `{ "Model-Name": "1" }` |
@@ -819,7 +823,7 @@ If the bundle has exactly one model, it is selected automatically:
 |---|---|---|---|
 | `file` | string | **Yes** | Kubeconfig YAML path relative to project root. Saved as `kubeconfigs/kubeconfig-<name>.yaml` when added via CLI |
 | `namespace` | string | **Yes** | Kubernetes namespace |
-| `uiDomain` | string | No | SambaStack UI URL (connectivity check in Validate) |
+| `uiDomain` | string | No | SambaStack UI URL (checked during Validate) |
 | `apiDomain` | string | Playground | API base URL e.g. `https://api.example.com/` |
 | `apiKey` | string | Playground | Bearer token for API requests |
 
@@ -865,13 +869,11 @@ If the bundle has exactly one model, it is selected automatically:
 cp app-config.example.json app-config.json
 ```
 
-The file must be in the project root (`sambawiz/`).
-
 ---
 
-**Kubeconfig file not found when activating**
+**Kubeconfig file not found**
 
-The `file` path in `app-config.json` must resolve correctly relative to the project root. When adding via CLI the file is saved automatically as `kubeconfigs/kubeconfig-<name>.yaml`.
+Paths are relative to the project root. When added via CLI the file is at `kubeconfigs/kubeconfig-<name>.yaml`.
 
 ```bash
 ls -la kubeconfigs/
@@ -887,27 +889,23 @@ kubectl version --client
 helm version
 ```
 
-Ensure you are on the correct network or VPN. The CLI uses an 8-second timeout for cluster-info.
+Ensure you are on the correct network or VPN.
 
 ---
 
 **SambaStack version check skipped**
 
-The CLI tries `helm list -A` first. If cluster-wide RBAC is denied it falls back to `helm list -n <namespace>`, `helm list -n sambastack`, and `helm list -n default` in sequence.
-
-If all attempts fail, validate your kubeconfig has sufficient permissions:
+The CLI tries `helm list -A` first, then falls back to `helm list -n <namespace>`, `sambastack`, and `default` if RBAC denies cluster-wide list.
 
 ```bash
 helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 ```
 
-Check chart version against `minimum-sambastack-helm` in [VERSION](VERSION).
-
 ---
 
 **No models available in Bundle Builder**
 
-`checkpoint_mapping.json` is empty or missing. It is generated automatically when you Add or Activate an environment. If the cluster was unreachable at that time, go to **Manage Environments** → select env → **Activate** to regenerate it.
+`checkpoint_mapping.json` is missing or empty. Go to **Manage Environments** → select env → **🔍 Validate**. If all checks pass the file is regenerated automatically.
 
 ---
 

@@ -159,9 +159,12 @@ function buildDeploymentYaml(bundleName: string): { yaml: string; deploymentName
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
+// tsx sets __dirname to '.' — use process.cwd() which always points to the
+// project root when launched via `npm run dev-cli` from sambawiz/
 
-const APP_DIR     = path.join(__dirname, '..', 'app');
-const DATA_DIR    = path.join(APP_DIR, 'data');
+const PROJECT_ROOT = process.cwd();
+const APP_DIR      = path.join(PROJECT_ROOT, 'app');
+const DATA_DIR     = path.join(APP_DIR, 'data');
 
 // ─── generateCheckpointMapping() ─────────────────────────────────────────────
 
@@ -187,14 +190,20 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
   await tick();
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
-  const raw = execSync(`kubectl -n ${namespace} get models -o json`, {
-    env,
-    encoding: 'utf-8',
-    timeout: 60000,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  let rawOutput: string;
+  try {
+    rawOutput = execSync(`kubectl -n ${namespace} get models -o json`, {
+      env,
+      encoding: 'utf-8',
+      timeout: 60000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e: any) {
+    const detail = e.stderr ? String(e.stderr).trim().split('\n')[0] : e.message.split('\n')[0];
+    throw new Error(`kubectl get models failed: ${detail}`);
+  }
 
-  const modelsData = JSON.parse(raw);
+  const modelsData = JSON.parse(rawOutput);
   const mapping: Record<string, any> = {};
 
   for (const item of modelsData.items || []) {
@@ -226,10 +235,10 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
 
   const outputPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
   writeFileSync(outputPath, JSON.stringify(mapping, null, 2) + '\n');
-  spinner.succeed(`Checkpoint mapping generated  ${chalk.reset(`(${Object.keys(mapping).length} models)`)}`);
+  spinner.succeed('Checkpoint mapping generated');
   return { count: Object.keys(mapping).length };
 }
-const CONFIG_PATH = path.join(__dirname, '..', 'app-config.json');
+const CONFIG_PATH = path.join(PROJECT_ROOT, 'app-config.json');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -240,16 +249,16 @@ function requireJson(p: string): any {
 }
 
 function getAppVersion(): string {
-  const vp = path.join(__dirname, '..', 'VERSION');
-  if (!existsSync(vp)) return requireJson(path.join(__dirname, '..', 'package.json')).version || '';
+  const vp = path.join(PROJECT_ROOT, 'VERSION');
+  if (!existsSync(vp)) return requireJson(path.join(PROJECT_ROOT, 'package.json')).version || '';
   for (const line of readFileSync(vp, 'utf-8').split('\n')) {
     if (line.trim().startsWith('app:')) return line.split(':')[1].trim();
   }
-  return requireJson(path.join(__dirname, '..', 'package.json')).version || '';
+  return requireJson(path.join(PROJECT_ROOT, 'package.json')).version || '';
 }
 
 function getMinHelmVersion(): string {
-  const vp = path.join(__dirname, '..', 'VERSION');
+  const vp = path.join(PROJECT_ROOT, 'VERSION');
   if (!existsSync(vp)) return '';
   for (const line of readFileSync(vp, 'utf-8').split('\n')) {
     if (line.trim().startsWith('minimum-sambastack-helm:')) return line.split(':')[1].trim();
@@ -361,7 +370,9 @@ interface Choice {
 }
 
 async function select(_rl: any, message: string, choices: Choice[], big = false): Promise<any> {
-  process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(message)}\n`);
+  const [mainLabel, ...extraLines] = message.split('\n');
+  process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(mainLabel)}\n`);
+  extraLines.forEach(l => process.stdout.write(`${l}\n`));
   menuHint();
 
   let selectedIndex = 0;
@@ -673,12 +684,12 @@ async function addEnvironmentMenu(rl: any) {
     if (apiKey === ESC) return;
 
     // ── Save kubeconfig file ──────────────────────────────────────────────────
-    const kubeconfigsDir = path.join(__dirname, '..', 'kubeconfigs');
+    const kubeconfigsDir = path.join(PROJECT_ROOT, 'kubeconfigs');
     if (!existsSync(kubeconfigsDir)) {
       try { execSync(`mkdir -p "${kubeconfigsDir}"`); } catch {}
     }
     const destRelative = `kubeconfigs/kubeconfig-${name}.yaml`;
-    const destPath     = path.join(__dirname, '..', destRelative);
+    const destPath     = path.join(PROJECT_ROOT, destRelative);
 
     const looksLikePath = kubeconfigInput.includes('/') || kubeconfigInput.includes('\\') ||
                           kubeconfigInput.startsWith('~') || /\.(yaml|yml)$/i.test(kubeconfigInput);
@@ -728,6 +739,56 @@ async function addEnvironmentMenu(rl: any) {
       spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
       process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n  Run Validate to diagnose cluster connectivity.\n\n`));
     }
+
+    // ── Stay in sub-menu for the new environment ───────────────────────────────
+    process.stdout.write('\n');
+    while (true) {
+      const freshConfig  = requireJson(CONFIG_PATH);
+      const actionChoices: Choice[] = [
+        { name: '🔍  Validate',         value: 'validate' },
+        { name: '✏️   Edit',             value: 'edit' },
+        { name: chalk.red('🗑️   Delete'), value: 'delete' },
+        { name: chalk.reset('← Back'),   value: 'back' },
+      ];
+      const action = await select(rl, `${name}:`, actionChoices);
+      if (!action || action === 'back') break;
+
+      if (action === 'validate') {
+        const ec    = freshConfig.kubeconfigs[name];
+        if (!ec) { errorMsg(`Environment "${name}" not found.`); continue; }
+        const envNs = ec.namespace || 'default';
+        const kPath = path.join(PROJECT_ROOT, ec.file || '');
+        if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
+        await runValidationChecks(name, ec, envNs);
+      } else if (action === 'edit') {
+        const ec = freshConfig.kubeconfigs[name] || {};
+        process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(name)}  (Enter to keep current value)\n\n`));
+        const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
+        if (file === ESC) continue;
+        const editNs    = await input(rl, 'Namespace',        ec.namespace || 'default');
+        if (editNs === ESC) continue;
+        const uiD       = await input(rl, 'UI Domain',        ec.uiDomain  || '');
+        if (uiD === ESC) continue;
+        const apiD      = await input(rl, 'API Domain',       ec.apiDomain || '');
+        if (apiD === ESC) continue;
+        const aKey      = await input(rl, 'API Key',          ec.apiKey    || '');
+        if (aKey === ESC) continue;
+        freshConfig.kubeconfigs[name] = { ...ec, file: file || ec.file, namespace: editNs || ec.namespace, uiDomain: uiD, apiDomain: apiD, apiKey: aKey };
+        writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+        successMsg(`Environment "${name}" updated.`);
+      } else if (action === 'delete') {
+        const ok = await confirm(rl, chalk.red(`Delete environment "${name}"?`), false);
+        if (!ok) { process.stdout.write(chalk.reset('  Cancelled.\n\n')); continue; }
+        delete freshConfig.kubeconfigs[name];
+        if (freshConfig.currentKubeconfig === name) {
+          const remaining = Object.keys(freshConfig.kubeconfigs);
+          freshConfig.currentKubeconfig = remaining[0] || null;
+        }
+        writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+        successMsg(`Environment "${name}" deleted.`);
+        break;
+      }
+    }
     return;
   }
 
@@ -749,14 +810,14 @@ async function addEnvironmentMenu(rl: any) {
     if (action === 'activate') {
       const ec    = freshConfig.kubeconfigs[envName];
       const kFile = ec?.file;
-      if (!kFile || !existsSync(path.join(__dirname, '..', kFile))) {
+      if (!kFile || !existsSync(path.join(PROJECT_ROOT, kFile))) {
         errorMsg(`Kubeconfig file not found for "${envName}": ${kFile || '(not set)'}`);
         continue;
       }
       freshConfig.currentKubeconfig = envName;
       writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`"${envName}" is now the active environment.`);
-      const kPath  = path.join(__dirname, '..', kFile);
+      const kPath  = path.join(PROJECT_ROOT, kFile);
       const ns     = ec.namespace || 'default';
       const overrides: Record<string, string> = freshConfig.checkpoint_overrides || {};
       try {
@@ -771,7 +832,7 @@ async function addEnvironmentMenu(rl: any) {
       const ec    = freshConfig.kubeconfigs[envName];
       if (!ec) { errorMsg(`Environment "${envName}" not found.`); continue; }
       const ns    = ec.namespace || 'default';
-      const kPath = path.join(__dirname, '..', ec.file || '');
+      const kPath = path.join(PROJECT_ROOT, ec.file || '');
       if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
       await runValidationChecks(envName, ec, ns);
       // stay in sub-menu after validate
@@ -824,6 +885,18 @@ async function addEnvironmentMenu(rl: any) {
 async function startCli() {
   const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
 
+  // ── Instance lock — only one CLI allowed at a time ───────────────────────────
+  try {
+    const result = execSync('pgrep -f "tsx bin/cli.ts"', { encoding: 'utf-8' }).trim();
+    const pids = result.split('\n').map(Number).filter(p => p && p !== process.pid);
+    if (pids.length > 0) {
+      process.stdout.write(chalk.red(`\n  ✖  SambaWiz CLI is already running (PID ${pids[0]}).\n`));
+      process.stdout.write(chalk.reset('     Only one instance is allowed at a time.\n'));
+      process.stdout.write(chalk.reset('     Close the other session first, then try again.\n\n'));
+      rl.close(); process.exit(1);
+    }
+  } catch { /* pgrep exits non-zero when no match — that's fine, means no other instance */ }
+
   const version = getAppVersion();
 
   const banner = [
@@ -866,7 +939,7 @@ async function startCli() {
     }
     const envConf = config.kubeconfigs[env];
     const ns      = envConf.namespace || 'default';
-    const kPath   = path.join(__dirname, '..', envConf.file);
+    const kPath   = path.join(PROJECT_ROOT, envConf.file);
     if (!existsSync(kPath)) {
       return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: `Kubeconfig file not found: ${envConf.file}` };
     }
@@ -877,7 +950,7 @@ async function startCli() {
   function checkKubeconfigExists(config: any, envName: string) {
     const ec = config.kubeconfigs[envName];
     if (!ec?.file) return false;
-    return existsSync(path.join(__dirname, '..', ec.file));
+    return existsSync(path.join(PROJECT_ROOT, ec.file));
   }
 
   let loaded = loadEnvConfig();
@@ -887,24 +960,24 @@ async function startCli() {
     const allEnvs   = Object.keys(loaded.appConfig.kubeconfigs || {});
     const validEnvs = allEnvs.filter(e => checkKubeconfigExists(loaded.appConfig, e));
 
-    if (validEnvs.length === 0) {
-      errorMsg('No environments with valid kubeconfig files. Please fix app-config.json.');
-      rl.close(); process.exit(1);
+    if (validEnvs.length > 0) {
+      const envChoices: Choice[] = [
+        ...validEnvs.map(e => ({ name: e, value: e })),
+        { name: chalk.reset('← Skip (fix later via Manage Environments)'), value: 'skip' },
+      ];
+
+      const chosen = await select(rl, 'Select a valid environment to continue:', envChoices);
+      if (chosen && chosen !== 'skip') {
+        loaded.appConfig.currentKubeconfig = chosen;
+        writeFileSync(CONFIG_PATH, JSON.stringify(loaded.appConfig, null, 2) + '\n');
+        loaded = loadEnvConfig();
+        if (!loaded.error) {
+          successMsg(`Switched to: ${loaded.currentEnv}  (namespace: ${loaded.namespace})`);
+        }
+      }
+    } else {
+      warnMsg('No kubeconfig files found — use Manage Environments → Add to set one up.');
     }
-
-    const envChoices: Choice[] = [
-      ...validEnvs.map(e => ({ name: e, value: e })),
-      { name: chalk.red('❌  Exit'), value: 'exit' },
-    ];
-
-    const chosen = await select(rl, 'Select a valid environment to continue:', envChoices);
-    if (!chosen || chosen === 'exit') { rl.close(); process.exit(0); }
-
-    loaded.appConfig.currentKubeconfig = chosen;
-    writeFileSync(CONFIG_PATH, JSON.stringify(loaded.appConfig, null, 2) + '\n');
-    loaded = loadEnvConfig();
-    if (loaded.error) { errorMsg(loaded.error); rl.close(); process.exit(1); }
-    successMsg(`Switched to: ${loaded.currentEnv}  (namespace: ${loaded.namespace})`);
   }
 
   let { appConfig: liveAppConfig, envConfig, namespace, currentEnv } = loaded;
@@ -969,7 +1042,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
   spinner.start('Checking kubeconfig...');
   await tick();
   const kFile = envConfig.file;
-  const kPath = path.join(__dirname, '..', kFile);
+  const kPath = path.join(PROJECT_ROOT, kFile);
   if (kFile && existsSync(kPath)) {
     spinner.succeed(`Kubeconfig  ${chalk.reset(kFile)}`);
   } else {
@@ -993,10 +1066,10 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
   await tick();
   try {
     const minVer  = getMinHelmVersion();
-    const kPath   = path.join(__dirname, '..', kFile);
+    const kPath   = path.join(PROJECT_ROOT, kFile);
     const helmEnv = { ...process.env, KUBECONFIG: kPath };
     // Try all namespaces first; fall back to common sambastack namespaces if cluster-wide list is denied
-    let raw: string;
+    let raw: string = '';
     try {
       raw = execSync('helm list -A -o json', { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
     } catch {
@@ -1099,7 +1172,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
         spinner.fail(`/v1/models → ${code}  API key may be invalid`);
         allPassed = false;
       } else if (code === 404) {
-        spinner.info('/v1/models not exposed on this cluster  (API key check will confirm auth)');
+        spinner.succeed('API reachable  (no model list endpoint)');
       } else {
         spinner.warn(`/v1/models → ${code}`);
       }
@@ -1150,11 +1223,8 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       if (code === 0) {
         spinner.fail('UI Domain unreachable — no response');
         allPassed = false;
-      } else if (code === 401 || code === 403) {
-        spinner.warn(`UI Domain → ${code}  (server reachable, auth required)`);
       } else {
-        // Any HTTP response (including 404) means the server is up
-        spinner.succeed(`UI Domain reachable  ${chalk.reset(`(${code})`)}`);
+        spinner.succeed('UI Domain reachable');
       }
     } catch (e: any) {
       spinner.fail(`UI Domain unreachable: ${e.message.split('\n')[0]}`);
@@ -1164,8 +1234,20 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
 
   process.stdout.write('\n');
   hr();
-  if (allPassed) successMsg('All checks passed!');
-  else errorMsg('Some checks failed — review app-config.json');
+  if (allPassed) {
+    successMsg('All checks passed!');
+    // Regenerate checkpoint mapping now that cluster connectivity is confirmed
+    try {
+      const appConfig = requireJson(CONFIG_PATH);
+      const overrides: Record<string, string> = appConfig.checkpoint_overrides || {};
+      await generateCheckpointMapping(kPath, namespace, overrides);
+    } catch (e: any) {
+      spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
+      process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n\n`));
+    }
+  } else {
+    errorMsg('Some checks failed — review app-config.json');
+  }
 }
 
 // tiny async tick so spinner renders at least once
@@ -1333,19 +1415,22 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
   yamlBox(`Final YAML  (${bundleName})`, finalYaml);
 
-  let yamlDone = false;
-  while (!yamlDone) {
+  let activeBName = bName;
+  let shouldApply = false;
+
+  while (true) {
     const act = await select(rl, 'What next?', [
-      { name: '✏️   Edit in editor',          value: 'edit' },
-      { name: '💾  Save to file',              value: 'save' },
-      { name: '⏭️   Continue to deploy',        value: 'skip' },
-      { name: chalk.red('✕  Cancel'),           value: 'cancel' },
+      { name: '✏️   Edit in editor',               value: 'edit' },
+      { name: '💾  Save to file',                   value: 'save' },
+      { name: '✅  Apply to cluster to validate',   value: 'validate' },
+      { name: chalk.reset('← Skip (deploy later)'), value: 'skip' },
+      { name: chalk.red('✕  Cancel'),               value: 'cancel' },
     ]);
 
     if (!act || act === 'cancel') return;
 
     if (act === 'edit') {
-      const tmp = path.join(__dirname, '..', `.tmp_bundle_${Date.now()}.yaml`);
+      const tmp = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
       writeFileSync(tmp, finalYaml);
       const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
       try {
@@ -1360,18 +1445,26 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       }
     } else if (act === 'save') {
       const fname = await input(rl, 'Filename', `${bundleName}.yaml`);
-      if (fname === ESC) { yamlDone = true; break; }
-      try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
-      yamlDone = true;
+      if (fname && fname !== ESC) {
+        try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+      }
+    } else if (act === 'validate') {
+      // Re-derive bundle name in case user edited the YAML
+      const m = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
+      activeBName = m ? m[1] : bName;
+      shouldApply = true;
+      break;
     } else if (act === 'skip') {
-      yamlDone = true;
+      process.stdout.write('\n');
+      process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
+      process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
+      return;
     }
   }
 
-  const shouldApply = await confirm(rl, 'Apply to cluster to validate?');
   if (!shouldApply) return;
 
-  const tempPath = path.join(__dirname, '..', `temp_bundle_${Date.now()}.yaml`);
+  const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
   try {
     writeFileSync(tempPath, finalYaml);
     spinner.start('Applying bundle to cluster...');
@@ -1386,7 +1479,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       await new Promise(r => setTimeout(r, pollInterval));
       try {
-        const st  = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${bName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        const st  = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
         const elapsed = attempt * (pollInterval / 1000);
@@ -1415,13 +1508,17 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     if (!validated) {
       process.stdout.write('\n');
       warnMsg('Validation timeout — check manually:');
-      process.stdout.write(chalk.reset(`  kubectl get bundle.sambanova.ai ${bName} -n ${namespace} -o yaml\n\n`));
+      process.stdout.write(chalk.reset(`  kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o yaml\n\n`));
     }
   } catch (e: any) {
     errorMsg(`Error applying bundle: ${e.message}`);
   } finally {
     try { execSync(`rm "${tempPath}"`); } catch {}
   }
+
+  process.stdout.write('\n');
+  process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
+  process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
 }
 
 // ─── bundleDeploymentMenu() ──────────────────────────────────────────────────
@@ -1500,7 +1597,7 @@ async function bundleDeployAction(rl: any, namespace: string) {
 
     if (!await confirm(rl, `Deploy ${chalk.bold(depName)}?`)) return;
 
-    const tempPath = path.join(__dirname, '..', `temp_dep_${Date.now()}.yaml`);
+    const tempPath = path.join(PROJECT_ROOT, `temp_dep_${Date.now()}.yaml`);
     try {
       writeFileSync(tempPath, yaml);
       spinner.start('Deploying...');
@@ -1670,6 +1767,34 @@ async function monitorDeployment(_rl: any, namespace: string, depName: string) {
       podRow('Inference pod', defaultPod);
       wline('');
 
+      // ── Container logs panel ──────────────────────────────────────
+      const logSection = (_label: string, pod: PodInfo | null, container?: string) => {
+        if (!pod) return;
+        const containerSuffix = container ? ` (container: ${container})` : '';
+        wline(chalk.reset(`  Monitoring: ${pod.name}${containerSuffix}`));
+        let lines: string[] = [];
+        try {
+          const cFlag = container ? ` -c ${container}` : '';
+          const raw = execSync(
+            `kubectl logs ${pod.name} -n ${namespace}${cFlag} --tail=5 2>/dev/null`,
+            { encoding: 'utf-8', timeout: 5000 }
+          ).trim();
+          lines = raw ? raw.split('\n') : [];
+        } catch {}
+        if (lines.length === 0) {
+          wline(chalk.reset('  (no logs yet)'));
+        } else {
+          for (const l of lines) {
+            wline(chalk.reset('  ') + chalk.reset(l.slice(0, 110)));
+          }
+        }
+        wline('');
+      };
+
+      // Only show logs for pods that are not yet fully ready
+      if (cachePod   && cachePod.ready   < cachePod.total)   logSection('Cache pod',     cachePod);
+      if (defaultPod && defaultPod.ready < defaultPod.total) logSection('Inference pod', defaultPod, 'inf');
+
       if (deployStatus === 'Deployed') {
         wline(chalk.green.bold('  ✅  Deployment is fully ready!'));
         finished = true;
@@ -1820,7 +1945,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
     messages.push({ role: 'user', content: userInput });
 
-    const tmpPayload = path.join(__dirname, '..', `.tmp_chat_${Date.now()}.json`);
+    const tmpPayload = path.join(PROJECT_ROOT, `.tmp_chat_${Date.now()}.json`);
     try {
       let base = envConfig.apiDomain.replace(/\/v1\/chat\/completions\/?$/, '');
       if (!base.endsWith('/')) base += '/';
