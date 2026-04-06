@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useAppContext } from '@/context/AppContext';
 import {
   Box,
   Drawer,
@@ -38,83 +38,19 @@ export default function AppLayout({ children }: AppLayoutProps) {
   };
   const selectedItem = getSelectedItem();
 
-  const [envVersion, setEnvVersion] = useState<string | null>(null);
-  const [envName, setEnvName] = useState<string | null>(null);
-  const [namespace, setNamespace] = useState<string | null>(null);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
-  const [helmCommand, setHelmCommand] = useState<string>('');
-  const [errorDetails, setErrorDetails] = useState<string>('');
-  const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
-
-  // Validate kubeconfig on component mount
-  useEffect(() => {
-    const validateKubeconfig = async () => {
-      try {
-        const response = await fetch('/api/kubeconfig-validate');
-        const data = await response.json();
-
-        console.log('Kubeconfig validation response:', data);
-
-        if (data.success) {
-          setEnvVersion(data.version);
-          setEnvName(data.envName);
-          setNamespace(data.namespace);
-          setHasNonNumericalSuffix(data.hasNonNumericalSuffix || false);
-          setValidationError(null);
-          setShowErrorDialog(false);
-          setHelmVersionError(false);
-        } else {
-          console.log('Validation failed, showing error dialog');
-          setValidationError(data.error || 'Failed to validate kubeconfig');
-          setHelmCommand(data.helmCommand || '');
-          setErrorDetails(data.errorDetails || data.error || '');
-          setShowErrorDialog(true);
-          setEnvVersion(null);
-          setEnvName(null);
-          setNamespace(null);
-          setHasNonNumericalSuffix(false);
-          // Check if this is a helm version error
-          setHelmVersionError(data.helmVersionError || false);
-        }
-
-
-      } catch (error) {
-        console.error('Failed to validate kubeconfig:', error);
-        setValidationError('Failed to validate kubeconfig');
-        setHelmCommand('');
-        setErrorDetails('Network error or server unreachable');
-        setShowErrorDialog(true);
-        setEnvVersion(null);
-        setEnvName(null);
-        setNamespace(null);
-        setHasNonNumericalSuffix(false);
-        setHelmVersionError(false);
-      }
-    };
-
-    validateKubeconfig();
-  }, []);
-
-  // Fetch app version on component mount
-  useEffect(() => {
-    const fetchAppVersion = async () => {
-      try {
-        const response = await fetch('/api/app-version');
-        const data = await response.json();
-
-        if (data.success) {
-          setAppVersion(data.version);
-        }
-      } catch (error) {
-        console.error('Failed to fetch app version:', error);
-      }
-    };
-
-    fetchAppVersion();
-  }, []);
+  const {
+    envVersion,
+    envName,
+    namespace,
+    validationError,
+    showErrorDialog,
+    helmCommand,
+    errorDetails,
+    helmVersionError,
+    hasNonNumericalSuffix,
+    appVersion,
+    setShowErrorDialog,
+  } = useAppContext();
 
   const drawer = (
     <Box

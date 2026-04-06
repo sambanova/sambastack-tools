@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { Typography, Box } from '@mui/material';
 import AppLayout from '../components/AppLayout';
 import BundleDeploymentManager from '../components/BundleDeploymentManager';
@@ -13,7 +14,9 @@ export default function BundleDeploymentPage() {
           Manage and monitor your bundle deployments
         </Typography>
 
-        <BundleDeploymentManager />
+        <Suspense>
+          <BundleDeploymentManager />
+        </Suspense>
       </Box>
     </AppLayout>
   );
