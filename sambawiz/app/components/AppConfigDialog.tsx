@@ -3,15 +3,16 @@
 import { useState, useId } from 'react';
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogActions,
-  TextField,
-  Button,
-  Typography,
-  Alert,
-  CircularProgress,
-} from '@mui/material';
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 
 interface AppConfigDialogProps {
   open: boolean;
@@ -70,58 +71,63 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
   };
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>App Configuration Required</DialogTitle>
-      <DialogContent>
-        <Alert severity="warning" sx={{ mb: 3 }}>
-          The app-config.json file does not exist or the checkpointsDir field is not populated.
-          Please create the configuration file to continue.
-        </Alert>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          The app-config.json file must exist in the SambaWiz root directory and contain a valid checkpoints directory path.
-        </Typography>
-        <TextField
-          id={checkpointsDirId}
-          fullWidth
-          label="Checkpoints Dir"
-          placeholder="gs://your-bucket-name/path/to/checkpoints"
-          value={checkpointsDir}
-          onChange={(e) => setCheckpointsDir(e.target.value)}
-          variant="outlined"
-          helperText="Enter the GCS checkpoint directory path"
-          sx={{ mb: 2 }}
-        />
-        {error && (
-          <Alert severity="error" sx={{ mt: 2 }}>
-            {error}
+    <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) handleClose(); }}>
+      <DialogContent className="sm:max-w-lg" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>App Configuration Required</DialogTitle>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-4">
+          <Alert className="border-amber-200 bg-amber-50 text-amber-800">
+            <AlertTriangle className="size-4 text-amber-600" />
+            <AlertDescription className="text-amber-800">
+              The app-config.json file does not exist or the checkpointsDir field is not populated.
+              Please create the configuration file to continue.
+            </AlertDescription>
           </Alert>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={handleClose} disabled={creating}>
-          Cancel
-        </Button>
-        <Button
-          onClick={handleCreate}
-          variant="contained"
-          disabled={creating || !checkpointsDir.trim()}
-          sx={{
-            background: 'linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%)',
-            '&:hover': {
-              background: 'linear-gradient(135deg, #FF5722 0%, #FF7043 100%)',
-            },
-          }}
-        >
-          {creating ? (
-            <>
-              <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
-              Creating...
-            </>
-          ) : (
-            'Create App Config'
+
+          <p className="text-sm text-muted-foreground">
+            The app-config.json file must exist in the SambaWiz root directory and contain a valid
+            checkpoints directory path.
+          </p>
+
+          <div className="space-y-1.5">
+            <Label htmlFor={checkpointsDirId}>Checkpoints Dir</Label>
+            <Input
+              id={checkpointsDirId}
+              placeholder="gs://your-bucket-name/path/to/checkpoints"
+              value={checkpointsDir}
+              onChange={(e) => setCheckpointsDir(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">Enter the GCS checkpoint directory path</p>
+          </div>
+
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
-        </Button>
-      </DialogActions>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={handleClose} disabled={creating}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleCreate}
+            disabled={creating || !checkpointsDir.trim()}
+          >
+            {creating ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              'Create App Config'
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   );
 }
