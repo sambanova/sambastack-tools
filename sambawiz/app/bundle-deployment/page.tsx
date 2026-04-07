@@ -1,23 +1,18 @@
 import { Suspense } from 'react';
-import { Typography, Box } from '@mui/material';
 import AppLayout from '../components/AppLayout';
 import BundleDeploymentManager from '../components/BundleDeploymentManager';
 
 export default function BundleDeploymentPage() {
   return (
     <AppLayout>
-      <Box>
-        <Typography variant="h4" component="h1" gutterBottom sx={{ fontWeight: 600, mb: 1 }}>
-          Bundle Deployment
-        </Typography>
-        <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
-          Manage and monitor your bundle deployments
-        </Typography>
+      <div className="flex flex-col gap-1">
+        <h1 className="text-2xl font-semibold">Bundle Deployment</h1>
+        <p className="text-sm text-muted-foreground">Manage and monitor your bundle deployments</p>
+      </div>
 
-        <Suspense>
-          <BundleDeploymentManager />
-        </Suspense>
-      </Box>
+      <Suspense>
+        <BundleDeploymentManager />
+      </Suspense>
     </AppLayout>
   );
 }
