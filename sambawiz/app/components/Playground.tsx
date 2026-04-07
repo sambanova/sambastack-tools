@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useId } from 'react';
 import { useRouter } from 'next/navigation';
+import useSWR from 'swr';
 import {
   Send,
   Bot,
@@ -116,70 +117,44 @@ export default function Playground() {
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [uiDomain, setUiDomain] = useState<string>('');
 
-  const fetchBundleDeployments = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const response = await fetch('/api/bundle-deployment');
-      const data = await response.json();
-      if (data.success) {
-        setBundleDeployments(data.bundleDeployments);
-        const statuses: Record<
-          string,
-          { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }
-        > = {};
-        await Promise.all(
-          data.bundleDeployments.map(async (deployment: BundleDeployment) => {
-            try {
-              const statusResponse = await fetch(
-                `/api/pod-status?deploymentName=${deployment.name}`
-              );
-              const statusData = await statusResponse.json();
-              statuses[deployment.name] = statusData.success
-                ? statusData.podStatus
-                : { cachePod: null, defaultPod: null };
-            } catch {
-              statuses[deployment.name] = { cachePod: null, defaultPod: null };
-            }
-          })
-        );
-        setDeploymentStatuses(statuses);
-      } else {
-        setError(data.error || 'Failed to fetch bundle deployments');
-      }
-    } catch (err) {
-      setError('Failed to connect to the server');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetcher = (url: string) => fetch(url).then((r) => r.json());
+  const SWR_STABLE = { revalidateOnFocus: false, revalidateOnReconnect: false, revalidateIfStale: false } as const;
 
-  const fetchEnvironmentConfig = async () => {
-    try {
-      const response = await fetch('/api/environments');
-      const data = await response.json();
-      if (data.success) {
-        setCurrentEnvironment(data.defaultEnvironment || '');
-        setApiKey(data.defaultApiKey || '');
-        setApiDomain(data.defaultApiDomain || '');
-        setUiDomain(data.defaultUiDomain || '');
-      }
-    } catch (err) {
-      console.error('Error fetching environment config:', err);
-    }
-  };
+  // SWR: shared cache — if Home/BundleDeploymentManager already fetched these, served instantly
+  const { data: deploymentsData } = useSWR('/api/bundle-deployment', fetcher, SWR_STABLE);
+  const { data: envData } = useSWR('/api/environments', fetcher, SWR_STABLE);
+  const { data: checkpointData } = useSWR('/api/checkpoint-mapping', fetcher, SWR_STABLE);
 
   useEffect(() => {
-    fetchBundleDeployments();
-    fetchEnvironmentConfig();
-    fetch('/api/checkpoint-mapping')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success) setCheckpointMapping(data.data);
+    if (!deploymentsData) return;
+    if (!deploymentsData.success) { setError(deploymentsData.error || 'Failed to fetch deployments'); setLoading(false); return; }
+    setBundleDeployments(deploymentsData.bundleDeployments);
+    const statuses: Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }> = {};
+    Promise.all(
+      deploymentsData.bundleDeployments.map(async (deployment: BundleDeployment) => {
+        try {
+          const r = await fetch(`/api/pod-status?deploymentName=${deployment.name}`);
+          const d = await r.json();
+          statuses[deployment.name] = d.success ? d.podStatus : { cachePod: null, defaultPod: null };
+        } catch {
+          statuses[deployment.name] = { cachePod: null, defaultPod: null };
+        }
       })
-      .catch(() => {});
-  }, []);
+    ).then(() => setDeploymentStatuses(statuses));
+    setLoading(false);
+  }, [deploymentsData]);
+
+  useEffect(() => {
+    if (!envData?.success) return;
+    setCurrentEnvironment(envData.defaultEnvironment || '');
+    setApiKey(envData.defaultApiKey || '');
+    setApiDomain(envData.defaultApiDomain || '');
+    setUiDomain(envData.defaultUiDomain || '');
+  }, [envData]);
+
+  useEffect(() => {
+    if (checkpointData?.success) setCheckpointMapping(checkpointData.data);
+  }, [checkpointData]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

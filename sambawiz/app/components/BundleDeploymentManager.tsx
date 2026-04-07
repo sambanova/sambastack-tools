@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
+import useSWR from 'swr';
 import {
   RefreshCw,
   Copy,
@@ -119,20 +120,30 @@ function StatusBadge({ status }: { status: 'Deployed' | 'Deploying' | 'Not Deplo
   return <Badge variant="secondary">Loading...</Badge>;
 }
 
+const fetcher = (url: string) => fetch(url).then((r) => r.json());
+const SWR_STABLE = { revalidateOnFocus: false, revalidateOnReconnect: false, revalidateIfStale: false } as const;
+
 export default function BundleDeploymentManager() {
   const searchParams = useSearchParams();
+
+  // SWR: cached data — never re-fetches on tab switch; user uses Refresh button
+  const { data: deploymentsData, isLoading: loadingDeployments, mutate: mutateDeployments } =
+    useSWR('/api/bundle-deployment', fetcher, SWR_STABLE);
+  const { data: bundlesData } = useSWR('/api/bundles', fetcher, SWR_STABLE);
+  const { data: savedStateData } = useSWR('/api/bundle-deployment-state', fetcher, SWR_STABLE);
+
   const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
   const [deploymentToDelete, setDeploymentToDelete] = useState<string | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
+  const loading = loadingDeployments;
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState<boolean>(false);
   const [deleting, setDeleting] = useState<boolean>(false);
 
+  const loadingBundles = !bundlesData;
   const [validBundles, setValidBundles] = useState<Bundle[]>([]);
   const [selectedBundle, setSelectedBundle] = useState<string>('');
   const [deploymentName, setDeploymentName] = useState<string>('');
-  const [loadingBundles, setLoadingBundles] = useState<boolean>(false);
   const [deploymentYaml, setDeploymentYaml] = useState<string>('');
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
@@ -182,65 +193,33 @@ export default function BundleDeploymentManager() {
     setAllDeploymentStatuses(statuses);
   };
 
-  const fetchBundleDeployments = async () => {
-    setLoading(true);
-    setError(null);
-    setSuccessMessage(null);
-    try {
-      const response = await fetch('/api/bundle-deployment');
-      const data = await response.json();
-      if (data.success) {
-        setBundleDeployments(data.bundleDeployments);
-        await fetchAllDeploymentStatuses(data.bundleDeployments);
-      } else {
-        setError(data.error || 'Failed to fetch bundle deployments');
-      }
-    } catch (err) {
-      setError('Failed to connect to the server');
-      console.error(err);
-    } finally {
-      setLoading(false);
+  // Drive state from SWR cache — no re-fetch on tab switch
+  useEffect(() => {
+    if (!deploymentsData) return;
+    if (deploymentsData.success) {
+      setBundleDeployments(deploymentsData.bundleDeployments);
+      fetchAllDeploymentStatuses(deploymentsData.bundleDeployments);
+    } else {
+      setError(deploymentsData.error || 'Failed to fetch bundle deployments');
     }
-  };
-
-  const fetchBundles = async () => {
-    setLoadingBundles(true);
-    try {
-      const response = await fetch('/api/bundles');
-      const data = await response.json();
-      if (data.success) {
-        setValidBundles(data.bundles.filter((b: Bundle) => b.isValid));
-      }
-    } catch (err) {
-      console.error('Failed to connect to the server', err);
-    } finally {
-      setLoadingBundles(false);
-    }
-  };
-
-  const loadSavedState = async () => {
-    try {
-      const response = await fetch('/api/bundle-deployment-state');
-      const data = await response.json();
-      if (data.success && data.state) {
-        setSelectedBundle(data.state.selectedBundle || '');
-        setDeploymentName(data.state.deploymentName || '');
-        setDeploymentYaml(data.state.deploymentYaml || '');
-        setMonitoredDeployment(data.state.monitoredDeployment || '');
-      }
-    } catch (error) {
-      console.error('Failed to load saved deployment state:', error);
-    }
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deploymentsData]);
 
   useEffect(() => {
-    fetchBundleDeployments();
-    fetchBundles();
-    if (!searchParams.get('bundle')) {
-      loadSavedState();
+    if (bundlesData?.success) {
+      setValidBundles(bundlesData.bundles.filter((b: Bundle) => b.isValid));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [bundlesData]);
+
+  useEffect(() => {
+    if (!savedStateData?.success || !savedStateData.state) return;
+    if (searchParams.get('bundle')) return;
+    setSelectedBundle(savedStateData.state.selectedBundle || '');
+    setDeploymentName(savedStateData.state.deploymentName || '');
+    setDeploymentYaml(savedStateData.state.deploymentYaml || '');
+    setMonitoredDeployment(savedStateData.state.monitoredDeployment || '');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedStateData]);
 
   useEffect(() => {
     const bundleParam = searchParams.get('bundle');
@@ -442,7 +421,7 @@ spec:
       if (response.ok && data.success) {
         setDeploymentResult({ success: true, message: 'Bundle deployment applied successfully!', output: data.output });
         setMonitoredDeployment(deploymentName);
-        await fetchBundleDeployments();
+        await mutateDeployments();
       } else {
         setDeploymentResult({
           success: false,
@@ -490,7 +469,7 @@ spec:
       } else {
         setError(`Failed to delete ${deploymentToDelete}: ${data.error}`);
       }
-      await fetchBundleDeployments();
+      await mutateDeployments();
     } catch (err) {
       setError('Failed to delete bundle deployment');
       console.error(err);
@@ -559,7 +538,7 @@ spec:
             <Button
               variant="outline"
               size="sm"
-              onClick={fetchBundleDeployments}
+              onClick={() => mutateDeployments()}
               disabled={loading || deleting}
             >
               {loading ? (
