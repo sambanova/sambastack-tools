@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback, useId, useRef } from 'react';
+import { useState, useEffect, useCallback, useId, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import useSWR from 'swr';
+import { useAppContext } from '@/context/AppContext';
 import { Eye, EyeOff, Copy, TriangleAlert, Loader2 } from 'lucide-react';
 import { Field, FieldLabel, FieldGroup } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
@@ -78,9 +79,22 @@ function getNextVersion(currentVersion: string | null, minVersion: string | null
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
+// Tiny inner component so useSearchParams doesn't force the whole Home into Suspense
+function SearchParamsWatcher({ onOpenUpgrade }: { onOpenUpgrade: () => void }) {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  useEffect(() => {
+    if (searchParams.get('openUpgrade') === 'true') {
+      router.replace('/');
+      onOpenUpgrade();
+    }
+  }, [searchParams, router, onOpenUpgrade]);
+  return null;
+}
+
 export default function Home() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const { fullHelmVersion, minimumHelmVersion, helmVersionError: helmVersionTooOld } = useAppContext();
 
   const namespaceId = useId();
   const apiDomainId = useId();
@@ -111,9 +125,6 @@ export default function Home() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
-  const [fullHelmVersion, setFullHelmVersion] = useState<string | null>(null);
-  const [helmVersionTooOld, setHelmVersionTooOld] = useState<boolean>(false);
-  const [minimumHelmVersion, setMinimumHelmVersion] = useState<string | null>(null);
   const [showInstallDialog, setShowInstallDialog] = useState<boolean>(false);
   const [installYaml, setInstallYaml] = useState<string>('');
   const [installing, setInstalling] = useState<boolean>(false);
@@ -129,11 +140,6 @@ export default function Home() {
 
   // SWR: environments — cached, no re-fetch on tab switch
   const { data: envData } = useSWR('/api/environments', fetcher, {
-    revalidateOnFocus: false,
-  });
-
-  // SWR: kubeconfig-validate — cached
-  const { data: helmData } = useSWR('/api/kubeconfig-validate', fetcher, {
     revalidateOnFocus: false,
   });
 
@@ -160,24 +166,6 @@ export default function Home() {
       setEnableUpdates(ev !== false);
     }
   }, [envData]);
-
-  // Derive helm version state from SWR data
-  useEffect(() => {
-    if (!helmData) return;
-    if (helmData.success && helmData.fullVersion) {
-      setFullHelmVersion(helmData.fullVersion);
-      setHelmVersionTooOld(false);
-      setMinimumHelmVersion(null);
-    } else if (helmData.helmVersionError && helmData.version) {
-      setFullHelmVersion(helmData.version);
-      setHelmVersionTooOld(true);
-      setMinimumHelmVersion(helmData.minimumVersion || null);
-    } else {
-      setFullHelmVersion(null);
-      setHelmVersionTooOld(false);
-      setMinimumHelmVersion(null);
-    }
-  }, [helmData]);
 
   // Process installer logs from SWR polling
   useEffect(() => {
@@ -417,12 +405,6 @@ data:
     setShowInstallDialog(true);
   }, [fullHelmVersion, minimumHelmVersion]);
 
-  useEffect(() => {
-    if (searchParams.get('openUpgrade') === 'true') {
-      router.replace('/');
-      handleOpenInstallDialog();
-    }
-  }, [searchParams, router, handleOpenInstallDialog]);
 
   const handleCloseInstallDialog = useCallback(() => {
     setShowInstallDialog(false);
@@ -476,6 +458,10 @@ data:
 
   return (
     <>
+      <Suspense>
+        <SearchParamsWatcher onOpenUpgrade={handleOpenInstallDialog} />
+      </Suspense>
+
       <DocumentationPanel docFile="home.md" />
 
       {/* Prerequisites Missing Dialog */}

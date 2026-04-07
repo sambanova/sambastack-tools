@@ -1,13 +1,10 @@
-import { Suspense } from 'react';
 import AppLayout from './components/AppLayout';
 import Home from './components/Home';
 
 export default function HomePage() {
   return (
     <AppLayout>
-      <Suspense>
-        <Home />
-      </Suspense>
+      <Home />
     </AppLayout>
   );
 }
