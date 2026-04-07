@@ -1,30 +1,39 @@
 'use client';
 
-import { useState, useEffect, useCallback, useId } from 'react';
+import { useState, useEffect, useCallback, useId, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import useSWR from 'swr';
+import { Eye, EyeOff, Copy, TriangleAlert, Loader2 } from 'lucide-react';
+import { Field, FieldLabel, FieldGroup } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import {
-  Box,
-  Typography,
-  Paper,
-  FormControl,
-  InputLabel,
   Select,
-  MenuItem,
-  TextField,
-  SelectChangeEvent,
-  Button,
-  Alert,
-  CircularProgress,
-  InputAdornment,
-  IconButton,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardContent,
+  CardFooter,
+} from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogContentText,
-  DialogActions,
-  Tooltip,
-} from '@mui/material';
-import { Visibility, VisibilityOff, ContentCopy, Close, Warning } from '@mui/icons-material';
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
@@ -58,10 +67,8 @@ function compareVersionStrings(a: string, b: string): number {
 function getNextVersion(currentVersion: string | null, minVersion: string | null): string {
   const fallback = '0.3.576';
   if (!currentVersion) return fallback;
-
   const versionMatch = currentVersion.match(/^(\d+\.\d+\.\d+)/);
   if (!versionMatch) return fallback;
-
   const incremented = incrementVersion(versionMatch[1]);
   if (minVersion && compareVersionStrings(minVersion, incremented) > 0) {
     return minVersion;
@@ -69,11 +76,12 @@ function getNextVersion(currentVersion: string | null, minVersion: string | null
   return incremented;
 }
 
+const fetcher = (url: string) => fetch(url).then((res) => res.json());
+
 export default function Home() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Generate stable IDs for form fields to prevent hydration mismatches
   const namespaceId = useId();
   const apiDomainId = useId();
   const uiDomainId = useId();
@@ -117,23 +125,91 @@ export default function Home() {
   const [installationComplete, setInstallationComplete] = useState<boolean>(false);
   const [yamlModifiedAfterInstall, setYamlModifiedAfterInstall] = useState<boolean>(false);
 
-  // Check prerequisites on component mount
+  const envInitialized = useRef(false);
+
+  // SWR: environments — cached, no re-fetch on tab switch
+  const { data: envData } = useSWR('/api/environments', fetcher, {
+    revalidateOnFocus: false,
+  });
+
+  // SWR: kubeconfig-validate — cached
+  const { data: helmData } = useSWR('/api/kubeconfig-validate', fetcher, {
+    revalidateOnFocus: false,
+  });
+
+  // SWR: installer logs — conditional polling every 3s
+  const { data: logsData } = useSWR(
+    showInstallerLogs && !installationComplete ? '/api/installer-logs?lines=20' : null,
+    fetcher,
+    { refreshInterval: 3000, revalidateOnFocus: false }
+  );
+
+  // Initialize form state from SWR environments data (once on first load)
+  useEffect(() => {
+    if (!envData?.success || envInitialized.current) return;
+    envInitialized.current = true;
+    setEnvironments(envData.environments || []);
+    setKubeconfigs(envData.kubeconfigs || {});
+    if (envData.defaultEnvironment) setSelectedEnvironment(envData.defaultEnvironment);
+    if (envData.defaultNamespace) setNamespace(envData.defaultNamespace);
+    if (envData.defaultApiKey) setApiKey(envData.defaultApiKey);
+    if (envData.defaultApiDomain) setApiDomain(envData.defaultApiDomain);
+    if (envData.defaultUiDomain) setUiDomain(envData.defaultUiDomain);
+    if (envData.defaultEnvironment && envData.kubeconfigs?.[envData.defaultEnvironment]) {
+      const ev = envData.kubeconfigs[envData.defaultEnvironment].enableUpdates;
+      setEnableUpdates(ev !== false);
+    }
+  }, [envData]);
+
+  // Derive helm version state from SWR data
+  useEffect(() => {
+    if (!helmData) return;
+    if (helmData.success && helmData.fullVersion) {
+      setFullHelmVersion(helmData.fullVersion);
+      setHelmVersionTooOld(false);
+      setMinimumHelmVersion(null);
+    } else if (helmData.helmVersionError && helmData.version) {
+      setFullHelmVersion(helmData.version);
+      setHelmVersionTooOld(true);
+      setMinimumHelmVersion(helmData.minimumVersion || null);
+    } else {
+      setFullHelmVersion(null);
+      setHelmVersionTooOld(false);
+      setMinimumHelmVersion(null);
+    }
+  }, [helmData]);
+
+  // Process installer logs from SWR polling
+  useEffect(() => {
+    if (!showInstallerLogs) {
+      setInstallerLogs('');
+      return;
+    }
+    if (!logsData) return;
+    if (logsData.success) {
+      setInstallerLogs(logsData.logs);
+      const lines = (logsData.logs as string).trim().split('\n');
+      const lastLine = lines[lines.length - 1];
+      if (lastLine?.includes('configure_default_ingress')) {
+        setInstallationComplete(true);
+        setYamlModifiedAfterInstall(false);
+      }
+    } else {
+      setInstallerLogs(`Error: ${logsData.error || 'Failed to fetch logs'}`);
+    }
+  }, [logsData, showInstallerLogs]);
+
+  // Check prerequisites on mount (one-time setup check)
   useEffect(() => {
     const checkPrerequisites = async () => {
       try {
-        // Check kubectl and helm
         const prereqResponse = await fetch('/api/check-prerequisites');
         const prereqData = await prereqResponse.json();
 
         if (prereqData.success) {
-          const missing = [];
-          if (!prereqData.prerequisites.kubectl) {
-            missing.push('kubectl');
-          }
-          if (!prereqData.prerequisites.helm) {
-            missing.push('helm');
-          }
-
+          const missing: string[] = [];
+          if (!prereqData.prerequisites.kubectl) missing.push('kubectl');
+          if (!prereqData.prerequisites.helm) missing.push('helm');
           if (missing.length > 0) {
             setPrerequisiteWarning(
               `The following required tools are not installed: ${missing.join(', ')}. Please install them on your system.`
@@ -143,7 +219,6 @@ export default function Home() {
           }
         }
 
-        // Check app-config.json
         const configResponse = await fetch('/api/check-app-config');
         const configData = await configResponse.json();
 
@@ -152,35 +227,28 @@ export default function Home() {
           return;
         }
 
-        // If config exists and is valid, check if we need to auto-populate kubeconfigs
         if (configData.success && configData.exists && configData.valid) {
           const config = configData.config;
           const kubeconfigsEmpty = Object.keys(config.kubeconfigs || {}).length === 0;
-          const currentKubeconfigEmpty = !config.currentKubeconfig || config.currentKubeconfig.trim() === '';
+          const currentKubeconfigEmpty =
+            !config.currentKubeconfig || config.currentKubeconfig.trim() === '';
 
           if (kubeconfigsEmpty && currentKubeconfigEmpty) {
-            // Check if there are any kubeconfig files in the kubeconfigs directory
             const kubeconfigFilesResponse = await fetch('/api/check-kubeconfig-files');
             const kubeconfigFilesData = await kubeconfigFilesResponse.json();
 
             if (kubeconfigFilesData.success && !kubeconfigFilesData.hasFiles) {
-              // No kubeconfig files found
               setShowNoKubeconfigsDialog(true);
               return;
             }
 
-            // Try to auto-populate if files exist
             if (kubeconfigFilesData.success && kubeconfigFilesData.hasFiles) {
               try {
                 const autoPopResponse = await fetch('/api/auto-populate-kubeconfigs', {
                   method: 'POST',
                 });
                 const autoPopData = await autoPopResponse.json();
-
-                if (autoPopData.success) {
-                  // Refresh the page to load the new config
-                  window.location.reload();
-                }
+                if (autoPopData.success) window.location.reload();
               } catch (error) {
                 console.error('Failed to auto-populate kubeconfigs:', error);
               }
@@ -195,175 +263,100 @@ export default function Home() {
     checkPrerequisites();
   }, []);
 
-  // Fetch available kubeconfig files on component mount
-  useEffect(() => {
-    const fetchEnvironments = async () => {
-      try {
-        const response = await fetch('/api/environments');
-        const data = await response.json();
-
-        if (data.success) {
-          setEnvironments(data.environments);
-          setKubeconfigs(data.kubeconfigs || {});
-          // Set default environment from app-config.json
-          if (data.defaultEnvironment) {
-            setSelectedEnvironment(data.defaultEnvironment);
-          }
-          // Set default namespace from app-config.json
-          if (data.defaultNamespace) {
-            setNamespace(data.defaultNamespace);
-          }
-          // Set default API key from app-config.json
-          if (data.defaultApiKey) {
-            setApiKey(data.defaultApiKey);
-          }
-          // Set default API domain from app-config.json
-          if (data.defaultApiDomain) {
-            setApiDomain(data.defaultApiDomain);
-          }
-          // Set default UI domain from app-config.json
-          if (data.defaultUiDomain) {
-            setUiDomain(data.defaultUiDomain);
-          }
-          // Set default enableUpdates from app-config.json
-          if (data.defaultEnvironment && data.kubeconfigs[data.defaultEnvironment]) {
-            const enableUpdatesValue = data.kubeconfigs[data.defaultEnvironment].enableUpdates;
-            setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch environments:', error);
-      }
-    };
-
-    fetchEnvironments();
-  }, []);
-
-  // Function to fetch helm version
-  const fetchHelmVersion = useCallback(async () => {
-    try {
-      const response = await fetch('/api/kubeconfig-validate');
-      const data = await response.json();
-
-      if (data.success && data.fullVersion) {
-        setFullHelmVersion(data.fullVersion);
-        setHelmVersionTooOld(false);
-        setMinimumHelmVersion(null);
-      } else if (data.helmVersionError && data.version) {
-        setFullHelmVersion(data.version);
-        setHelmVersionTooOld(true);
-        setMinimumHelmVersion(data.minimumVersion || null);
-      } else {
-        setFullHelmVersion(null);
-        setHelmVersionTooOld(false);
-        setMinimumHelmVersion(null);
-      }
-    } catch (error) {
-      console.error('Failed to fetch helm version:', error);
-      setFullHelmVersion(null);
-    }
-  }, []);
-
-  // Fetch helm version on component mount
-  useEffect(() => {
-    fetchHelmVersion();
-  }, [fetchHelmVersion]);
-
-  // Auto-refresh installer logs every 3 seconds when enabled
-  useEffect(() => {
-    if (!showInstallerLogs || installationComplete) {
-      if (!showInstallerLogs) {
-        setInstallerLogs('');
-      }
-      return;
-    }
-
-    const fetchInstallerLogs = async () => {
-      try {
-        const response = await fetch('/api/installer-logs?lines=20');
-        const data = await response.json();
-
-        if (data.success) {
-          setInstallerLogs(data.logs);
-          // Check if installation is complete (last line contains "configure_default_ingress")
-          const lines = data.logs.trim().split('\n');
-          const lastLine = lines[lines.length - 1];
-          if (lastLine && lastLine.includes('configure_default_ingress')) {
-            setInstallationComplete(true);
-            setYamlModifiedAfterInstall(false); // Require YAML modification before next install
-          }
-        } else {
-          setInstallerLogs(`Error: ${data.error || 'Failed to fetch logs'}`);
-        }
-      } catch (error) {
-        console.error('Failed to fetch installer logs:', error);
-        setInstallerLogs('Failed to connect to the server');
-      }
-    };
-
-    // Fetch immediately
-    fetchInstallerLogs();
-
-    // Set up interval to fetch every 3 seconds
-    const intervalId = setInterval(fetchInstallerLogs, 3000);
-
-    // Cleanup interval on unmount or when showInstallerLogs or installationComplete changes
-    return () => clearInterval(intervalId);
-  }, [showInstallerLogs, installationComplete]);
-
-  const handleEnvironmentChange = (event: SelectChangeEvent<string>) => {
-    const envName = event.target.value;
+  const handleEnvironmentChange = (envName: string | null) => {
+    if (!envName) return;
     setSelectedEnvironment(envName);
     setSaveSuccess(false);
     setSaveError(null);
 
-    // Auto-populate namespace, API key, and domains from kubeconfigs
     if (envName && kubeconfigs[envName]) {
       setNamespace(kubeconfigs[envName].namespace || 'default');
       setApiKey(kubeconfigs[envName].apiKey || '');
       setApiDomain(kubeconfigs[envName].apiDomain || '');
       setUiDomain(kubeconfigs[envName].uiDomain || '');
-      const enableUpdatesValue = kubeconfigs[envName].enableUpdates;
-      setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
+      const ev = kubeconfigs[envName].enableUpdates;
+      setEnableUpdates(ev !== false);
     } else {
       setNamespace('default');
       setApiKey('');
       setApiDomain('');
       setUiDomain('');
-      setEnableUpdates(true); // Default to true for empty selection
+      setEnableUpdates(true);
     }
   };
 
-  const handleNamespaceChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setNamespace(event.target.value);
+  const handleCopyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+  };
+
+  const handleApply = async () => {
+    if (!selectedEnvironment || !namespace) {
+      setSaveError('Please select an environment and enter a namespace');
+      return;
+    }
+
+    if (apiDomain?.trim()) {
+      if (!apiDomain.startsWith('https://')) {
+        setSaveError('API Domain must start with https://');
+        return;
+      }
+      if (apiDomain.includes(' ')) {
+        setSaveError('API Domain cannot contain spaces');
+        return;
+      }
+    }
+
+    if (uiDomain?.trim()) {
+      if (!uiDomain.startsWith('https://')) {
+        setSaveError('UI Domain must start with https://');
+        return;
+      }
+      if (uiDomain.includes(' ')) {
+        setSaveError('UI Domain cannot contain spaces');
+        return;
+      }
+    }
+
+    setSaving(true);
     setSaveSuccess(false);
     setSaveError(null);
-  };
 
-  const handleApiKeyChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setApiKey(event.target.value);
-    setSaveSuccess(false);
-    setSaveError(null);
-  };
+    try {
+      const generateResponse = await fetch('/api/generate-checkpoint-mapping', { method: 'POST' });
+      const generateData = await generateResponse.json();
+      if (!generateData.success) {
+        setSaveError(
+          `Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`
+        );
+        setSaving(false);
+        return;
+      }
 
-  const handleApiDomainChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setApiDomain(event.target.value);
-    setSaveSuccess(false);
-    setSaveError(null);
-  };
+      const response = await fetch('/api/update-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          environment: selectedEnvironment,
+          namespace,
+          apiKey,
+          apiDomain,
+          uiDomain,
+        }),
+      });
+      const data = await response.json();
 
-  const handleUiDomainChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setUiDomain(event.target.value);
-    setSaveSuccess(false);
-    setSaveError(null);
-  };
-
-  const handleToggleShowApiKey = () => {
-    setShowApiKey(!showApiKey);
-  };
-
-  const handleAddEnvironment = () => {
-    router.push('/add-environment');
+      if (data.success) {
+        setSaveSuccess(true);
+        setTimeout(() => window.location.reload(), 1000);
+      } else {
+        setSaveError(data.error || 'Failed to save configuration');
+      }
+    } catch (error) {
+      console.error('Error saving configuration:', error);
+      setSaveError('Failed to save configuration');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleGetApiKey = async () => {
@@ -383,16 +376,10 @@ export default function Home() {
     try {
       const response = await fetch('/api/get-keycloak-credentials', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          environment: selectedEnvironment,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: selectedEnvironment }),
       });
-
       const data = await response.json();
-
       if (data.success) {
         setKeycloakUsername(data.username);
         setKeycloakPassword(data.password);
@@ -407,99 +394,12 @@ export default function Home() {
     }
   };
 
-  const handleCopyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
-  const handleApply = async () => {
-    if (!selectedEnvironment || !namespace) {
-      setSaveError('Please select an environment and enter a namespace');
-      return;
-    }
-
-    // Validate URLs if they are non-empty
-    if (apiDomain && apiDomain.trim() !== '') {
-      if (!apiDomain.startsWith('https://')) {
-        setSaveError('API Domain must start with https://');
-        return;
-      }
-      if (apiDomain.includes(' ')) {
-        setSaveError('API Domain cannot contain spaces');
-        return;
-      }
-    }
-
-    if (uiDomain && uiDomain.trim() !== '') {
-      if (!uiDomain.startsWith('https://')) {
-        setSaveError('UI Domain must start with https://');
-        return;
-      }
-      if (uiDomain.includes(' ')) {
-        setSaveError('UI Domain cannot contain spaces');
-        return;
-      }
-    }
-
-    setSaving(true);
-    setSaveSuccess(false);
-    setSaveError(null);
-
-    try {
-      // Generate checkpoint_mapping.json from the cluster's model resources
-      const generateResponse = await fetch('/api/generate-checkpoint-mapping', {
-        method: 'POST',
-      });
-      const generateData = await generateResponse.json();
-
-      if (!generateData.success) {
-        setSaveError(`Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`);
-        setSaving(false);
-        return;
-      }
-
-      const response = await fetch('/api/update-config', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          environment: selectedEnvironment,
-          namespace: namespace,
-          apiKey: apiKey,
-          apiDomain: apiDomain,
-          uiDomain: uiDomain,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (data.success) {
-        setSaveSuccess(true);
-        // Reload the page after a short delay to refresh the navbar and all app state
-        setTimeout(() => {
-          window.location.reload();
-        }, 1000);
-      } else {
-        setSaveError(data.error || 'Failed to save configuration');
-      }
-    } catch (error) {
-      console.error('Error saving configuration:', error);
-      setSaveError('Failed to save configuration');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleAppConfigCreated = async () => {
-    // Refresh the page to load the new config
+  const handleAppConfigCreated = () => {
     window.location.reload();
   };
 
   const handleOpenInstallDialog = useCallback(() => {
-    // Calculate the next version: max(current + 1, minimumHelmVersion)
     const nextVersion = getNextVersion(fullHelmVersion, minimumHelmVersion);
-
-    // Initialize with YAML containing the next version
     const defaultYaml = `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -513,11 +413,10 @@ data:
     setInstallOutput('');
     setInstallError(null);
     setInstallationComplete(false);
-    setYamlModifiedAfterInstall(false); // Reset modification tracking
+    setYamlModifiedAfterInstall(false);
     setShowInstallDialog(true);
   }, [fullHelmVersion, minimumHelmVersion]);
 
-  // Open upgrade dialog if navigated here with ?openUpgrade=true
   useEffect(() => {
     if (searchParams.get('openUpgrade') === 'true') {
       router.replace('/');
@@ -531,15 +430,12 @@ data:
     setInstallError(null);
     setShowInstallerLogs(false);
     setInstallationComplete(false);
-    // Force page refresh to update helm version
     window.location.reload();
   }, []);
 
   const handleInstallYamlChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInstallYaml(event.target.value);
-    setYamlModifiedAfterInstall(true); // Mark as modified to enable Install button
-
-    // Reset dialog state when user edits after installation (reload from scratch)
+    setYamlModifiedAfterInstall(true);
     if (installationComplete) {
       setInstallationComplete(false);
       setShowInstallerLogs(false);
@@ -549,7 +445,6 @@ data:
   };
 
   const handleInstall = async () => {
-    // Clear previous installation state including success message
     setInstalling(true);
     setInstallError(null);
     setInstallOutput('');
@@ -559,27 +454,17 @@ data:
     try {
       const response = await fetch('/api/install-sambastack', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          yaml: installYaml,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ yaml: installYaml }),
       });
-
       const data = await response.json();
-
       if (data.success) {
         setInstallOutput(data.output || 'Installation initiated successfully!');
-        // Enable installer logs monitoring
         setShowInstallerLogs(true);
       } else {
         setInstallError(data.error || 'Installation failed');
-        if (data.stderr) {
-          setInstallOutput(data.stderr);
-        } else if (data.stdout) {
-          setInstallOutput(data.stdout);
-        }
+        if (data.stderr) setInstallOutput(data.stderr);
+        else if (data.stdout) setInstallOutput(data.stdout);
       }
     } catch (error) {
       console.error('Error installing SambaStack:', error);
@@ -591,40 +476,32 @@ data:
 
   return (
     <>
-      {/* Documentation Panel */}
       <DocumentationPanel docFile="home.md" />
 
-      {/* Prerequisite Warning Dialog */}
-      <Dialog
-        open={showPrerequisiteDialog}
-        onClose={() => setShowPrerequisiteDialog(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>Prerequisites Missing</DialogTitle>
+      {/* Prerequisites Missing Dialog */}
+      <Dialog open={showPrerequisiteDialog} onOpenChange={setShowPrerequisiteDialog}>
         <DialogContent>
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            {prerequisiteWarning}
-          </Alert>
-          <DialogContentText>
-            Please install the required tools and restart the application.
-          </DialogContentText>
+          <DialogHeader>
+            <DialogTitle>Prerequisites Missing</DialogTitle>
+            <DialogDescription>
+              Please install the required tools and restart the application.
+            </DialogDescription>
+          </DialogHeader>
+          {prerequisiteWarning && (
+            <Alert variant="destructive">
+              <AlertDescription>{prerequisiteWarning}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter showCloseButton />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowPrerequisiteDialog(false)} autoFocus>
-            OK
-          </Button>
-        </DialogActions>
       </Dialog>
 
-      {/* App Config Dialog */}
       <AppConfigDialog
         open={showAppConfigDialog}
         onClose={() => setShowAppConfigDialog(false)}
         onConfigCreated={handleAppConfigCreated}
       />
 
-      {/* No Kubeconfigs Dialog */}
       <NoKubeconfigsDialog
         open={showNoKubeconfigsDialog}
         onClose={() => setShowNoKubeconfigsDialog(false)}
@@ -633,655 +510,394 @@ data:
       {/* API Key Instructions Dialog */}
       <Dialog
         open={showApiKeyInstructionsDialog}
-        onClose={() => setShowApiKeyInstructionsDialog(false)}
-        maxWidth="sm"
-        fullWidth
+        onOpenChange={setShowApiKeyInstructionsDialog}
       >
-        <DialogTitle>API Key Instructions</DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ mb: 3 }}>
-            Login to the following UI domain using the following credentials to create your API key
-          </DialogContentText>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>API Key Instructions</DialogTitle>
+            <DialogDescription>
+              Login to the following UI domain using the credentials below to create your API key.
+            </DialogDescription>
+          </DialogHeader>
 
-          {/* Loading State */}
-          {loadingCredentials && (
-            <Box sx={{ display: 'flex', justifyContent: 'center', my: 3 }}>
-              <CircularProgress size={40} />
-            </Box>
-          )}
+          <div className="flex flex-col gap-4">
+            {loadingCredentials && (
+              <div className="flex justify-center py-4">
+                <Loader2 className="size-8 animate-spin text-primary" />
+              </div>
+            )}
 
-          {/* Error State */}
-          {credentialsError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {credentialsError}
-            </Alert>
-          )}
+            {credentialsError && (
+              <Alert variant="destructive">
+                <AlertDescription>{credentialsError}</AlertDescription>
+              </Alert>
+            )}
 
-          {/* UI Domain */}
-          {!loadingCredentials && uiDomain && (
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                UI Domain:
-              </Typography>
-              <Typography
-                component="a"
-                href={uiDomain}
-                target="_blank"
-                rel="noopener noreferrer"
-                sx={{
-                  color: 'primary.main',
-                  textDecoration: 'underline',
-                  wordBreak: 'break-all',
-                  '&:hover': {
-                    color: 'primary.dark',
-                  },
-                }}
-              >
-                {uiDomain}
-              </Typography>
-            </Box>
-          )}
+            {!loadingCredentials && uiDomain && (
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-semibold">UI Domain:</p>
+                <a
+                  href={uiDomain}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="break-all text-sm text-primary underline underline-offset-4 hover:text-primary/80"
+                >
+                  {uiDomain}
+                </a>
+              </div>
+            )}
 
-          {/* Credentials */}
-          {!loadingCredentials && keycloakUsername && keycloakPassword && (
-            <Box>
-              {/* Username */}
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Username:
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TextField
-                    id={keycloakUsernameId}
-                    fullWidth
-                    value={keycloakUsername}
-                    variant="outlined"
-                    size="small"
-                    slotProps={{
-                      input: {
-                        readOnly: true,
-                      },
-                    }}
-                  />
-                  <IconButton
-                    onClick={() => handleCopyToClipboard(keycloakUsername)}
-                    size="small"
-                    sx={{ color: 'primary.main' }}
-                  >
-                    <ContentCopy fontSize="small" />
-                  </IconButton>
-                </Box>
-              </Box>
+            {!loadingCredentials && keycloakUsername && keycloakPassword && (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-semibold">Username:</p>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id={keycloakUsernameId}
+                      value={keycloakUsername}
+                      readOnly
+                      className="font-mono"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => handleCopyToClipboard(keycloakUsername)}
+                    >
+                      <Copy />
+                      <span className="sr-only">Copy username</span>
+                    </Button>
+                  </div>
+                </div>
 
-              {/* Password */}
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Password:
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TextField
-                    id={keycloakPasswordId}
-                    fullWidth
-                    type={showPassword ? 'text' : 'password'}
-                    value={keycloakPassword}
-                    variant="outlined"
-                    size="small"
-                    slotProps={{
-                      input: {
-                        readOnly: true,
-                        endAdornment: (
-                          <InputAdornment position="end">
-                            <IconButton
-                              onClick={() => setShowPassword(!showPassword)}
-                              edge="end"
-                              size="small"
-                            >
-                              {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                            </IconButton>
-                          </InputAdornment>
-                        ),
-                      },
-                    }}
-                  />
-                  <IconButton
-                    onClick={() => handleCopyToClipboard(keycloakPassword)}
-                    size="small"
-                    sx={{ color: 'primary.main' }}
-                  >
-                    <ContentCopy fontSize="small" />
-                  </IconButton>
-                </Box>
-              </Box>
-            </Box>
-          )}
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-semibold">Password:</p>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Input
+                        id={keycloakPasswordId}
+                        type={showPassword ? 'text' : 'password'}
+                        value={keycloakPassword}
+                        readOnly
+                        className="font-mono pr-10"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="absolute right-1 top-1/2 -translate-y-1/2"
+                        onClick={() => setShowPassword(!showPassword)}
+                      >
+                        {showPassword ? <EyeOff /> : <Eye />}
+                        <span className="sr-only">Toggle password visibility</span>
+                      </Button>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => handleCopyToClipboard(keycloakPassword)}
+                    >
+                      <Copy />
+                      <span className="sr-only">Copy password</span>
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
 
-          {!loadingCredentials && !uiDomain && (
-            <Alert severity="warning">
-              Please select an environment with a UI domain configured.
-            </Alert>
-          )}
+            {!loadingCredentials && !uiDomain && (
+              <Alert>
+                <AlertDescription>
+                  Please select an environment with a UI domain configured.
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+
+          <DialogFooter showCloseButton />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowApiKeyInstructionsDialog(false)} autoFocus>
-            Close
-          </Button>
-        </DialogActions>
       </Dialog>
 
       {/* Upgrade SambaStack Dialog */}
       <Dialog
         open={showInstallDialog}
-        onClose={handleCloseInstallDialog}
-        maxWidth="md"
-        fullWidth
+        onOpenChange={(open) => {
+          if (!open) handleCloseInstallDialog();
+        }}
       >
-        <DialogTitle>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Upgrade SambaStack</span>
-            <IconButton
-              aria-label="close"
-              onClick={handleCloseInstallDialog}
-              sx={{
-                color: (theme) => theme.palette.grey[500],
-              }}
-            >
-              <Close />
-            </IconButton>
-          </Box>
-        </DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-            Install Environment: <Box component="span" sx={{ fontWeight: 600, color: 'primary.main' }}>{selectedEnvironment}</Box>
-          </Typography>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Upgrade SambaStack</DialogTitle>
+            <DialogDescription>
+              Install Environment:{' '}
+              <span className="font-semibold text-foreground">{selectedEnvironment}</span>
+            </DialogDescription>
+          </DialogHeader>
 
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-            <Typography variant="body2" sx={{ color: 'text.primary' }}>
-              Please update the SambaStack helm version below to the version you want installed
-            </Typography>
-            <Tooltip title="Please do not modify anything else unless you know what you are doing." arrow>
-              <Warning sx={{ color: 'warning.main', fontSize: '1.2rem' }} />
-            </Tooltip>
-          </Box>
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <span>
+                Please update the SambaStack helm version below to the version you want installed
+              </span>
+              <Tooltip>
+                <TooltipTrigger>
+                  <TriangleAlert className="size-4 text-amber-500" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  Please do not modify anything else unless you know what you are doing.
+                </TooltipContent>
+              </Tooltip>
+            </div>
 
-          <TextField
-            id={installYamlId}
-            fullWidth
-            multiline
-            rows={12}
-            value={installYaml}
-            onChange={handleInstallYamlChange}
-            variant="outlined"
-            sx={{
-              mb: 2,
-              '& .MuiInputBase-root': {
-                fontFamily: 'monospace',
-                fontSize: '0.875rem',
-              },
-            }}
-          />
+            <Textarea
+              id={installYamlId}
+              value={installYaml}
+              onChange={handleInstallYamlChange}
+              rows={12}
+              className="font-mono text-sm"
+            />
 
-          {/* Error Message */}
-          {installError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {installError}
-            </Alert>
-          )}
-
-          {/* Output Display */}
-          {installOutput && (
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                Output:
-              </Typography>
-              <Paper
-                elevation={0}
-                sx={{
-                  p: 2,
-                  backgroundColor: 'grey.100',
-                  border: '1px solid',
-                  borderColor: 'divider',
-                  maxHeight: '200px',
-                  overflow: 'auto',
-                }}
-              >
-                <Typography
-                  component="pre"
-                  sx={{
-                    fontFamily: 'monospace',
-                    fontSize: '0.75rem',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    m: 0,
-                  }}
-                >
-                  {installOutput}
-                </Typography>
-              </Paper>
-            </Box>
-          )}
-
-          {/* Installer Logs Display */}
-          {showInstallerLogs && (
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                Installer Logs:
-              </Typography>
-              <Box
-                sx={{
-                  bgcolor: 'black',
-                  borderRadius: 1,
-                  p: 2,
-                  overflowX: 'auto',
-                  overflowY: 'auto',
-                  minHeight: '200px',
-                  maxHeight: '400px',
-                }}
-              >
-                <Box
-                  component="pre"
-                  sx={{
-                    m: 0,
-                    color: 'white',
-                    fontSize: '0.875rem',
-                    fontFamily: 'monospace',
-                    whiteSpace: 'pre',
-                  }}
-                >
-                  {installerLogs || 'Waiting for logs...'}
-                </Box>
-              </Box>
-              {!installationComplete && (
-                <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                  Auto-refreshing every 3 seconds
-                </Typography>
-              )}
-              {installationComplete && (
-                <Alert severity="success" sx={{ mt: 2 }}>
-                  Installation complete! You may close this dialog now to apply the changes.
-                </Alert>
-              )}
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button
-            variant="contained"
-            onClick={handleInstall}
-            disabled={installing || (showInstallerLogs && !installationComplete) || !installYaml.trim() || (installationComplete && !yamlModifiedAfterInstall)}
-            sx={{
-              background: '#A2297D',
-              '&:hover': {
-                background: '#8B2268',
-              },
-            }}
-          >
-            {installing ? (
-              <>
-                <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
-                Installing...
-              </>
-            ) : (
-              'Install'
+            {installError && (
+              <Alert variant="destructive">
+                <AlertDescription>{installError}</AlertDescription>
+              </Alert>
             )}
-          </Button>
-        </DialogActions>
+
+            {installOutput && (
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-semibold">Output:</p>
+                <div className="max-h-48 overflow-auto rounded-lg border bg-muted p-3">
+                  <pre className="whitespace-pre-wrap break-words font-mono text-xs">
+                    {installOutput}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {showInstallerLogs && (
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-semibold">Installer Logs:</p>
+                <div className="max-h-96 min-h-48 overflow-auto rounded-lg bg-black p-3">
+                  <pre className="whitespace-pre font-mono text-sm text-white">
+                    {installerLogs || 'Waiting for logs...'}
+                  </pre>
+                </div>
+                {!installationComplete && (
+                  <p className="text-xs text-muted-foreground">Auto-refreshing every 3 seconds</p>
+                )}
+                {installationComplete && (
+                  <Alert className="border-green-500/50 bg-green-500/10">
+                    <AlertDescription className="text-green-700">
+                      Installation complete! You may close this dialog now to apply the changes.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              onClick={handleInstall}
+              disabled={
+                installing ||
+                (showInstallerLogs && !installationComplete) ||
+                !installYaml.trim() ||
+                (installationComplete && !yamlModifiedAfterInstall)
+              }
+            >
+              {installing && <Loader2 data-icon="inline-start" className="animate-spin" />}
+              {installing ? 'Installing...' : 'Install'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
       </Dialog>
 
-      <Box
-        sx={{
-          minHeight: 'calc(100vh - 100px)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          py: 4,
-        }}
-      >
-      {/* Hero Section */}
-      <Box
-        sx={{
-          textAlign: 'center',
-          mb: 3,
-          maxWidth: '800px',
-        }}
-      >
-        <Typography
-          variant="h2"
-          component="h1"
-          sx={{
-            fontWeight: 700,
-            mb: 2,
-            fontSize: { xs: '2.5rem', md: '3.5rem' },
-            background: 'linear-gradient(to right, #A2297D, #4E226B)',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-            backgroundClip: 'text',
-          }}
-        >
-          SambaWiz
-        </Typography>
-        <Typography
-          variant="h5"
-          sx={{
-            color: 'text.secondary',
-            mb: 3,
-            fontWeight: 400,
-            fontSize: { xs: '1.1rem', md: '1.5rem' },
-          }}
-        >
-          Your SambaStack Bundle Configuration Wizard
-        </Typography>
-        <Typography
-          variant="body1"
-          sx={{
-            color: 'text.secondary',
-            maxWidth: '600px',
-            mx: 'auto',
-            lineHeight: 1.7,
-          }}
-        >
-          Create, configure, deploy, and test model bundles with ease!
-        </Typography>
-      </Box>
+      {/* Main Content */}
+      <div className="flex min-h-[calc(100vh-100px)] flex-col items-center justify-center py-8">
+        {/* Hero Section */}
+        <div className="mb-6 max-w-2xl text-center">
+          <h1 className="mb-3 bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-5xl font-bold text-transparent">
+            SambaWiz
+          </h1>
+          <p className="mb-2 text-xl text-muted-foreground">
+            Your SambaStack Bundle Configuration Wizard
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Create, configure, deploy, and test model bundles with ease!
+          </p>
+        </div>
 
-      {/* Helm Version Display */}
-      {fullHelmVersion && (
-        <Box
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 2,
-            mb: 3,
-            ml: 1.5,
-          }}
-        >
-          <Typography
-            variant="body2"
-            sx={{
-              color: 'text.secondary',
-              fontSize: 'rem',
-            }}
-          >
-            Current SambaStack Helm Version: <Box component="span" sx={{ fontFamily: 'monospace', color: helmVersionTooOld ? 'error.main' : 'primary.main' }}>{fullHelmVersion}</Box>
-          </Typography>
-          {(helmVersionTooOld || enableUpdates) && (
-            <Button
-              variant="outlined"
-              size="small"
-              onClick={handleOpenInstallDialog}
-              sx={{
-                textTransform: 'none',
-                fontWeight: 600,
-                borderColor: 'primary.main',
-                color: 'primary.main',
-                '&:hover': {
-                  borderColor: 'primary.dark',
-                  backgroundColor: 'rgba(255, 107, 53, 0.05)',
-                },
-              }}
-            >
-              Upgrade
-            </Button>
-          )}
-        </Box>
-      )}
-
-
-      {/* Environment Selection Section */}
-      <Paper
-        elevation={3}
-        sx={{
-          p: 4,
-          maxWidth: '600px',
-          width: '100%',
-          borderRadius: 3,
-          background: 'linear-gradient(135deg, rgba(255, 107, 53, 0.05) 0%, rgba(255, 142, 83, 0.05) 100%)',
-          border: '1px solid',
-          borderColor: 'divider',
-        }}
-      >
-        <Box
-          sx={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            mb: 3,
-          }}
-        >
-          <Typography
-            variant="h6"
-            sx={{
-              fontWeight: 600,
-              color: 'primary.main',
-            }}
-          >
-            Select your SambaStack environment
-          </Typography>
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={handleAddEnvironment}
-            sx={{
-              textTransform: 'none',
-              fontWeight: 600,
-              borderColor: 'primary.main',
-              color: 'primary.main',
-              '&:hover': {
-                borderColor: 'primary.dark',
-                backgroundColor: 'rgba(255, 107, 53, 0.05)',
-              },
-            }}
-          >
-            Add an Environment
-          </Button>
-        </Box>
-        
-        <FormControl fullWidth sx={{ mb: 3 }}>
-          <InputLabel id="environment-select-label">Environment</InputLabel>
-          <Select
-            labelId="environment-select-label"
-            id="environment-select"
-            value={selectedEnvironment}
-            label="Environment"
-            onChange={handleEnvironmentChange}
-            sx={{
-              '& .MuiOutlinedInput-notchedOutline': {
-                borderColor: 'divider',
-              },
-              '&:hover .MuiOutlinedInput-notchedOutline': {
-                borderColor: 'primary.main',
-              },
-            }}
-          >
-            {environments.length === 0 ? (
-              <MenuItem disabled value="">
-                No environments available
-              </MenuItem>
-            ) : (
-              environments.map((env) => (
-                <MenuItem key={env} value={env}>
-                  {env}
-                </MenuItem>
-              ))
+        {/* Helm Version */}
+        {fullHelmVersion && (
+          <div className="mb-6 flex items-center gap-3">
+            <p className="text-sm text-muted-foreground">
+              Current SambaStack Helm Version:{' '}
+              <span
+                className={cn(
+                  'font-mono font-medium',
+                  helmVersionTooOld ? 'text-destructive' : 'text-primary'
+                )}
+              >
+                {fullHelmVersion}
+              </span>
+            </p>
+            {(helmVersionTooOld || enableUpdates) && (
+              <Button variant="outline" size="sm" onClick={handleOpenInstallDialog}>
+                Upgrade
+              </Button>
             )}
-          </Select>
-        </FormControl>        
+          </div>
+        )}
 
-        <TextField
-          id={namespaceId}
-          fullWidth
-          label="Namespace"
-          value={namespace}
-          onChange={handleNamespaceChange}
-          variant="outlined"
-          sx={{
-            mb: 3,
-            '& .MuiOutlinedInput-root': {
-              '& fieldset': {
-                borderColor: 'divider',
-              },
-              '&:hover fieldset': {
-                borderColor: 'primary.main',
-              },
-            },
-          }}
-        />
+        {/* Environment Config Card */}
+        <Card className="w-full max-w-lg">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-primary">Select your SambaStack environment</CardTitle>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => router.push('/add-environment')}
+              >
+                Add an Environment
+              </Button>
+            </div>
+          </CardHeader>
 
-        <TextField
-          id={apiDomainId}
-          fullWidth
-          label="API Domain"
-          value={apiDomain}
-          onChange={handleApiDomainChange}
-          variant="outlined"
-          sx={{
-            mb: 3,
-            '& .MuiOutlinedInput-root': {
-              '& fieldset': {
-                borderColor: 'divider',
-              },
-              '&:hover fieldset': {
-                borderColor: 'primary.main',
-              },
-            },
-          }}
-        />
+          <CardContent>
+            <FieldGroup>
+              <Field>
+                <FieldLabel>Environment</FieldLabel>
+                <Select value={selectedEnvironment} onValueChange={handleEnvironmentChange}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select environment..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {environments.length === 0 ? (
+                        <div className="px-2 py-3 text-center text-sm text-muted-foreground">
+                          No environments available
+                        </div>
+                      ) : (
+                        environments.map((env) => (
+                          <SelectItem key={env} value={env}>
+                            {env}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </Field>
 
-        <TextField
-          id={uiDomainId}
-          fullWidth
-          label="UI Domain"
-          value={uiDomain}
-          onChange={handleUiDomainChange}
-          variant="outlined"
-          sx={{
-            mb: 3,
-            '& .MuiOutlinedInput-root': {
-              '& fieldset': {
-                borderColor: 'divider',
-              },
-              '&:hover fieldset': {
-                borderColor: 'primary.main',
-              },
-            },
-          }}
-        />
+              <Field>
+                <FieldLabel htmlFor={namespaceId}>Namespace</FieldLabel>
+                <Input
+                  id={namespaceId}
+                  value={namespace}
+                  onChange={(e) => {
+                    setNamespace(e.target.value);
+                    setSaveSuccess(false);
+                    setSaveError(null);
+                  }}
+                />
+              </Field>
 
-        <Box sx={{ mb: 3 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
-            <Typography
-              component="a"
-              onClick={handleGetApiKey}
-              sx={{
-                fontSize: '0.75rem',
-                color: 'primary.main',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                '&:hover': {
-                  color: 'primary.dark',
-                },
-              }}
+              <Field>
+                <FieldLabel htmlFor={apiDomainId}>API Domain</FieldLabel>
+                <Input
+                  id={apiDomainId}
+                  value={apiDomain}
+                  onChange={(e) => {
+                    setApiDomain(e.target.value);
+                    setSaveSuccess(false);
+                    setSaveError(null);
+                  }}
+                  placeholder="https://api.example.com"
+                />
+              </Field>
+
+              <Field>
+                <FieldLabel htmlFor={uiDomainId}>UI Domain</FieldLabel>
+                <Input
+                  id={uiDomainId}
+                  value={uiDomain}
+                  onChange={(e) => {
+                    setUiDomain(e.target.value);
+                    setSaveSuccess(false);
+                    setSaveError(null);
+                  }}
+                  placeholder="https://ui.example.com"
+                />
+              </Field>
+
+              <Field>
+                <div className="flex items-center justify-between">
+                  <FieldLabel htmlFor={apiKeyId}>API Key</FieldLabel>
+                  <button
+                    type="button"
+                    onClick={handleGetApiKey}
+                    className="text-xs text-primary underline underline-offset-4 hover:text-primary/80"
+                  >
+                    Get API Key
+                  </button>
+                </div>
+                <div className="relative">
+                  <Input
+                    id={apiKeyId}
+                    type={showApiKey ? 'text' : 'password'}
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      setSaveSuccess(false);
+                      setSaveError(null);
+                    }}
+                    className="pr-10"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="absolute right-1 top-1/2 -translate-y-1/2"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    aria-label="Toggle API key visibility"
+                  >
+                    {showApiKey ? <EyeOff /> : <Eye />}
+                  </Button>
+                </div>
+              </Field>
+            </FieldGroup>
+
+            {saveSuccess && (
+              <Alert className="mt-4 border-green-500/50 bg-green-500/10">
+                <AlertDescription className="text-green-700">
+                  Configuration saved successfully!
+                </AlertDescription>
+              </Alert>
+            )}
+            {saveError && (
+              <Alert variant="destructive" className="mt-4">
+                <AlertDescription>{saveError}</AlertDescription>
+              </Alert>
+            )}
+          </CardContent>
+
+          <CardFooter>
+            <Button
+              className="w-full"
+              size="lg"
+              onClick={handleApply}
+              disabled={saving || !selectedEnvironment || !namespace}
             >
-              Get API Key
-            </Typography>
-          </Box>
-          <TextField
-            id={apiKeyId}
-            fullWidth
-            label="API Key"
-            type={showApiKey ? 'text' : 'password'}
-            value={apiKey}
-            onChange={handleApiKeyChange}
-            variant="outlined"
-            slotProps={{
-              input: {
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      aria-label="toggle api key visibility"
-                      onClick={handleToggleShowApiKey}
-                      edge="end"
-                    >
-                      {showApiKey ? <VisibilityOff /> : <Visibility />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              },
-              inputLabel: {
-                shrink: true,
-              },
-            }}
-            sx={{
-              '& .MuiOutlinedInput-root': {
-                '& fieldset': {
-                  borderColor: 'divider',
-                },
-                '&:hover fieldset': {
-                  borderColor: 'primary.main',
-                },
-              },
-            }}
-          />
-        </Box>
+              {saving && <Loader2 data-icon="inline-start" className="animate-spin" />}
+              {saving ? 'Applying...' : 'Apply Configuration'}
+            </Button>
+          </CardFooter>
+        </Card>
 
-        {/* Success/Error Messages */}
-        {saveSuccess && (
-          <Alert severity="success" sx={{ mb: 3 }}>
-            Configuration saved successfully!
-          </Alert>
-        )}
-        {saveError && (
-          <Alert severity="error" sx={{ mb: 3 }}>
-            {saveError}
-          </Alert>
-        )}
-
-        {/* Apply Button */}
-        <Button
-          fullWidth
-          variant="contained"
-          size="large"
-          onClick={handleApply}
-          disabled={saving || !selectedEnvironment || !namespace}
-          sx={{
-            py: 1.5,
-            fontWeight: 600,
-            fontSize: '1rem',
-            textTransform: 'none',
-            background: '#A2297D',
-            '&:hover': {
-              background: '#8B2268',
-            },
-            '&:disabled': {
-              background: '#ccc',
-              color: '#666',
-            },
-          }}
-        >
-          {saving ? (
-            <>
-              <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
-              Applying...
-            </>
-          ) : (
-            'Apply Configuration'
-          )}
-        </Button>
-      </Paper>
-
-      {/* Footer Info */}
-      <Box
-        sx={{
-          mt: 6,
-          textAlign: 'center',
-          color: 'text.secondary',
-        }}
-      >
-        <Typography variant="body2" sx={{ fontSize: '0.875rem' }}>
+        <p className="mt-8 text-sm text-muted-foreground">
           Ready to build? Use the navigation menu to access the bundle builder and deployment tools.
-        </Typography>
-      </Box>
-      </Box>
+        </p>
+      </div>
     </>
   );
 }
