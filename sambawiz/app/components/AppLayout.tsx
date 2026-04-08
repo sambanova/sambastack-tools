@@ -122,32 +122,22 @@ export default function AppLayout({ children }: AppLayoutProps) {
       <SidebarProvider>
         <Sidebar collapsible="icon">
           {/* Header — logo */}
-          <SidebarHeader className="py-4 px-2">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  size="lg"
-                  onClick={() => router.push('/')}
-                  isActive={selectedItem === 'home'}
-                  tooltip="Home"
-                  className="group-data-[state=collapsed]/sidebar-wrapper:justify-center"
-                >
-                  <div className="group-data-[state=collapsed]/sidebar-wrapper:hidden">
-                    <Image
-                      src="/sidebar-logo.svg"
-                      alt="SambaNova"
-                      width={130}
-                      height={34}
-                      style={{ width: '130px', height: 'auto' }}
-                      priority
-                    />
-                  </div>
-                  <div className="hidden group-data-[state=collapsed]/sidebar-wrapper:block">
-                    <Home className="size-5 text-primary" />
-                  </div>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
+          <SidebarHeader>
+            <div className="flex h-12 items-center px-2">
+              <div className="group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                <Image
+                  src="/sidebar-logo.svg"
+                  alt="SambaNova"
+                  width={130}
+                  height={34}
+                  style={{ width: '130px', height: 'auto' }}
+                  priority
+                />
+              </div>
+              <div className="hidden group-data-[state=collapsed]/sidebar-wrapper:flex justify-center w-full">
+                <Home className="size-5 text-primary" />
+              </div>
+            </div>
           </SidebarHeader>
 
           <SidebarSeparator />
