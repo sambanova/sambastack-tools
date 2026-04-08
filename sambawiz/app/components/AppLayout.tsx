@@ -23,10 +23,11 @@ import {
   Wrench,
   Rocket,
   Bot,
-  Home,
+  SlidersHorizontal,
   BookOpen,
   MessageCircleQuestion,
   Phone,
+  Server,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Image from 'next/image';
@@ -60,7 +61,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
   const pathname = usePathname();
 
   const getSelectedItem = () => {
-    if (pathname === '/') return 'home';
+    if (pathname === '/') return 'environment';
     if (pathname === '/bundle-builder') return 'bundle-builder';
     if (pathname === '/bundle-deployment') return 'bundle-deployment';
     if (pathname === '/playground') return 'playground';
@@ -82,7 +83,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
     setShowErrorDialog,
   } = useAppContext();
 
-  const navItems = [
+  const platformItems = [
     {
       key: 'bundle-builder',
       label: 'Bundle Builder',
@@ -135,27 +136,31 @@ export default function AppLayout({ children }: AppLayoutProps) {
                 />
               </div>
               <div className="hidden group-data-[state=collapsed]/sidebar-wrapper:flex justify-center w-full">
-                <Home className="size-5 text-primary" />
+                <Image
+                  src="/favicon.ico"
+                  alt="SambaNova"
+                  width={24}
+                  height={24}
+                  style={{ width: '24px', height: '24px' }}
+                />
               </div>
             </div>
           </SidebarHeader>
 
           <SidebarSeparator />
 
-          {/* Main nav */}
           <SidebarContent>
+            {/* Platform — primary tools */}
             <SidebarGroup>
               <SidebarGroupLabel>Platform</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {navItems.map(({ key, label, icon: Icon, path, disabled }) => (
+                  {platformItems.map(({ key, label, icon: Icon, path, disabled }) => (
                     <SidebarMenuItem key={key}>
                       <SidebarMenuButton
                         isActive={selectedItem === key}
                         disabled={disabled}
-                        onClick={() => {
-                          if (!disabled) router.push(path);
-                        }}
+                        onClick={() => { if (!disabled) router.push(path); }}
                         tooltip={label}
                         className={cn(disabled && 'opacity-50 cursor-not-allowed')}
                       >
@@ -168,25 +173,24 @@ export default function AppLayout({ children }: AppLayoutProps) {
               </SidebarGroupContent>
             </SidebarGroup>
 
-            {/* Fallback home nav when kubeconfig is invalid */}
-            {validationError && pathname !== '/' && (
-              <SidebarGroup>
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    <SidebarMenuItem>
-                      <SidebarMenuButton
-                        onClick={() => router.push('/')}
-                        tooltip="Go to Home"
-                        isActive={selectedItem === 'home'}
-                      >
-                        <Home />
-                        <span>Home</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
-            )}
+            {/* Configuration — setup/env, accessed infrequently */}
+            <SidebarGroup>
+              <SidebarGroupLabel>Configuration</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      isActive={selectedItem === 'environment'}
+                      onClick={() => router.push('/')}
+                      tooltip="Environment"
+                    >
+                      <SlidersHorizontal />
+                      <span>Environment</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
 
             {/* External resource links — pushed to bottom */}
             <SidebarGroup className="mt-auto">
@@ -196,9 +200,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
                     <SidebarMenuItem key={title}>
                       <SidebarMenuButton
                         tooltip={title}
-                        render={
-                          <a href={url} target="_blank" rel="noopener noreferrer" />
-                        }
+                        render={<a href={url} target="_blank" rel="noopener noreferrer" />}
                       >
                         <Icon />
                         <span>{title}</span>
@@ -210,16 +212,13 @@ export default function AppLayout({ children }: AppLayoutProps) {
             </SidebarGroup>
           </SidebarContent>
 
-          {/* Footer — env info + app version */}
+          {/* Footer — active env display (informational only) */}
           <SidebarSeparator />
           <SidebarFooter className="pb-4 px-2 flex flex-col gap-2">
             {envVersion && envName ? (
-              <button
-                onClick={() => router.push('/')}
-                className="w-full rounded-lg bg-muted border border-border p-3 cursor-pointer transition-all hover:bg-muted/80 hover:scale-[1.02] text-left group-data-[state=collapsed]/sidebar-wrapper:flex group-data-[state=collapsed]/sidebar-wrapper:justify-center"
-              >
+              <div className="w-full rounded-lg bg-muted border border-border p-3 group-data-[state=collapsed]/sidebar-wrapper:flex group-data-[state=collapsed]/sidebar-wrapper:justify-center">
                 <div className="flex items-center justify-center gap-1.5 mb-1 group-data-[state=collapsed]/sidebar-wrapper:mb-0">
-                  <Home className="size-4 text-primary shrink-0" />
+                  <Server className="size-4 text-primary shrink-0" />
                   <span className="text-sm font-semibold text-primary group-data-[state=collapsed]/sidebar-wrapper:hidden truncate">
                     {envName}
                   </span>
@@ -232,7 +231,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
                     namespace: {namespace}
                   </p>
                 )}
-              </button>
+              </div>
             ) : null}
 
             {appVersion && (
