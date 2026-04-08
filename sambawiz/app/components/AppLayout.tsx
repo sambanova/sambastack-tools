@@ -5,6 +5,9 @@ import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
@@ -12,10 +15,19 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
+  SidebarSeparator,
   SidebarTrigger,
 } from '@/components/ui/sidebar';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Wrench, Rocket, Bot, Home } from 'lucide-react';
+import {
+  Wrench,
+  Rocket,
+  Bot,
+  Home,
+  BookOpen,
+  MessageCircleQuestion,
+  Phone,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import Image from 'next/image';
 import { useRouter, usePathname } from 'next/navigation';
@@ -25,11 +37,28 @@ interface AppLayoutProps {
   children: React.ReactNode;
 }
 
+const externalLinks = [
+  {
+    title: 'Documentation',
+    url: 'https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction',
+    icon: BookOpen,
+  },
+  {
+    title: 'Community',
+    url: 'https://community.sambanova.ai/',
+    icon: MessageCircleQuestion,
+  },
+  {
+    title: 'Contact Us',
+    url: 'https://sambanova.ai/contact',
+    icon: Phone,
+  },
+];
+
 export default function AppLayout({ children }: AppLayoutProps) {
   const router = useRouter();
   const pathname = usePathname();
 
-  // Derive selected item directly from pathname instead of using state
   const getSelectedItem = () => {
     if (pathname === '/') return 'home';
     if (pathname === '/bundle-builder') return 'bundle-builder';
@@ -92,57 +121,109 @@ export default function AppLayout({ children }: AppLayoutProps) {
       />
       <SidebarProvider>
         <Sidebar collapsible="icon">
+          {/* Header — logo */}
           <SidebarHeader className="py-4 px-2">
-            <div className="flex items-center justify-center group-data-[state=collapsed]/sidebar-wrapper:hidden">
-              <Image
-                src="/sidebar-logo.svg"
-                alt="SambaNova Logo"
-                width={150}
-                height={40}
-                style={{ width: '150px', height: 'auto' }}
-                priority
-              />
-            </div>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  size="lg"
+                  onClick={() => router.push('/')}
+                  isActive={selectedItem === 'home'}
+                  tooltip="Home"
+                  className="group-data-[state=collapsed]/sidebar-wrapper:justify-center"
+                >
+                  <div className="group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                    <Image
+                      src="/sidebar-logo.svg"
+                      alt="SambaNova"
+                      width={130}
+                      height={34}
+                      style={{ width: '130px', height: 'auto' }}
+                      priority
+                    />
+                  </div>
+                  <div className="hidden group-data-[state=collapsed]/sidebar-wrapper:block">
+                    <Home className="size-5 text-primary" />
+                  </div>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
           </SidebarHeader>
 
-          <SidebarContent>
-            <SidebarMenu>
-              {navItems.map(({ key, label, icon: Icon, path, disabled }) => (
-                <SidebarMenuItem key={key}>
-                  <SidebarMenuButton
-                    isActive={selectedItem === key}
-                    disabled={disabled}
-                    onClick={() => {
-                      if (!disabled) {
-                        router.push(path);
-                      }
-                    }}
-                    tooltip={label}
-                    className={cn(
-                      disabled && 'opacity-50 cursor-not-allowed'
-                    )}
-                  >
-                    <Icon />
-                    <span>{label}</span>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarContent>
+          <SidebarSeparator />
 
-          <SidebarFooter className="pb-4 px-2 flex flex-col gap-2">
-            {/* Fallback home button when kubeconfig validation failed and not on home page */}
+          {/* Main nav */}
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>Platform</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {navItems.map(({ key, label, icon: Icon, path, disabled }) => (
+                    <SidebarMenuItem key={key}>
+                      <SidebarMenuButton
+                        isActive={selectedItem === key}
+                        disabled={disabled}
+                        onClick={() => {
+                          if (!disabled) router.push(path);
+                        }}
+                        tooltip={label}
+                        className={cn(disabled && 'opacity-50 cursor-not-allowed')}
+                      >
+                        <Icon />
+                        <span>{label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+
+            {/* Fallback home nav when kubeconfig is invalid */}
             {validationError && pathname !== '/' && (
-              <button
-                onClick={() => router.push('/')}
-                className="flex items-center justify-center rounded-lg bg-muted border border-border p-3 cursor-pointer transition-all hover:bg-muted/80 hover:scale-[1.02]"
-              >
-                <Home className="size-5 text-primary" />
-              </button>
+              <SidebarGroup>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push('/')}
+                        tooltip="Go to Home"
+                        isActive={selectedItem === 'home'}
+                      >
+                        <Home />
+                        <span>Home</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
             )}
 
-            {/* Environment version display - clickable to go to home */}
-            {envVersion && envName && (
+            {/* External resource links — pushed to bottom */}
+            <SidebarGroup className="mt-auto">
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {externalLinks.map(({ title, url, icon: Icon }) => (
+                    <SidebarMenuItem key={title}>
+                      <SidebarMenuButton
+                        tooltip={title}
+                        render={
+                          <a href={url} target="_blank" rel="noopener noreferrer" />
+                        }
+                      >
+                        <Icon />
+                        <span>{title}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+
+          {/* Footer — env info + app version */}
+          <SidebarSeparator />
+          <SidebarFooter className="pb-4 px-2 flex flex-col gap-2">
+            {envVersion && envName ? (
               <button
                 onClick={() => router.push('/')}
                 className="w-full rounded-lg bg-muted border border-border p-3 cursor-pointer transition-all hover:bg-muted/80 hover:scale-[1.02] text-left group-data-[state=collapsed]/sidebar-wrapper:flex group-data-[state=collapsed]/sidebar-wrapper:justify-center"
@@ -162,9 +243,8 @@ export default function AppLayout({ children }: AppLayoutProps) {
                   </p>
                 )}
               </button>
-            )}
+            ) : null}
 
-            {/* App version display */}
             {appVersion && (
               <div className="rounded bg-black/[0.02] p-2 text-center group-data-[state=collapsed]/sidebar-wrapper:hidden">
                 <span className="text-[0.7rem] font-medium text-muted-foreground">
