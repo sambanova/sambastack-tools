@@ -3,63 +3,71 @@
 import { useState, useMemo, useEffect, useId, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  Box,
-  Paper,
-  Typography,
-  FormControl,
-  InputLabel,
+  TriangleAlert,
+  Copy,
+  Trash2,
+  Wrench,
+  Save,
+  Rocket,
+  HelpCircle,
+  Loader2,
+} from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Textarea } from '@/components/ui/textarea';
+import {
   Select,
-  MenuItem,
-  Checkbox,
-  ListItemText,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Separator } from '@/components/ui/separator';
+import {
   Table,
   TableBody,
   TableCell,
-  TableContainer,
   TableHead,
+  TableHeader,
   TableRow,
-  Chip,
-  Divider,
-  SelectChangeEvent,
-  TextField,
-  Button,
-  Alert,
-  CircularProgress,
-  Tooltip,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-} from '@mui/material';
-import WarningAmberIcon from '@mui/icons-material/WarningAmber';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
-import DeleteIcon from '@mui/icons-material/Delete';
-import HandymanIcon from '@mui/icons-material/Handyman';
-import SaveIcon from '@mui/icons-material/Save';
-import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+} from '@/components/ui/table';
+import { Field, FieldLabel, FieldGroup, FieldDescription } from '@/components/ui/field';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 import type { PefConfigs, PefMapping, CheckpointMapping, ConfigSelection } from '../types/bundle';
 import { generateBundleYaml } from '../utils/bundle-yaml-generator';
 import DocumentationPanel from './DocumentationPanel';
 
-// Import the JSON data
 import pefConfigsData from '../data/pef_configs.json';
 import pefMappingData from '../data/pef_mapping.json';
 
 const pefConfigs: PefConfigs = pefConfigsData;
 const pefMapping: PefMapping = pefMappingData;
 
-/** Returns all PefConfig entries for a PEF name, normalizing single objects and arrays. */
 function getPefConfigEntries(pefName: string): import('../types/bundle').PefConfig[] {
   const config = pefConfigs[pefName];
   if (!config) return [];
   return Array.isArray(config) ? config : [config];
 }
 
-/** Returns the PefConfig entry matching the given ss and bs for a PEF name. */
-function getPefConfigForSsBs(pefName: string, ss: string, bs: string): import('../types/bundle').PefConfig | undefined {
+function getPefConfigForSsBs(
+  pefName: string,
+  ss: string,
+  bs: string
+): import('../types/bundle').PefConfig | undefined {
   return getPefConfigEntries(pefName).find((e) => e.ss === ss && e.bs === bs);
 }
 
@@ -70,8 +78,6 @@ interface ModelConfig {
 
 export default function BundleForm() {
   const router = useRouter();
-
-  // Generate stable IDs for form fields to prevent hydration mismatches
   const bundleNameId = useId();
   const generatedYamlId = useId();
 
@@ -87,11 +93,7 @@ export default function BundleForm() {
     success: boolean;
     message: string;
     applyOutput?: string;
-    validationStatus?: {
-      reason: string;
-      message: string;
-      isValid: boolean;
-    };
+    validationStatus?: { reason: string; message: string; isValid: boolean };
     bundleName?: string;
   } | null>(null);
   const [saveDialogOpen, setSaveDialogOpen] = useState<boolean>(false);
@@ -99,18 +101,14 @@ export default function BundleForm() {
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
   const [checkpointMapping, setCheckpointMapping] = useState<CheckpointMapping>({});
 
-  // Track if we're loading from saved state to prevent YAML regeneration
   const isLoadingFromSavedState = useRef<boolean>(false);
 
-  // Fetch checkpointsDir from config and load saved state on component mount
   useEffect(() => {
     const fetchConfig = async () => {
       try {
         const response = await fetch('/api/environments');
         const data = await response.json();
-        if (data.success && data.checkpointsDir) {
-          setCheckpointsDir(data.checkpointsDir);
-        }
+        if (data.success && data.checkpointsDir) setCheckpointsDir(data.checkpointsDir);
       } catch (error) {
         console.error('Failed to fetch checkpoints directory:', error);
       }
@@ -121,20 +119,13 @@ export default function BundleForm() {
         const response = await fetch('/api/bundle-builder-state');
         const data = await response.json();
         if (data.success && data.state) {
-          // Set flag to prevent YAML regeneration during state load
           isLoadingFromSavedState.current = true;
-
-          // Restore the saved state
           setSelectedModels(data.state.selectedModels || []);
           setSelectedConfigs(data.state.selectedConfigs || []);
           setBundleName(data.state.bundleName || 'bundle1');
           setGeneratedYaml(data.state.generatedYaml || '');
           setDraftModels(data.state.draftModels || {});
-
-          // Clear flag after a brief delay to allow state updates to complete
-          setTimeout(() => {
-            isLoadingFromSavedState.current = false;
-          }, 100);
+          setTimeout(() => { isLoadingFromSavedState.current = false; }, 100);
         }
       } catch (error) {
         console.error('Failed to load saved state:', error);
@@ -142,29 +133,22 @@ export default function BundleForm() {
       }
     };
 
-    // Listen for load bundle events from the dialog
     const handleLoadBundleState = (event: Event) => {
       const customEvent = event as CustomEvent;
       const { bundleName, selectedModels, selectedConfigs, draftModels } = customEvent.detail;
-
       setBundleName(bundleName);
       setSelectedModels(selectedModels);
       setSelectedConfigs(selectedConfigs);
       setDraftModels(draftModels);
-      setValidationResult(null); // Clear any previous validation results
+      setValidationResult(null);
     };
 
     window.addEventListener('loadBundleState', handleLoadBundleState);
-
     fetchConfig();
     loadSavedState();
-
-    return () => {
-      window.removeEventListener('loadBundleState', handleLoadBundleState);
-    };
+    return () => window.removeEventListener('loadBundleState', handleLoadBundleState);
   }, []);
 
-  // Load checkpoint mapping dynamically (file may not exist if gitignored)
   useEffect(() => {
     const loadCheckpointMapping = async () => {
       try {
@@ -173,139 +157,105 @@ export default function BundleForm() {
         if (result.success && result.data) {
           setCheckpointMapping(result.data);
         } else {
-          // File doesn't exist (gitignored), use empty object
           console.warn('checkpoint_mapping.json not found, using empty mapping');
           setCheckpointMapping({});
         }
       } catch (error) {
-        // API call failed, use empty object
-        // The UI will show an error message for the user to configure it
         console.warn('Failed to load checkpoint_mapping.json:', error);
         setCheckpointMapping({});
       }
     };
-
     loadCheckpointMapping();
   }, []);
 
-  // Get available models (intersection of checkpoint and pef mapping keys with non-empty values)
   const availableModels = useMemo(() => {
     const checkpointKeys = Object.keys(checkpointMapping).filter(
       (key) => checkpointMapping[key]?.path !== ''
     );
-    const pefMappingKeys = Object.keys(pefMapping).filter(
-      (key) => pefMapping[key].length > 0
-    );
+    const pefMappingKeys = Object.keys(pefMapping).filter((key) => pefMapping[key].length > 0);
     return checkpointKeys.filter((key) => pefMappingKeys.includes(key)).sort();
   }, [checkpointMapping]);
 
-  // Check if a model supports speculative decoding
   const modelSupportsSpeculativeDecoding = useMemo(() => {
     const sdSupport: { [modelName: string]: boolean } = {};
-
     selectedModels.forEach((modelName) => {
       const pefs = pefMapping[modelName] || [];
-      // A model supports SD only if ALL its PEF configs contain "-sd" followed by a number
-      const allConfigsSupportSD = pefs.length > 0 && pefs.every((pefName) => {
-        // Check if the config name contains "-sd" followed by digits in a hyphenated section
-        const parts = pefName.split('-');
-        return parts.some((part) => /^sd\d+$/.test(part));
-      });
+      const allConfigsSupportSD =
+        pefs.length > 0 &&
+        pefs.every((pefName) => {
+          const parts = pefName.split('-');
+          return parts.some((part) => /^sd\d+$/.test(part));
+        });
       sdSupport[modelName] = allConfigsSupportSD;
     });
-
     return sdSupport;
   }, [selectedModels]);
 
-  // Get available configurations for selected models
   const modelConfigurations = useMemo(() => {
     const configs: { [modelName: string]: ModelConfig[] } = {};
-
     selectedModels.forEach((modelName) => {
       const pefs = pefMapping[modelName] || [];
       const configSet = new Set<string>();
-
       pefs.forEach((pefName) => {
         getPefConfigEntries(pefName).forEach((config) => {
           configSet.add(`${config.ss}|${config.bs}`);
         });
       });
-
       configs[modelName] = Array.from(configSet)
         .map((key) => {
           const [ss, bs] = key.split('|');
           return { ss, bs };
         })
         .sort((a, b) => {
-          // Sort by ss first, then by bs
           const ssA = parseInt(a.ss);
           const ssB = parseInt(b.ss);
           if (ssA !== ssB) return ssA - ssB;
           return parseInt(a.bs) - parseInt(b.bs);
         });
     });
-
     return configs;
   }, [selectedModels]);
 
-  const handleModelChange = (event: SelectChangeEvent<string[]>) => {
-    const value = event.target.value;
-    const models = typeof value === 'string' ? value.split(',') : value;
-    setSelectedModels(models);
-
-    // Remove configs for deselected models
-    setSelectedConfigs((prev) =>
-      prev.filter((config) => models.includes(config.modelName))
-    );
-
-    // Remove draft model selections for deselected models
-    setDraftModels((prev) => {
-      const updated = { ...prev };
-      Object.keys(updated).forEach((modelName) => {
-        if (!models.includes(modelName)) {
-          delete updated[modelName];
-        }
+  const handleModelToggle = (model: string, isChecked: boolean) => {
+    const newModels = isChecked
+      ? [...selectedModels, model]
+      : selectedModels.filter((m) => m !== model);
+    setSelectedModels(newModels);
+    if (!isChecked) {
+      setSelectedConfigs((prev) => prev.filter((c) => c.modelName !== model));
+      setDraftModels((prev) => {
+        const updated = { ...prev };
+        delete updated[model];
+        return updated;
       });
-      return updated;
-    });
+    }
   };
 
   const handleDraftModelChange = (targetModel: string, draftModel: string) => {
-    setDraftModels((prev) => ({
-      ...prev,
-      [targetModel]: draftModel,
-    }));
+    setDraftModels((prev) => ({ ...prev, [targetModel]: draftModel }));
 
-    // If a draft model is selected (not "Skip"), add it to selectedModels if not already present
     if (draftModel !== 'skip' && !selectedModels.includes(draftModel)) {
       setSelectedModels((prev) => [...prev, draftModel]);
     }
 
-    // If a draft model is selected (not "Skip") and the target model has configs selected,
-    // automatically select matching configs for the draft model
     if (draftModel !== 'skip') {
       const targetConfigs = selectedConfigs.filter((config) => config.modelName === targetModel);
-
       if (targetConfigs.length > 0) {
         const draftPefs = pefMapping[draftModel] || [];
         const newDraftConfigs: ConfigSelection[] = [];
-
         targetConfigs.forEach((targetConfig) => {
-          // Check if draft model already has this config selected
           const draftConfigExists = selectedConfigs.some(
-            (config) => config.modelName === draftModel &&
-                       config.ss === targetConfig.ss &&
-                       config.bs === targetConfig.bs
+            (config) =>
+              config.modelName === draftModel &&
+              config.ss === targetConfig.ss &&
+              config.bs === targetConfig.bs
           );
-
           if (!draftConfigExists) {
-            // Find matching draft model PEF for this config
             const matchingDraftPef = draftPefs.find((pefName) =>
               getPefConfigEntries(pefName).some(
                 (config) => config.ss === targetConfig.ss && config.bs === targetConfig.bs
               )
             );
-
             if (matchingDraftPef) {
               newDraftConfigs.push({
                 modelName: draftModel,
@@ -316,7 +266,6 @@ export default function BundleForm() {
             }
           }
         });
-
         if (newDraftConfigs.length > 0) {
           setSelectedConfigs((prev) => [...prev, ...newDraftConfigs]);
         }
@@ -325,12 +274,10 @@ export default function BundleForm() {
   };
 
   const handleConfigToggle = (modelName: string, ss: string, bs: string) => {
-    // Find the PEF name that matches this model and config
     const pefs = pefMapping[modelName] || [];
     const matchingPef = pefs.find((pefName) =>
       getPefConfigEntries(pefName).some((config) => config.ss === ss && config.bs === bs)
     );
-
     if (!matchingPef) return;
 
     const existingIndex = selectedConfigs.findIndex(
@@ -338,23 +285,15 @@ export default function BundleForm() {
     );
 
     if (existingIndex >= 0) {
-      // Remove the config
       setSelectedConfigs((prev) => prev.filter((_, i) => i !== existingIndex));
     } else {
-      // Add the config
-      const newConfigs: ConfigSelection[] = [
-        { modelName, ss, bs, pefName: matchingPef },
-      ];
-
-      // If this model has a draft model selected, try to auto-select the same config for the draft model
+      const newConfigs: ConfigSelection[] = [{ modelName, ss, bs, pefName: matchingPef }];
       const draftModel = draftModels[modelName];
       if (draftModel && draftModel !== 'skip') {
         const draftPefs = pefMapping[draftModel] || [];
         const matchingDraftPef = draftPefs.find((pefName) =>
           getPefConfigEntries(pefName).some((config) => config.ss === ss && config.bs === bs)
         );
-
-        // If the draft model has this config and it's not already selected, add it
         if (matchingDraftPef) {
           const draftConfigExists = selectedConfigs.some(
             (config) => config.modelName === draftModel && config.ss === ss && config.bs === bs
@@ -364,7 +303,6 @@ export default function BundleForm() {
           }
         }
       }
-
       setSelectedConfigs((prev) => [...prev, ...newConfigs]);
     }
   };
@@ -382,12 +320,8 @@ export default function BundleForm() {
     );
 
     if (allSelected) {
-      // Deselect all configs for this model
-      setSelectedConfigs((prev) =>
-        prev.filter((config) => config.modelName !== modelName)
-      );
+      setSelectedConfigs((prev) => prev.filter((config) => config.modelName !== modelName));
     } else {
-      // Select all configs for this model
       const newConfigs = configs
         .filter((config) => !isConfigSelected(modelName, config.ss, config.bs))
         .map((config) => {
@@ -395,10 +329,11 @@ export default function BundleForm() {
           const matchingPef = pefs.find((pefName) =>
             getPefConfigEntries(pefName).some((e) => e.ss === config.ss && e.bs === config.bs)
           );
-          return matchingPef ? { modelName, ss: config.ss, bs: config.bs, pefName: matchingPef } : null;
+          return matchingPef
+            ? { modelName, ss: config.ss, bs: config.bs, pefName: matchingPef }
+            : null;
         })
         .filter((config): config is ConfigSelection => config !== null);
-
       setSelectedConfigs((prev) => [...prev, ...newConfigs]);
     }
   };
@@ -409,81 +344,92 @@ export default function BundleForm() {
     return configs.every((config) => isConfigSelected(modelName, config.ss, config.bs));
   };
 
-  // Bundle name is manually set to 'bundle1' by default
-  // Auto-generation disabled per user request
-
-  // Get selected PEFs grouped by model
   const selectedPefsByModel = useMemo(() => {
     const grouped: { [modelName: string]: string[] } = {};
     selectedConfigs.forEach((config) => {
-      if (!grouped[config.modelName]) {
-        grouped[config.modelName] = [];
-      }
+      if (!grouped[config.modelName]) grouped[config.modelName] = [];
       grouped[config.modelName].push(config.pefName);
     });
     return grouped;
   }, [selectedConfigs]);
 
-  // Check if a target model PEF has a corresponding draft model PEF selected
   const pefHasDraftModelConfig = (modelName: string, ss: string, bs: string): boolean => {
     const draftModel = draftModels[modelName];
-    if (!draftModel || draftModel === 'skip') return true; // No draft model required
-
+    if (!draftModel || draftModel === 'skip') return true;
     return selectedConfigs.some(
       (config) => config.modelName === draftModel && config.ss === ss && config.bs === bs
     );
   };
 
-  // Generate YAML automatically when configs or bundle name change
-  useEffect(() => {
-    // Skip regeneration if we're loading from saved state
-    if (isLoadingFromSavedState.current) {
-      return;
-    }
+  const draftConfigExistsButNotSelected = (
+    modelName: string,
+    ss: string,
+    bs: string
+  ): boolean => {
+    const draftModel = draftModels[modelName];
+    if (!draftModel || draftModel === 'skip') return false;
+    const draftPefs = pefMapping[draftModel] || [];
+    const matchingDraftPef = draftPefs.find((draftPefName) =>
+      getPefConfigEntries(draftPefName).some(
+        (config) => config.ss === ss && config.bs === bs
+      )
+    );
+    if (!matchingDraftPef) return false;
+    return !selectedConfigs.some(
+      (config) => config.modelName === draftModel && config.ss === ss && config.bs === bs
+    );
+  };
 
+  useEffect(() => {
+    if (isLoadingFromSavedState.current) return;
     if (selectedConfigs.length === 0 || !bundleName) {
       setGeneratedYaml('');
       return;
     }
-    const yaml = generateBundleYaml(selectedConfigs, checkpointMapping, pefConfigs, bundleName, checkpointsDir, draftModels);
+    const yaml = generateBundleYaml(
+      selectedConfigs,
+      checkpointMapping,
+      pefConfigs,
+      bundleName,
+      checkpointsDir,
+      draftModels
+    );
     setGeneratedYaml(yaml);
   }, [selectedConfigs, bundleName, draftModels, checkpointsDir, checkpointMapping]);
 
-  // Handle copy to clipboard
   const handleCopyToClipboard = async () => {
     try {
       await navigator.clipboard.writeText(generatedYaml);
       setCopiedToClipboard(true);
-      setTimeout(() => setCopiedToClipboard(false), 2000); // Reset after 2 seconds
+      setTimeout(() => setCopiedToClipboard(false), 2000);
     } catch (error) {
       console.error('Failed to copy to clipboard:', error);
     }
   };
 
-  // Handle removing a PEF configuration
   const handleRemovePefConfig = (modelName: string, ss: string, bs: string) => {
     setSelectedConfigs((prev) =>
       prev.filter(
-        (config) => !(config.modelName === modelName && config.ss === ss && config.bs === bs)
+        (config) =>
+          !(config.modelName === modelName && config.ss === ss && config.bs === bs)
       )
     );
   };
 
-  // Handle adding missing draft model configuration
   const handleAddMissingDraftConfig = (modelName: string, ss: string, bs: string) => {
     const draftModel = draftModels[modelName];
     if (!draftModel || draftModel === 'skip') return;
-
     const draftPefs = pefMapping[draftModel] || [];
     const matchingDraftPef = draftPefs.find((draftPefName) =>
-      getPefConfigEntries(draftPefName).some((config) => config.ss === ss && config.bs === bs)
+      getPefConfigEntries(draftPefName).some(
+        (config) => config.ss === ss && config.bs === bs
+      )
     );
-
     if (matchingDraftPef) {
       const draftConfigExists = selectedConfigs.some(
-        (config) => config.modelName === draftModel && config.ss === ss && config.bs === bs
+        (config) =>
+          config.modelName === draftModel && config.ss === ss && config.bs === bs
       );
-
       if (!draftConfigExists) {
         setSelectedConfigs((prev) => [
           ...prev,
@@ -493,63 +439,28 @@ export default function BundleForm() {
     }
   };
 
-  // Check if a draft model config exists but is not selected
-  const draftConfigExistsButNotSelected = (modelName: string, ss: string, bs: string): boolean => {
-    const draftModel = draftModels[modelName];
-    if (!draftModel || draftModel === 'skip') return false;
-
-    const draftPefs = pefMapping[draftModel] || [];
-    const matchingDraftPef = draftPefs.find((draftPefName) =>
-      getPefConfigEntries(draftPefName).some((config) => config.ss === ss && config.bs === bs)
-    );
-
-    if (!matchingDraftPef) return false;
-
-    return !selectedConfigs.some(
-      (config) => config.modelName === draftModel && config.ss === ss && config.bs === bs
-    );
-  };
-
-  // Handle validation
   const handleValidate = async () => {
     if (!generatedYaml) return;
-
     setIsValidating(true);
     setValidationResult(null);
-
-    // Save the current state before validating
     try {
       await fetch('/api/bundle-builder-state', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          state: {
-            selectedModels,
-            selectedConfigs,
-            bundleName,
-            generatedYaml,
-            draftModels,
-          },
+          state: { selectedModels, selectedConfigs, bundleName, generatedYaml, draftModels },
         }),
       });
     } catch (error) {
       console.error('Failed to save state:', error);
-      // Continue with validation even if state save fails
     }
-
     try {
       const response = await fetch('/api/validate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ yaml: generatedYaml }),
       });
-
       const data = await response.json();
-
       if (response.ok && data.success) {
         setValidationResult({
           success: true,
@@ -576,210 +487,186 @@ export default function BundleForm() {
     }
   };
 
-  // Handle save button click
   const handleSaveClick = () => {
     setSaveResult(null);
     setSaveDialogOpen(false);
     handleSaveFile(false);
   };
 
-  // Handle save file
   const handleSaveFile = async (overwrite: boolean) => {
     if (!generatedYaml || !bundleName) return;
-
     setIsSaving(true);
     setSaveResult(null);
-
     const fileName = `${bundleName}.yaml`;
-
     try {
-      const endpoint = overwrite ? '/api/save-artifact' : '/api/save-artifact';
-      const method = overwrite ? 'PUT' : 'POST';
-
-      const response = await fetch(endpoint, {
-        method,
+      const response = await fetch('/api/save-artifact', {
+        method: overwrite ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileName, content: generatedYaml }),
       });
-
       const data = await response.json();
-
       if (response.ok && data.success) {
-        setSaveResult({
-          success: true,
-          message: `Bundle saved successfully to saved_artifacts/${fileName}`,
-        });
+        setSaveResult({ success: true, message: `Bundle saved to saved_artifacts/${fileName}` });
       } else if (response.status === 409 && data.fileExists) {
-        // File exists, show overwrite dialog
         setSaveDialogOpen(true);
       } else {
-        setSaveResult({
-          success: false,
-          message: data.error || 'Failed to save bundle',
-        });
+        setSaveResult({ success: false, message: data.error || 'Failed to save bundle' });
       }
     } catch {
-      setSaveResult({
-        success: false,
-        message: 'Failed to connect to save service',
-      });
+      setSaveResult({ success: false, message: 'Failed to connect to save service' });
     } finally {
       setIsSaving(false);
     }
   };
 
-  // Handle overwrite confirmation
   const handleOverwrite = () => {
     setSaveDialogOpen(false);
     handleSaveFile(true);
   };
 
-  // Handle cancel save
   const handleCancelSave = () => {
     setSaveDialogOpen(false);
     setSaveResult(null);
   };
 
-  // Handle create deployment button click
   const handleCreateDeployment = () => {
-    // Navigate to bundle-deployment page with bundle name as query parameter
     const bundleNameToPass = validationResult?.bundleName || bundleName;
     router.push(`/bundle-deployment?bundle=${encodeURIComponent(bundleNameToPass)}`);
   };
 
   return (
-    <Box>
-      {/* Documentation Panel */}
+    <div className="flex flex-col gap-4">
       <DocumentationPanel docFile="bundle-builder.md" />
 
-      {/* Model Selection */}
-      <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-        <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-          1. Select Models
-        </Typography>
-        <FormControl fullWidth>
-          <InputLabel id="model-select-label">Models</InputLabel>
-          <Select
-            labelId="model-select-label"
-            id="model-select"
-            multiple
-            value={selectedModels}
-            onChange={handleModelChange}
-            label="Models"
-            renderValue={(selected) => (
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                {selected.map((value) => (
-                  <Chip key={value} label={value} size="small" />
-                ))}
-              </Box>
-            )}
-          >
-            {availableModels.map((model) => (
-              <MenuItem key={model} value={model}>
-                <Checkbox checked={selectedModels.indexOf(model) > -1} />
-                <ListItemText primary={model} />
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-      </Paper>
+      {/* Section 1: Select Models */}
+      <Card>
+        <CardHeader>
+          <CardTitle>1. Select Models</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {availableModels.length === 0 ? (
+            <Alert>
+              <AlertDescription>
+                No models available. Please configure your checkpoint directory on the Home page.
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {availableModels.map((model) => (
+                <label
+                  key={model}
+                  className="flex cursor-pointer items-center gap-2.5 rounded-lg border p-2.5 hover:bg-accent has-data-checked:border-primary/40 has-data-checked:bg-primary/5"
+                >
+                  <Checkbox
+                    checked={selectedModels.includes(model)}
+                    onCheckedChange={(checked) =>
+                      handleModelToggle(model, checked === true)
+                    }
+                  />
+                  <span className="truncate text-sm font-medium">{model}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Configuration Selection Tables */}
+      {/* Section 2: Select Configurations */}
       {selectedModels.length > 0 && (
-        <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              2. Select Configurations
-            </Typography>
-            <Tooltip
-              title={
-                <>
-                  A larger sequence size (SS) supports longer context prompts.<br />
-                  A larger batch size (BS) supports high concurrency.<br />
-                  Configurations with larger SS and larger BS occupy more memory and have a higher time to first token.<br />
-                  It is recommended to have a mix of configurations with small and large SS and BS to support lower latency for big and small workloads.
-                </>
-              }
-              arrow
-            >
-              <HelpOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
-            </Tooltip>
-          </Box>
-          {selectedModels.map((modelName, idx) => (
-            <Box key={modelName} sx={{ mb: idx < selectedModels.length - 1 ? 3 : 0 }}>
-              <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 0.5 }}>
-                {modelName}
-              </Typography>
-              {modelSupportsSpeculativeDecoding[modelName] && (
-                <Box sx={{ mb: 1.5 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                    <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                      This model supports speculative decoding. Enable it by choosing a draft model:
-                    </Typography>
-                    <FormControl size="small" sx={{ minWidth: 200 }}>
-                      <Select
-                        value={draftModels[modelName] || 'skip'}
-                        onChange={(e) => handleDraftModelChange(modelName, e.target.value)}
-                        displayEmpty
-                      >
-                        <MenuItem value="skip">skip</MenuItem>
-                        {availableModels
-                          .filter((model) => model !== modelName)
-                          .map((model) => (
-                            <MenuItem key={model} value={model}>
-                              {model}
-                            </MenuItem>
-                          ))}
-                      </Select>
-                    </FormControl>
-                    <Tooltip
-                      title="The draft model should be much smaller than this target model and should ideally be trained on similar data so it can generate tokens that this target model is more likely to accept."
-                      arrow
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-1.5">
+              <CardTitle>2. Select Configurations</CardTitle>
+              <Tooltip>
+                <TooltipTrigger>
+                  <HelpCircle className="size-4 cursor-help text-muted-foreground" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  A larger sequence size (SS) supports longer context prompts. A larger batch size
+                  (BS) supports high concurrency. It is recommended to have a mix of configurations
+                  with small and large SS and BS to support lower latency for big and small
+                  workloads.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-6">
+            {selectedModels.map((modelName, idx) => (
+              <div key={modelName}>
+                <p className="mb-2 text-sm font-semibold">{modelName}</p>
+
+                {modelSupportsSpeculativeDecoding[modelName] && (
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-muted-foreground">
+                      Supports speculative decoding. Draft model:
+                    </span>
+                    <Select
+                      value={draftModels[modelName] || 'skip'}
+                      onValueChange={(value) => value && handleDraftModelChange(modelName, value)}
                     >
-                      <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+                      <SelectTrigger className="w-48">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="skip">skip</SelectItem>
+                          {availableModels
+                            .filter((model) => model !== modelName)
+                            .map((model) => (
+                              <SelectItem key={model} value={model}>
+                                {model}
+                              </SelectItem>
+                            ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="size-4 cursor-help text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        The draft model should be much smaller than this target model and should
+                        ideally be trained on similar data.
+                      </TooltipContent>
                     </Tooltip>
-                  </Box>
-                </Box>
-              )}
-              {!modelSupportsSpeculativeDecoding[modelName] && (
-                <Box sx={{ mb: 1.5 }} />
-              )}
-              <TableContainer>
-                <Table size="small" sx={{ border: '1px solid', borderColor: 'divider' }}>
-                  <TableHead>
-                    <TableRow sx={{ bgcolor: 'grey.50' }}>
-                      <TableCell sx={{ fontWeight: 600 }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  </div>
+                )}
+
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-16">
+                        <div className="flex items-center gap-2">
                           <Checkbox
-                            checked={areAllConfigsSelected(modelName)}
-                            indeterminate={
-                              !areAllConfigsSelected(modelName) &&
-                              selectedConfigs.some((config) => config.modelName === modelName)
+                            checked={
+                              (areAllConfigsSelected(modelName)
+                                ? true
+                                : selectedConfigs.some((c) => c.modelName === modelName)
+                                  ? 'mixed'
+                                  : false) as boolean
                             }
-                            onChange={() => handleSelectAllConfigs(modelName)}
+                            onCheckedChange={() => handleSelectAllConfigs(modelName)}
                           />
-                          Select All
-                        </Box>
-                      </TableCell>
-                      <TableCell sx={{ fontWeight: 600 }}>Sequence Length (SS)</TableCell>
-                      <TableCell sx={{ fontWeight: 600 }}>Batch Size (BS)</TableCell>
+                          <span className="text-xs font-semibold">All</span>
+                        </div>
+                      </TableHead>
+                      <TableHead className="font-semibold">Sequence Length (SS)</TableHead>
+                      <TableHead className="font-semibold">Batch Size (BS)</TableHead>
                     </TableRow>
-                  </TableHead>
+                  </TableHeader>
                   <TableBody>
                     {modelConfigurations[modelName]?.map((config) => (
                       <TableRow
                         key={`${config.ss}-${config.bs}`}
-                        hover
-                        sx={{
-                          cursor: 'pointer',
-                          '&:hover': { bgcolor: 'action.hover' },
-                        }}
+                        className="cursor-pointer"
                         onClick={() => handleConfigToggle(modelName, config.ss, config.bs)}
                       >
                         <TableCell onClick={(e) => e.stopPropagation()}>
                           <Checkbox
                             checked={isConfigSelected(modelName, config.ss, config.bs)}
-                            onChange={() => handleConfigToggle(modelName, config.ss, config.bs)}
+                            onCheckedChange={() =>
+                              handleConfigToggle(modelName, config.ss, config.bs)
+                            }
                           />
                         </TableCell>
                         <TableCell>{config.ss}</TableCell>
@@ -788,320 +675,318 @@ export default function BundleForm() {
                     ))}
                   </TableBody>
                 </Table>
-              </TableContainer>
-              {idx < selectedModels.length - 1 && <Divider sx={{ mt: 3 }} />}
-            </Box>
-          ))}
-        </Paper>
+
+                {idx < selectedModels.length - 1 && <Separator className="mt-4" />}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
       )}
 
-      {/* Selected PEFs Display */}
+      {/* Section 3: Selected PEFs */}
       {selectedConfigs.length > 0 && (
-        <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              3. Selected PEFs
-            </Typography>
-            <Tooltip
-              title="SambaNova's AI stack will run the following Processor Executable Format (PEF) files that are referenced by your selected model configurations."
-              arrow
-            >
-              <HelpOutlineIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
-            </Tooltip>
-          </Box>
-          {Object.keys(selectedPefsByModel).map((modelName) => {
-            const modelSelectedConfigs = selectedConfigs.filter((c) => c.modelName === modelName);
-            const dytPefNames = [...new Set(
-              modelSelectedConfigs
-                .filter((c) => c.pefName.toLowerCase().includes('dyt'))
-                .map((c) => c.pefName)
-            )];
-            const nonDytConfigs = modelSelectedConfigs.filter(
-              (c) => !c.pefName.toLowerCase().includes('dyt')
-            );
-            return (
-              <Box key={modelName} sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1, color: 'text.secondary' }}>
-                  {modelName}
-                </Typography>
-                <Box component="ul" sx={{ pl: 3, mt: 0, mb: 1 }}>
-                  {/* DYT PEFs: show each unique PEF name once */}
-                  {dytPefNames.map((pefName) => {
-                    const firstConfig = modelSelectedConfigs.find((c) => c.pefName === pefName);
-                    const version = firstConfig
-                      ? getPefConfigForSsBs(pefName, firstConfig.ss, firstConfig.bs)?.latestVersion || '1'
-                      : '1';
-                    return (
-                      <Box component="li" key={pefName} sx={{ mb: 0.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                        <Typography variant="body2">{pefName}:{version}</Typography>
-                      </Box>
-                    );
-                  })}
-                  {/* Non-DYT PEFs: show one entry per selected config */}
-                  {nonDytConfigs.map((config) => {
-                    const pef = config.pefName;
-                    const version = getPefConfigForSsBs(pef, config.ss, config.bs)?.latestVersion || '1';
-                    const hasDraftConfig = pefHasDraftModelConfig(modelName, config.ss, config.bs);
-                    const canFixDraftConfig = draftConfigExistsButNotSelected(modelName, config.ss, config.bs);
-                    return (
-                      <Box component="li" key={`${pef}-${config.ss}-${config.bs}`} sx={{ mb: 0.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                        <Typography variant="body2">
-                          {pef}:{version}
-                        </Typography>
-                        {!hasDraftConfig && (
-                          <>
-                            <Tooltip title="No draft model assigned to this PEF for speculative decoding">
-                              <WarningAmberIcon sx={{ fontSize: 16, color: 'warning.main' }} />
-                            </Tooltip>
-                            <Tooltip title="Click here to remove this config">
-                              <IconButton
-                                size="small"
-                                onClick={() => handleRemovePefConfig(modelName, config.ss, config.bs)}
-                                sx={{ p: 0.25 }}
-                              >
-                                <DeleteIcon sx={{ fontSize: 16, color: 'error.main' }} />
-                              </IconButton>
-                            </Tooltip>
-                            {canFixDraftConfig && (
-                              <Tooltip title="Click here to add the missing draft model configuration">
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleAddMissingDraftConfig(modelName, config.ss, config.bs)}
-                                  sx={{ p: 0.25 }}
-                                >
-                                  <HandymanIcon sx={{ fontSize: 16, color: 'primary.main' }} />
-                                </IconButton>
-                              </Tooltip>
-                            )}
-                          </>
-                        )}
-                      </Box>
-                    );
-                  })}
-                </Box>
-              </Box>
-            );
-          })}
-        </Paper>
-      )}
-
-      {/* Bundle YAML Generation */}
-      {selectedConfigs.length > 0 && (
-        <Paper elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-            4. Bundle YAML
-          </Typography>
-
-          {/* Bundle Name Input */}
-          <Box sx={{ mb: 2 }}>
-            <TextField
-              id={bundleNameId}
-              fullWidth
-              label="Bundle Name"
-              value={bundleName}
-              onChange={(e) => setBundleName(e.target.value)}
-              helperText="Edit the bundle name (used for bt-* and b-* resources)"
-              variant="outlined"
-              size="small"
-            />
-            {bundleName && bundleName !== bundleName.toLowerCase() && (
-              <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: 0.5 }}>
-                Warning: Bundle name should be in lowercase
-              </Typography>
-            )}
-          </Box>
-
-          {/* Generated YAML */}
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                Generated YAML
-              </Typography>
-              <Tooltip title={copiedToClipboard ? "Copied!" : "Copy to clipboard"}>
-                <IconButton
-                  onClick={handleCopyToClipboard}
-                  size="small"
-                  disabled={!generatedYaml}
-                  sx={{
-                    color: copiedToClipboard ? 'success.main' : 'primary.main',
-                  }}
-                >
-                  <ContentCopyIcon fontSize="small" />
-                </IconButton>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-1.5">
+              <CardTitle>3. Selected PEFs</CardTitle>
+              <Tooltip>
+                <TooltipTrigger>
+                  <HelpCircle className="size-4 cursor-help text-muted-foreground" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  SambaNova&apos;s AI stack will run the following Processor Executable Format
+                  (PEF) files that are referenced by your selected model configurations.
+                </TooltipContent>
               </Tooltip>
-            </Box>
-            <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
-              Please refer to our{' '}
-              <a
-                href="https://docs.sambanova.ai/docs/en/admin/administration/custom-bundle-deployment"
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: 'inherit', textDecoration: 'underline' }}
-              >
-                documentation
-              </a>
-              {' '}for an explanation of fields in the YAML.
-            </Typography>
-            <TextField
-              id={generatedYamlId}
-              fullWidth
-              multiline
-              rows={25}
-              value={generatedYaml}
-              onChange={(e) => setGeneratedYaml(e.target.value)}
-              variant="outlined"
-              sx={{
-                '& .MuiInputBase-root': {
-                  fontFamily: 'monospace',
-                  fontSize: '0.875rem',
-                },
-              }}
-            />
-          </Box>
-
-          {/* Validation Result */}
-          {validationResult && (
-            <Box sx={{ mt: 2 }}>
-              {/* Apply Output */}
-              {validationResult.applyOutput && (
-                <Box sx={{ mb: 2 }}>
-                  <Typography variant="caption" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
-                    kubectl apply output:
-                  </Typography>
-                  <Box
-                    component="pre"
-                    sx={{
-                      p: 1.5,
-                      bgcolor: 'rgba(0, 0, 0, 0.05)',
-                      borderRadius: 1,
-                      fontSize: '0.75rem',
-                      overflow: 'auto',
-                      maxHeight: '150px',
-                    }}
-                  >
-                    {validationResult.applyOutput}
-                  </Box>
-                </Box>
-              )}
-
-              {/* Validation Status */}
-              {validationResult.validationStatus && (
-                <Box
-                  sx={{
-                    p: 2,
-                    bgcolor: validationResult.validationStatus.isValid
-                      ? 'success.light'
-                      : 'error.dark',
-                    color: validationResult.validationStatus.isValid
-                      ? 'success.contrastText'
-                      : 'white',
-                    borderRadius: 1,
-                  }}
-                >
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-                    {validationResult.validationStatus.isValid
-                      ? 'Validation succeeded!'
-                      : 'Validation failed with the following errors:'}
-                  </Typography>
-                  {!validationResult.validationStatus.isValid && (
-                    <Box
-                      component="pre"
-                      sx={{
-                        mt: 1,
-                        p: 1.5,
-                        bgcolor: 'black',
-                        color: 'white',
-                        borderRadius: 1,
-                        fontSize: '0.75rem',
-                        overflow: 'auto',
-                        maxHeight: '300px',
-                        whiteSpace: 'pre-wrap',
-                        wordWrap: 'break-word',
-                      }}
-                    >
-                      {validationResult.validationStatus.message}
-                    </Box>
-                  )}
-                </Box>
-              )}
-
-              {/* Fallback for errors without validation status */}
-              {!validationResult.validationStatus && !validationResult.success && (
-                <Alert severity="error">
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                    {validationResult.message}
-                  </Typography>
-                </Alert>
-              )}
-            </Box>
-          )}
-
-          {/* Save Result */}
-          {saveResult && (
-            <Box sx={{ mt: 2 }}>
-              <Alert
-                severity={saveResult.success ? 'success' : 'error'}
-                onClose={() => setSaveResult(null)}
-              >
-                {saveResult.message}
-              </Alert>
-            </Box>
-          )}
-
-          {/* Validate, Save, and Create Deployment Buttons */}
-          <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
-            <Button
-              variant="outlined"
-              color="primary"
-              size="large"
-              onClick={handleValidate}
-              disabled={isValidating || !generatedYaml}
-              startIcon={isValidating ? <CircularProgress size={20} /> : null}
-            >
-              {isValidating ? 'Validating...' : 'Validate'}
-            </Button>
-            <Button
-              variant="outlined"
-              color="primary"
-              size="large"
-              onClick={handleSaveClick}
-              disabled={isSaving || !generatedYaml || !bundleName}
-              startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
-            >
-              {isSaving ? 'Saving...' : 'Save'}
-            </Button>
-            <Button
-              variant="contained"
-              color="success"
-              size="large"
-              onClick={handleCreateDeployment}
-              disabled={!validationResult?.validationStatus?.isValid}
-              startIcon={<RocketLaunchIcon />}
-            >
-              Create Deployment
-            </Button>
-          </Box>
-        </Paper>
+            </div>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            {Object.keys(selectedPefsByModel).map((modelName) => {
+              const modelSelectedConfigs = selectedConfigs.filter(
+                (c) => c.modelName === modelName
+              );
+              const dytPefNames = [
+                ...new Set(
+                  modelSelectedConfigs
+                    .filter((c) => c.pefName.toLowerCase().includes('dyt'))
+                    .map((c) => c.pefName)
+                ),
+              ];
+              const nonDytConfigs = modelSelectedConfigs.filter(
+                (c) => !c.pefName.toLowerCase().includes('dyt')
+              );
+              return (
+                <div key={modelName}>
+                  <p className="mb-1 text-sm font-semibold text-muted-foreground">{modelName}</p>
+                  <ul className="ml-4 flex list-disc flex-col gap-1">
+                    {dytPefNames.map((pefName) => {
+                      const firstConfig = modelSelectedConfigs.find(
+                        (c) => c.pefName === pefName
+                      );
+                      const version = firstConfig
+                        ? getPefConfigForSsBs(pefName, firstConfig.ss, firstConfig.bs)
+                            ?.latestVersion || '1'
+                        : '1';
+                      return (
+                        <li key={pefName} className="flex items-center gap-1.5">
+                          <span className="font-mono text-sm">
+                            {pefName}:{version}
+                          </span>
+                        </li>
+                      );
+                    })}
+                    {nonDytConfigs.map((config) => {
+                      const version =
+                        getPefConfigForSsBs(config.pefName, config.ss, config.bs)
+                          ?.latestVersion || '1';
+                      const hasDraftConfig = pefHasDraftModelConfig(
+                        modelName,
+                        config.ss,
+                        config.bs
+                      );
+                      const canFixDraftConfig = draftConfigExistsButNotSelected(
+                        modelName,
+                        config.ss,
+                        config.bs
+                      );
+                      return (
+                        <li
+                          key={`${config.pefName}-${config.ss}-${config.bs}`}
+                          className="flex items-center gap-1.5"
+                        >
+                          <span className="font-mono text-sm">
+                            {config.pefName}:{version}
+                          </span>
+                          {!hasDraftConfig && (
+                            <>
+                              <Tooltip>
+                                <TooltipTrigger>
+                                  <TriangleAlert className="size-4 text-amber-500" />
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  No draft model assigned to this PEF for speculative decoding
+                                </TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger
+                                  className="rounded p-1 hover:bg-accent"
+                                  onClick={() =>
+                                    handleRemovePefConfig(modelName, config.ss, config.bs)
+                                  }
+                                >
+                                  <Trash2 className="size-3.5 text-destructive" />
+                                </TooltipTrigger>
+                                <TooltipContent>Remove this config</TooltipContent>
+                              </Tooltip>
+                              {canFixDraftConfig && (
+                                <Tooltip>
+                                  <TooltipTrigger
+                                    className="rounded p-1 hover:bg-accent"
+                                    onClick={() =>
+                                      handleAddMissingDraftConfig(modelName, config.ss, config.bs)
+                                    }
+                                  >
+                                    <Wrench className="size-3.5 text-primary" />
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    Add missing draft model configuration
+                                  </TooltipContent>
+                                </Tooltip>
+                              )}
+                            </>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
       )}
 
-      {/* Save Overwrite Confirmation Dialog */}
-      <Dialog open={saveDialogOpen} onClose={handleCancelSave}>
-        <DialogTitle>File Already Exists</DialogTitle>
+      {/* Section 4: Bundle YAML */}
+      {selectedConfigs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>4. Bundle YAML</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor={bundleNameId}>Bundle Name</FieldLabel>
+                <Input
+                  id={bundleNameId}
+                  value={bundleName}
+                  onChange={(e) => setBundleName(e.target.value)}
+                />
+                <FieldDescription>
+                  Edit the bundle name (used for bt-* and b-* resources)
+                </FieldDescription>
+              </Field>
+            </FieldGroup>
+
+            {bundleName && bundleName !== bundleName.toLowerCase() && (
+              <p className="text-xs text-destructive">
+                Warning: Bundle name should be in lowercase
+              </p>
+            )}
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold">Generated YAML</p>
+                <Tooltip>
+                  <TooltipTrigger
+                    className={cn('rounded p-1 hover:bg-accent', copiedToClipboard && 'text-green-600')}
+                    onClick={handleCopyToClipboard}
+                    disabled={!generatedYaml}
+                  >
+                    <Copy className="size-4" />
+                  </TooltipTrigger>
+                  <TooltipContent>{copiedToClipboard ? 'Copied!' : 'Copy to clipboard'}</TooltipContent>
+                </Tooltip>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Please refer to our{' '}
+                <a
+                  href="https://docs.sambanova.ai/docs/en/admin/administration/custom-bundle-deployment"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline underline-offset-4 hover:text-foreground"
+                >
+                  documentation
+                </a>{' '}
+                for an explanation of fields in the YAML.
+              </p>
+              <Textarea
+                id={generatedYamlId}
+                rows={25}
+                value={generatedYaml}
+                onChange={(e) => setGeneratedYaml(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+
+            {/* Validation Result */}
+            {validationResult && (
+              <div className="flex flex-col gap-3">
+                {validationResult.applyOutput && (
+                  <div className="flex flex-col gap-1">
+                    <p className="text-xs font-semibold">kubectl apply output:</p>
+                    <pre className="max-h-36 overflow-auto rounded-lg bg-muted p-2 font-mono text-xs">
+                      {validationResult.applyOutput}
+                    </pre>
+                  </div>
+                )}
+
+                {validationResult.validationStatus && (
+                  <div
+                    className={cn(
+                      'rounded-lg p-3',
+                      validationResult.validationStatus.isValid
+                        ? 'bg-green-500/10 text-green-700'
+                        : 'bg-destructive/10 text-destructive'
+                    )}
+                  >
+                    <p className="text-sm font-semibold">
+                      {validationResult.validationStatus.isValid
+                        ? 'Validation succeeded!'
+                        : 'Validation failed with the following errors:'}
+                    </p>
+                    {!validationResult.validationStatus.isValid && (
+                      <pre className="mt-2 max-h-72 overflow-auto rounded bg-black p-2 font-mono text-xs text-white whitespace-pre-wrap break-words">
+                        {validationResult.validationStatus.message}
+                      </pre>
+                    )}
+                  </div>
+                )}
+
+                {!validationResult.validationStatus && !validationResult.success && (
+                  <Alert variant="destructive">
+                    <AlertDescription className="font-semibold">
+                      {validationResult.message}
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+
+            {/* Save Result */}
+            {saveResult && (
+              <Alert
+                variant={saveResult.success ? 'default' : 'destructive'}
+                className={cn(saveResult.success && 'border-green-500/50 bg-green-500/10')}
+              >
+                <AlertDescription className={cn(saveResult.success && 'text-green-700')}>
+                  {saveResult.message}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={handleValidate}
+                disabled={isValidating || !generatedYaml}
+              >
+                {isValidating && (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                )}
+                {isValidating ? 'Validating...' : 'Validate'}
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                onClick={handleSaveClick}
+                disabled={isSaving || !generatedYaml || !bundleName}
+              >
+                {isSaving ? (
+                  <Loader2 data-icon="inline-start" className="animate-spin" />
+                ) : (
+                  <Save data-icon="inline-start" />
+                )}
+                {isSaving ? 'Saving...' : 'Save'}
+              </Button>
+              <Button
+                size="lg"
+                onClick={handleCreateDeployment}
+                disabled={!validationResult?.validationStatus?.isValid}
+                className="bg-green-600 text-white hover:bg-green-700"
+              >
+                <Rocket data-icon="inline-start" />
+                Create Deployment
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Save Overwrite Dialog */}
+      <Dialog
+        open={saveDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) handleCancelSave();
+        }}
+      >
         <DialogContent>
-          <DialogContentText>
-            A file named <strong>{bundleName}.yaml</strong> already exists in saved_artifacts.
-            Do you want to overwrite it?
-          </DialogContentText>
+          <DialogHeader>
+            <DialogTitle>File Already Exists</DialogTitle>
+            <DialogDescription>
+              A file named <strong>{bundleName}.yaml</strong> already exists in saved_artifacts.
+              Do you want to overwrite it?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={handleCancelSave}>
+              Cancel
+            </Button>
+            <Button onClick={handleOverwrite}>Overwrite</Button>
+          </DialogFooter>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={handleCancelSave} color="primary">
-            Cancel
-          </Button>
-          <Button onClick={handleOverwrite} color="primary" variant="contained">
-            Overwrite
-          </Button>
-        </DialogActions>
       </Dialog>
-    </Box>
+    </div>
   );
 }

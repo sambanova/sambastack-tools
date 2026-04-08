@@ -196,29 +196,58 @@ npm start
 ```
 sambawiz/
 ├── app/
-│   ├── api/
-│   │   ├── kubeconfig-validate/    # API endpoint for kubeconfig validation
-│   │   └── validate/               # API endpoint for bundle validation
+│   ├── api/                        # Next.js API routes (25+ endpoints, kubectl-backed)
 │   ├── components/
-│   │   ├── AppLayout.tsx           # Main layout with navigation and version display
-│   │   └── BundleForm.tsx          # Main form component
+│   │   ├── AppLayout.tsx           # Shell: sidebar navigation, consumes AppContext
+│   │   ├── Home.tsx                # Home/environment overview page
+│   │   ├── BundleForm.tsx          # Multi-step bundle builder form
+│   │   ├── BundleDeploymentManager.tsx  # Deployment status + pod monitoring
+│   │   ├── Playground.tsx          # Chat interface for testing deployed models
+│   │   ├── AppConfigDialog.tsx     # App settings dialog
+│   │   ├── DocumentationPanel.tsx  # Collapsible docs sidebar
+│   │   └── *Dialog.tsx             # Kubeconfig error/setup dialogs
 │   ├── data/
-│   │   ├── pef_mapping.json        # Model to PEF mappings
-│   ├── utils/
-│   │   └── bundle-yaml-generator.ts # YAML generation logic
-│   ├── lib/
-│   │   └── emotion-cache.ts        # MUI styling cache
+│   │   └── pef_configs.json        # Generated at startup: PEF model configs
+│   ├── utils/                      # Pure functions: YAML gen, model availability
 │   ├── types/
 │   │   └── bundle.ts               # TypeScript interfaces
-│   ├── theme.ts                    # MUI theme configuration
-│   └── page.tsx                    # Home page
+│   ├── theme.ts                    # Brand color reference (primary: #622B86)
+│   ├── globals.css                 # Tailwind + shadcn CSS variable tokens
+│   ├── layout.tsx                  # Root layout: Providers > AppProvider > TooltipProvider
+│   └── providers.tsx               # MUI ThemeProvider (temporary, being removed)
+├── context/
+│   └── AppContext.tsx              # Shared app state: kubeconfig validation + app version
+│                                   # Fires once at startup, persists across all tab navigations
+├── components/ui/                  # shadcn/ui components (21 installed)
+├── lib/
+│   └── utils.ts                    # cn() helper (clsx + tailwind-merge)
+├── hooks/
+│   └── use-mobile.ts               # Responsive breakpoint hook
 ├── kubeconfigs/                    # Kubeconfig files (gitignored except example)
-│   ├── your-kubeconfig-name.yaml   # Your kubeconfig (gitignored)
-│   └── kubeconfig_example.yaml     # Example template
 ├── public/                         # Static assets
-├── instrumentation.ts              # Server startup initialization
+├── instrumentation.ts              # Server startup: generates pef_configs.json
 └── temp/                           # Temporary YAML files (gitignored)
 ```
+
+## Architecture Notes
+
+### App Startup Flow
+
+1. `instrumentation.ts` runs on server start — generates `pef_configs.json` from kubectl PEF data
+2. `AppProvider` (in `context/AppContext.tsx`) fires on client mount — validates kubeconfig and fetches app version once, storing results in React Context
+3. All pages consume this context via `useAppContext()` — no repeated API calls on tab navigation
+
+### Tab Navigation
+
+Routes: `/` (Home), `/bundle-builder`, `/bundle-deployment`, `/playground`, `/add-environment`
+
+Navigation is handled by Next.js App Router. `AppLayout` wraps every page and reads context state; it does **not** re-fetch on navigation. This keeps tab switching instant.
+
+### Brand Colors
+
+Primary: `#622B86` (purple) — mapped to `--primary: oklch(0.38 0.18 296)` in `globals.css`
+
+Background: `#fcf9fe` — mapped to `--background: oklch(0.99 0.005 300)`
 
 ## API Endpoints
 
@@ -267,11 +296,13 @@ Validates and applies a bundle YAML to the Kubernetes cluster.
 
 ## Technology Stack
 
-- **Framework**: Next.js 15 (App Router)
-- **UI Library**: Material-UI (MUI) v6
-- **Language**: TypeScript
-- **Styling**: Emotion (CSS-in-JS)
+- **Framework**: Next.js 16.1.1 (App Router)
+- **UI Library**: shadcn/ui (Radix UI primitives + Tailwind CSS) — *migrating from Material-UI v7*
+- **Language**: TypeScript 5
+- **Styling**: Tailwind CSS 4 + CSS variables (OKLCH color space)
+- **Icons**: Lucide React
 - **Backend**: Next.js API Routes with Node.js child_process for kubectl
+- **State**: React Context (`AppContext`) for shared app-startup state; component-local `useState` for page state
 
 ## Development
 

@@ -3,17 +3,15 @@
 import { useState } from 'react';
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  IconButton,
-  Box,
-  Tabs,
-  Tab,
-  Button,
-  Tooltip,
-} from '@mui/material';
-import CloseIcon from '@mui/icons-material/Close';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Copy } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -43,7 +41,7 @@ function TabPanel(props: TabPanelProps) {
       aria-labelledby={`code-tab-${index}`}
       {...other}
     >
-      {value === index && <Box sx={{ pt: 2 }}>{children}</Box>}
+      {value === index && <div className="pt-2">{children}</div>}
     </div>
   );
 }
@@ -56,13 +54,9 @@ export default function ViewCodeDialog({
   modelName,
   isEmbedding = false,
 }: ViewCodeDialogProps) {
-  const [selectedTab, setSelectedTab] = useState(0);
+  const [selectedTab, setSelectedTab] = useState<string>('curl');
   const [copiedCurl, setCopiedCurl] = useState(false);
   const [copiedPython, setCopiedPython] = useState(false);
-
-  const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
-    setSelectedTab(newValue);
-  };
 
   // Normalize API domain to remove trailing slash for display
   const normalizedApiDomain = apiDomain.endsWith('/') ? apiDomain.slice(0, -1) : apiDomain;
@@ -208,119 +202,81 @@ print(response.choices[0].message.content)`;
     }
   };
 
+  const isCopied = selectedTab === 'curl' ? copiedCurl : copiedPython;
+  const handleCopy = selectedTab === 'curl' ? handleCopyCurl : handleCopyPython;
+
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      maxWidth="md"
-      fullWidth
-      PaperProps={{
-        sx: {
-          minHeight: '500px',
-        },
-      }}
-    >
-      <DialogTitle
-        sx={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          pb: 1,
-        }}
-      >
-        View Code
-        <IconButton
-          aria-label="close"
-          onClick={onClose}
-          size="small"
-          sx={{
-            color: 'grey.500',
-          }}
-        >
-          <CloseIcon />
-        </IconButton>
-      </DialogTitle>
-      <DialogContent dividers>
-        <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
-          <Tabs value={selectedTab} onChange={handleTabChange} aria-label="code tabs">
-            <Tab label="cURL" id="code-tab-0" aria-controls="code-tabpanel-0" />
-            <Tab label="Python" id="code-tab-1" aria-controls="code-tabpanel-1" />
-          </Tabs>
-        </Box>
+    <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+      <DialogContent className="sm:max-w-2xl min-h-[500px]" showCloseButton={true}>
+        <DialogHeader>
+          <DialogTitle>View Code</DialogTitle>
+        </DialogHeader>
 
-        <Box
-          sx={{
-            display: 'flex',
-            justifyContent: 'flex-end',
-            alignItems: 'center',
-            mb: 2,
-          }}
-        >
-          <Tooltip title={selectedTab === 0 ? (copiedCurl ? 'Copied!' : 'Copy to clipboard') : (copiedPython ? 'Copied!' : 'Copy to clipboard')}>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<ContentCopyIcon />}
-              onClick={selectedTab === 0 ? handleCopyCurl : handleCopyPython}
-              sx={{
-                color: (selectedTab === 0 ? copiedCurl : copiedPython) ? 'success.main' : 'primary.main',
-                borderColor: (selectedTab === 0 ? copiedCurl : copiedPython) ? 'success.main' : 'primary.main',
-              }}
-            >
-              {(selectedTab === 0 ? copiedCurl : copiedPython) ? 'Copied!' : 'Copy Code'}
-            </Button>
-          </Tooltip>
-        </Box>
+        <Tabs value={selectedTab} onValueChange={setSelectedTab}>
+          <div className="flex items-center justify-between mb-2">
+            <TabsList>
+              <TabsTrigger value="curl">cURL</TabsTrigger>
+              <TabsTrigger value="python">Python</TabsTrigger>
+            </TabsList>
 
-        <TabPanel value={selectedTab} index={0}>
-          <Box
-            sx={{
-              borderRadius: 1,
-              overflow: 'hidden',
-              '& pre': {
-                margin: 0,
-                borderRadius: 1,
-              },
-            }}
-          >
-            <SyntaxHighlighter
-              language="bash"
-              style={vscDarkPlus}
-              customStyle={{
-                fontSize: '0.875rem',
-                padding: '16px',
-                margin: 0,
-              }}
-            >
-              {curlCodeDisplay}
-            </SyntaxHighlighter>
-          </Box>
-        </TabPanel>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCopy}
+                    className={cn(
+                      isCopied
+                        ? 'text-green-600 border-green-600 hover:text-green-600'
+                        : 'text-primary border-primary hover:text-primary'
+                    )}
+                  >
+                    <Copy className="mr-1.5 size-3.5" />
+                    {isCopied ? 'Copied!' : 'Copy Code'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {isCopied ? 'Copied!' : 'Copy to clipboard'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
 
-        <TabPanel value={selectedTab} index={1}>
-          <Box
-            sx={{
-              borderRadius: 1,
-              overflow: 'hidden',
-              '& pre': {
-                margin: 0,
-                borderRadius: 1,
-              },
-            }}
-          >
-            <SyntaxHighlighter
-              language="python"
-              style={vscDarkPlus}
-              customStyle={{
-                fontSize: '0.875rem',
-                padding: '16px',
-                margin: 0,
-              }}
-            >
-              {pythonCodeDisplay}
-            </SyntaxHighlighter>
-          </Box>
-        </TabPanel>
+          <TabsContent value="curl">
+            <div className="rounded overflow-hidden">
+              <SyntaxHighlighter
+                language="bash"
+                style={vscDarkPlus}
+                customStyle={{
+                  fontSize: '0.875rem',
+                  padding: '16px',
+                  margin: 0,
+                  borderRadius: '0.25rem',
+                }}
+              >
+                {curlCodeDisplay}
+              </SyntaxHighlighter>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="python">
+            <div className="rounded overflow-hidden">
+              <SyntaxHighlighter
+                language="python"
+                style={vscDarkPlus}
+                customStyle={{
+                  fontSize: '0.875rem',
+                  padding: '16px',
+                  margin: 0,
+                  borderRadius: '0.25rem',
+                }}
+              >
+                {pythonCodeDisplay}
+              </SyntaxHighlighter>
+            </div>
+          </TabsContent>
+        </Tabs>
       </DialogContent>
     </Dialog>
   );

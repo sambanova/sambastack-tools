@@ -1,36 +1,67 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useAppContext } from '@/context/AppContext';
 import {
-  Box,
-  Drawer,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Typography,
-  Alert,
-} from '@mui/material';
-import BuildIcon from '@mui/icons-material/Build';
-import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
-import SmartToyIcon from '@mui/icons-material/SmartToy';
-import HomeIcon from '@mui/icons-material/Home';
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarRail,
+  SidebarSeparator,
+  SidebarTrigger,
+} from '@/components/ui/sidebar';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+  Wrench,
+  Rocket,
+  Bot,
+  SlidersHorizontal,
+  BookOpen,
+  MessageCircleQuestion,
+  Phone,
+  Server,
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
 import Image from 'next/image';
 import { useRouter, usePathname } from 'next/navigation';
 import KubeconfigErrorDialog from './KubeconfigErrorDialog';
-
-const drawerWidth = 240;
 
 interface AppLayoutProps {
   children: React.ReactNode;
 }
 
+const externalLinks = [
+  {
+    title: 'Documentation',
+    url: 'https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction',
+    icon: BookOpen,
+  },
+  {
+    title: 'Community',
+    url: 'https://community.sambanova.ai/',
+    icon: MessageCircleQuestion,
+  },
+  {
+    title: 'Contact Us',
+    url: 'https://sambanova.ai/contact',
+    icon: Phone,
+  },
+];
+
 export default function AppLayout({ children }: AppLayoutProps) {
   const router = useRouter();
   const pathname = usePathname();
 
-  // Derive selected item directly from pathname instead of using state
   const getSelectedItem = () => {
-    if (pathname === '/') return 'home';
+    if (pathname === '/') return 'environment';
     if (pathname === '/bundle-builder') return 'bundle-builder';
     if (pathname === '/bundle-deployment') return 'bundle-deployment';
     if (pathname === '/playground') return 'playground';
@@ -38,368 +69,43 @@ export default function AppLayout({ children }: AppLayoutProps) {
   };
   const selectedItem = getSelectedItem();
 
-  const [envVersion, setEnvVersion] = useState<string | null>(null);
-  const [envName, setEnvName] = useState<string | null>(null);
-  const [namespace, setNamespace] = useState<string | null>(null);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
-  const [helmCommand, setHelmCommand] = useState<string>('');
-  const [errorDetails, setErrorDetails] = useState<string>('');
-  const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
+  const {
+    envVersion,
+    envName,
+    namespace,
+    validationError,
+    showErrorDialog,
+    helmCommand,
+    errorDetails,
+    helmVersionError,
+    hasNonNumericalSuffix,
+    appVersion,
+    setShowErrorDialog,
+  } = useAppContext();
 
-  // Validate kubeconfig on component mount
-  useEffect(() => {
-    const validateKubeconfig = async () => {
-      try {
-        const response = await fetch('/api/kubeconfig-validate');
-        const data = await response.json();
-
-        console.log('Kubeconfig validation response:', data);
-
-        if (data.success) {
-          setEnvVersion(data.version);
-          setEnvName(data.envName);
-          setNamespace(data.namespace);
-          setHasNonNumericalSuffix(data.hasNonNumericalSuffix || false);
-          setValidationError(null);
-          setShowErrorDialog(false);
-          setHelmVersionError(false);
-        } else {
-          console.log('Validation failed, showing error dialog');
-          setValidationError(data.error || 'Failed to validate kubeconfig');
-          setHelmCommand(data.helmCommand || '');
-          setErrorDetails(data.errorDetails || data.error || '');
-          setShowErrorDialog(true);
-          setEnvVersion(null);
-          setEnvName(null);
-          setNamespace(null);
-          setHasNonNumericalSuffix(false);
-          // Check if this is a helm version error
-          setHelmVersionError(data.helmVersionError || false);
-        }
-
-
-      } catch (error) {
-        console.error('Failed to validate kubeconfig:', error);
-        setValidationError('Failed to validate kubeconfig');
-        setHelmCommand('');
-        setErrorDetails('Network error or server unreachable');
-        setShowErrorDialog(true);
-        setEnvVersion(null);
-        setEnvName(null);
-        setNamespace(null);
-        setHasNonNumericalSuffix(false);
-        setHelmVersionError(false);
-      }
-    };
-
-    validateKubeconfig();
-  }, []);
-
-  // Fetch app version on component mount
-  useEffect(() => {
-    const fetchAppVersion = async () => {
-      try {
-        const response = await fetch('/api/app-version');
-        const data = await response.json();
-
-        if (data.success) {
-          setAppVersion(data.version);
-        }
-      } catch (error) {
-        console.error('Failed to fetch app version:', error);
-      }
-    };
-
-    fetchAppVersion();
-  }, []);
-
-  const drawer = (
-    <Box
-      sx={{
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        pt: 3,
-        pb: 3,
-      }}
-    >
-      <Box sx={{ mb: 3, px: 2 }}>
-        <Image
-          src="/sidebar-logo.svg"
-          alt="SambaNova Logo"
-          width={150}
-          height={40}
-          style={{ width: '150px', height: 'auto' }}
-          priority
-        />
-      </Box>
-
-      {/* Top menu items */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-        <ListItemButton
-          selected={selectedItem === 'bundle-builder'}
-          disabled={helmVersionError}
-          onClick={() => {
-            if (!helmVersionError) {
-              router.push('/bundle-builder');
-            }
-          }}
-          sx={{
-            mx: 2,
-            px: 1,
-            py: 1.25,
-            borderRadius: 2,
-            gap: 2,
-            '&.Mui-selected': {
-              backgroundColor: 'rgb(232, 229, 234)',
-              '&:hover': {
-                backgroundColor: 'rgb(232, 229, 234)',
-              },
-            },
-            '&:hover': {
-              backgroundColor: helmVersionError ? 'transparent' : 'rgb(232, 229, 234)',
-              borderRadius: 2,
-            },
-            '&.Mui-disabled': {
-              opacity: 0.5,
-            },
-          }}
-        >
-          <ListItemIcon
-            sx={{
-              minWidth: 'auto',
-              color: selectedItem === 'bundle-builder' ? 'primary.main' : '#71717A',
-            }}
-          >
-            <BuildIcon />
-          </ListItemIcon>
-          <ListItemText
-            primary="Bundle Builder"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'bundle-builder' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
-          />
-        </ListItemButton>
-
-        <ListItemButton
-          selected={selectedItem === 'bundle-deployment'}
-          disabled={helmVersionError}
-          onClick={() => {
-            if (!helmVersionError) {
-              router.push('/bundle-deployment');
-            }
-          }}
-          sx={{
-            mx: 2,
-            px: 1,
-            py: 1.25,
-            borderRadius: 2,
-            gap: 2,
-            '&.Mui-selected': {
-              backgroundColor: 'rgb(232, 229, 234)',
-              '&:hover': {
-                backgroundColor: 'rgb(232, 229, 234)',
-              },
-            },
-            '&:hover': {
-              backgroundColor: helmVersionError ? 'transparent' : 'rgb(232, 229, 234)',
-              borderRadius: 2,
-            },
-            '&.Mui-disabled': {
-              opacity: 0.5,
-            },
-          }}
-        >
-          <ListItemIcon
-            sx={{
-              minWidth: 'auto',
-              color: selectedItem === 'bundle-deployment' ? 'primary.main' : '#71717A',
-            }}
-          >
-            <RocketLaunchIcon />
-          </ListItemIcon>
-          <ListItemText
-            primary="Bundle Deployment"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'bundle-deployment' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
-          />
-        </ListItemButton>
-
-        <ListItemButton
-          selected={selectedItem === 'playground'}
-          disabled={helmVersionError}
-          onClick={() => {
-            if (!helmVersionError) {
-              router.push('/playground');
-            }
-          }}
-          sx={{
-            mx: 2,
-            px: 1,
-            py: 1.25,
-            borderRadius: 2,
-            gap: 2,
-            '&.Mui-selected': {
-              backgroundColor: 'rgb(232, 229, 234)',
-              '&:hover': {
-                backgroundColor: 'rgb(232, 229, 234)',
-              },
-            },
-            '&:hover': {
-              backgroundColor: helmVersionError ? 'transparent' : 'rgb(232, 229, 234)',
-              borderRadius: 2,
-            },
-            '&.Mui-disabled': {
-              opacity: 0.5,
-            },
-          }}
-        >
-          <ListItemIcon
-            sx={{
-              minWidth: 'auto',
-              color: selectedItem === 'playground' ? 'primary.main' : '#71717A',
-            }}
-          >
-            <SmartToyIcon />
-          </ListItemIcon>
-          <ListItemText
-            primary="Playground"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'playground' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
-          />
-        </ListItemButton>
-      </Box>
-
-      {/* Spacer to push version display to bottom */}
-      <Box sx={{ flexGrow: 1 }} />
-
-      {/* Fallback home button when kubeconfig validation failed and not on home page */}
-      {validationError && pathname !== '/' && (
-        <Box
-          onClick={() => router.push('/')}
-          sx={{
-            mx: 2,
-            mt: 2,
-            p: 1.5,
-            borderRadius: 2,
-            backgroundColor: 'rgb(232, 229, 234)',
-            border: '1px solid rgb(209, 204, 213)',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease-in-out',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            '&:hover': {
-              backgroundColor: 'rgb(220, 217, 224)',
-              border: '1px solid rgb(199, 194, 203)',
-              transform: 'scale(1.02)',
-            },
-          }}
-        >
-          <HomeIcon sx={{ fontSize: '1.25rem', color: 'primary.main' }} />
-        </Box>
-      )}
-
-      {/* Environment version display - clickable to go to home */}
-      {envVersion && envName && (
-        <Box
-          onClick={() => {
-            router.push('/');
-          }}
-          sx={{
-            mx: 2,
-            mt: 2,
-            p: 1.5,
-            borderRadius: 2,
-            backgroundColor: 'rgb(232, 229, 234)',
-            border: '1px solid rgb(209, 204, 213)',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease-in-out',
-            '&:hover': {
-              backgroundColor: 'rgb(220, 217, 224)',
-              border: '1px solid rgb(199, 194, 203)',
-              transform: 'scale(1.02)',
-            },
-          }}
-        >
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 0.5 }}>
-            <HomeIcon sx={{ fontSize: '1rem', color: 'primary.main', mr: 0.75 }} />
-            <Typography
-              sx={{
-                fontSize: '0.875rem',
-                fontWeight: 600,
-                color: 'primary.main',
-                fontFamily: 'var(--font-geist-sans)',
-              }}
-            >
-              {envName}
-            </Typography>
-          </Box>
-          <Typography
-            sx={{
-              fontSize: '0.75rem',
-              fontWeight: 500,
-              color: '#71717A',
-              fontFamily: 'var(--font-geist-sans)',
-              textAlign: 'center',
-            }}
-          >
-            version: {envVersion}{hasNonNumericalSuffix ? '**' : ''}
-          </Typography>
-          {namespace && (
-            <Typography
-              sx={{
-                fontSize: '0.75rem',
-                fontWeight: 500,
-                color: '#71717A',
-                fontFamily: 'var(--font-geist-sans)',
-                textAlign: 'center',
-              }}
-            >
-              namespace: {namespace}
-            </Typography>
-          )}
-        </Box>
-      )}
-
-      {/* App version display */}
-      {appVersion && (
-        <Box
-          sx={{
-            mx: 2,
-            mt: 1.5,
-            mb: 1,
-            p: 1,
-            borderRadius: 1,
-            backgroundColor: 'rgba(0, 0, 0, 0.02)',
-            textAlign: 'center',
-          }}
-        >
-          <Typography
-            sx={{
-              fontSize: '0.7rem',
-              fontWeight: 500,
-              color: '#71717A',
-              fontFamily: 'var(--font-geist-sans)',
-            }}
-          >
-            SambaWiz v{appVersion}
-          </Typography>
-        </Box>
-      )}
-    </Box>
-  );
+  const platformItems = [
+    {
+      key: 'bundle-builder',
+      label: 'Bundle Builder',
+      icon: Wrench,
+      path: '/bundle-builder',
+      disabled: helmVersionError,
+    },
+    {
+      key: 'bundle-deployment',
+      label: 'Bundle Deployment',
+      icon: Rocket,
+      path: '/bundle-deployment',
+      disabled: helmVersionError,
+    },
+    {
+      key: 'playground',
+      label: 'Playground',
+      icon: Bot,
+      path: '/playground',
+      disabled: helmVersionError,
+    },
+  ];
 
   return (
     <>
@@ -414,38 +120,147 @@ export default function AppLayout({ children }: AppLayoutProps) {
           router.push('/?openUpgrade=true');
         }}
       />
-      <Box sx={{ display: 'flex', minHeight: '100vh', backgroundColor: 'background.default' }}>
-        <Drawer
-          variant="permanent"
-          sx={{
-            width: drawerWidth,
-            flexShrink: 0,
-            '& .MuiDrawer-paper': {
-              width: drawerWidth,
-              boxSizing: 'border-box',
-              border: 'none',
-            },
-          }}
-        >
-          {drawer}
-        </Drawer>
-        <Box
-          component="main"
-          sx={{
-            flexGrow: 1,
-            p: 3,
-            backgroundColor: 'background.default',
-            minHeight: '100vh',
-          }}
-        >
-          {validationError && (
-            <Alert severity="error" sx={{ mb: 3 }}>
-              {validationError}
-            </Alert>
-          )}
-          {children}
-        </Box>
-      </Box>
+      <SidebarProvider>
+        <Sidebar collapsible="icon">
+          {/* Header — logo */}
+          <SidebarHeader>
+            <div className="flex h-12 items-center px-2">
+              <div className="group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                <Image
+                  src="/sidebar-logo.svg"
+                  alt="SambaNova"
+                  width={130}
+                  height={34}
+                  style={{ width: '130px', height: 'auto' }}
+                  priority
+                />
+              </div>
+              <div className="hidden group-data-[state=collapsed]/sidebar-wrapper:flex justify-center w-full">
+                <Image
+                  src="/favicon.ico"
+                  alt="SambaNova"
+                  width={24}
+                  height={24}
+                  style={{ width: '24px', height: '24px' }}
+                />
+              </div>
+            </div>
+          </SidebarHeader>
+
+          <SidebarSeparator />
+
+          <SidebarContent>
+            {/* Platform — primary tools */}
+            <SidebarGroup>
+              <SidebarGroupLabel>Platform</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {platformItems.map(({ key, label, icon: Icon, path, disabled }) => (
+                    <SidebarMenuItem key={key}>
+                      <SidebarMenuButton
+                        isActive={selectedItem === key}
+                        disabled={disabled}
+                        onClick={() => { if (!disabled) router.push(path); }}
+                        tooltip={label}
+                        className={cn(disabled && 'opacity-50 cursor-not-allowed')}
+                      >
+                        <Icon />
+                        <span>{label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+
+            {/* Configuration — setup/env, accessed infrequently */}
+            <SidebarGroup>
+              <SidebarGroupLabel>Configuration</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      isActive={selectedItem === 'environment'}
+                      onClick={() => router.push('/')}
+                      tooltip="Environment"
+                    >
+                      <SlidersHorizontal />
+                      <span>Environment</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+
+            {/* External resource links — pushed to bottom */}
+            <SidebarGroup className="mt-auto">
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {externalLinks.map(({ title, url, icon: Icon }) => (
+                    <SidebarMenuItem key={title}>
+                      <SidebarMenuButton
+                        tooltip={title}
+                        render={<a href={url} target="_blank" rel="noopener noreferrer" />}
+                      >
+                        <Icon />
+                        <span>{title}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </SidebarContent>
+
+          {/* Footer — active env display (informational only) */}
+          <SidebarSeparator />
+          <SidebarFooter className="pb-4 px-2 flex flex-col gap-2">
+            {envVersion && envName ? (
+              <div className="w-full rounded-lg bg-muted border border-border p-3 group-data-[state=collapsed]/sidebar-wrapper:flex group-data-[state=collapsed]/sidebar-wrapper:justify-center">
+                <div className="flex items-center justify-center gap-1.5 mb-1 group-data-[state=collapsed]/sidebar-wrapper:mb-0">
+                  <Server className="size-4 text-primary shrink-0" />
+                  <span className="text-sm font-semibold text-primary group-data-[state=collapsed]/sidebar-wrapper:hidden truncate">
+                    {envName}
+                  </span>
+                </div>
+                <p className="text-xs font-medium text-muted-foreground text-center group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                  version: {envVersion}{hasNonNumericalSuffix ? '**' : ''}
+                </p>
+                {namespace && (
+                  <p className="text-xs font-medium text-muted-foreground text-center group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                    namespace: {namespace}
+                  </p>
+                )}
+              </div>
+            ) : null}
+
+            {appVersion && (
+              <div className="rounded bg-black/[0.02] p-2 text-center group-data-[state=collapsed]/sidebar-wrapper:hidden">
+                <span className="text-[0.7rem] font-medium text-muted-foreground">
+                  SambaWiz v{appVersion}
+                </span>
+              </div>
+            )}
+          </SidebarFooter>
+
+          <SidebarRail />
+        </Sidebar>
+
+        <SidebarInset>
+          <header className="flex h-12 items-center border-b px-4 shrink-0">
+            <SidebarTrigger className="-ml-1" />
+          </header>
+
+          <main className="flex-1 p-6">
+            {validationError && (
+              <Alert variant="destructive" className="mb-6">
+                <AlertDescription>{validationError}</AlertDescription>
+              </Alert>
+            )}
+            {children}
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
     </>
   );
 }

@@ -2,37 +2,43 @@
 
 import { useState, useEffect, useRef, useId } from 'react';
 import { useRouter } from 'next/navigation';
+import useSWR from 'swr';
 import {
-  Box,
-  Paper,
-  Typography,
-  TextField,
-  Button,
-  FormControl,
-  InputLabel,
+  Send,
+  Bot,
+  User,
+  Code2,
+  Rocket,
+  Eraser,
+  Copy,
+  AlertCircle,
+  Eye,
+  EyeOff,
+  Loader2,
+} from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import {
   Select,
-  MenuItem,
-  SelectChangeEvent,
-  CircularProgress,
-  Alert,
-  IconButton,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogContentText,
-  DialogActions,
-  InputAdornment,
-  Link,
-} from '@mui/material';
-import SendIcon from '@mui/icons-material/Send';
-import SmartToyIcon from '@mui/icons-material/SmartToy';
-import PersonIcon from '@mui/icons-material/Person';
-import CodeIcon from '@mui/icons-material/Code';
-import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
-import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import { Visibility, VisibilityOff } from '@mui/icons-material';
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Separator } from '@/components/ui/separator';
+import { cn } from '@/lib/utils';
 import { getBundleDeploymentStatus } from './BundleDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
@@ -68,47 +74,42 @@ interface Message {
 
 export default function Playground() {
   const router = useRouter();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  // Generate stable IDs for form fields to prevent hydration mismatches
-  const inputMessageId = useId();
   const keycloakUsernameId = useId();
   const keycloakPasswordId = useId();
 
   const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
   const [selectedDeployment, setSelectedDeployment] = useState<string>('');
-  const [deploymentStatuses, setDeploymentStatuses] = useState<Record<string, {
-    cachePod: PodStatusInfo | null;
-    defaultPod: PodStatusInfo | null;
-  }>>({});
+  const [deploymentStatuses, setDeploymentStatuses] = useState<
+    Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }>
+  >({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [checkpointMapping, setCheckpointMapping] = useState<Record<string, { model_type?: string }>>({});
+  const [checkpointMapping, setCheckpointMapping] = useState<
+    Record<string, { model_type?: string }>
+  >({});
 
-  // Model selection state
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState<boolean>(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
 
-  // Chat state
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputMessage, setInputMessage] = useState<string>('');
   const [isSending, setIsSending] = useState<boolean>(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedErrorId, setCopiedErrorId] = useState<string | null>(null);
   const [copiedEmbeddingId, setCopiedEmbeddingId] = useState<string | null>(null);
 
-  // View Code dialog state
   const [viewCodeDialogOpen, setViewCodeDialogOpen] = useState<boolean>(false);
   const [apiKey, setApiKey] = useState<string>('');
   const [apiDomain, setApiDomain] = useState<string>('');
   const [, setCurrentEnvironment] = useState<string>('');
 
-  // API Key Instructions Dialog state
-  const [showApiKeyInstructionsDialog, setShowApiKeyInstructionsDialog] = useState<boolean>(false);
+  const [showApiKeyInstructionsDialog, setShowApiKeyInstructionsDialog] =
+    useState<boolean>(false);
   const [keycloakUsername, setKeycloakUsername] = useState<string>('');
   const [keycloakPassword, setKeycloakPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -116,99 +117,60 @@ export default function Playground() {
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [uiDomain, setUiDomain] = useState<string>('');
 
-  // Fetch bundle deployments and their statuses
-  const fetchBundleDeployments = async () => {
-    setLoading(true);
-    setError(null);
+  const fetcher = (url: string) => fetch(url).then((r) => r.json());
+  const SWR_STABLE = { revalidateOnFocus: false, revalidateOnReconnect: false, revalidateIfStale: false } as const;
 
-    try {
-      const response = await fetch('/api/bundle-deployment');
-      const data = await response.json();
-
-      if (data.success) {
-        setBundleDeployments(data.bundleDeployments);
-
-        // Fetch pod statuses for all deployments
-        const statuses: Record<string, {
-          cachePod: PodStatusInfo | null;
-          defaultPod: PodStatusInfo | null;
-        }> = {};
-
-        await Promise.all(
-          data.bundleDeployments.map(async (deployment: BundleDeployment) => {
-            try {
-              const statusResponse = await fetch(`/api/pod-status?deploymentName=${deployment.name}`);
-              const statusData = await statusResponse.json();
-
-              if (statusData.success) {
-                statuses[deployment.name] = statusData.podStatus;
-              } else {
-                statuses[deployment.name] = { cachePod: null, defaultPod: null };
-              }
-            } catch {
-              statuses[deployment.name] = { cachePod: null, defaultPod: null };
-            }
-          })
-        );
-
-        setDeploymentStatuses(statuses);
-      } else {
-        setError(data.error || 'Failed to fetch bundle deployments');
-      }
-    } catch (err) {
-      setError('Failed to connect to the server');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // SWR: shared cache — if Home/BundleDeploymentManager already fetched these, served instantly
+  const { data: deploymentsData } = useSWR('/api/bundle-deployment', fetcher, SWR_STABLE);
+  const { data: envData } = useSWR('/api/environments', fetcher, SWR_STABLE);
+  const { data: checkpointData } = useSWR('/api/checkpoint-mapping', fetcher, SWR_STABLE);
 
   useEffect(() => {
-    fetchBundleDeployments();
-    fetchEnvironmentConfig();
-    fetch('/api/checkpoint-mapping')
-      .then((r) => r.json())
-      .then((data) => { if (data.success) setCheckpointMapping(data.data); })
-      .catch(() => {});
-  }, []);
+    if (!deploymentsData) return;
+    if (!deploymentsData.success) { setError(deploymentsData.error || 'Failed to fetch deployments'); setLoading(false); return; }
+    setBundleDeployments(deploymentsData.bundleDeployments);
+    const statuses: Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }> = {};
+    Promise.all(
+      deploymentsData.bundleDeployments.map(async (deployment: BundleDeployment) => {
+        try {
+          const r = await fetch(`/api/pod-status?deploymentName=${deployment.name}`);
+          const d = await r.json();
+          statuses[deployment.name] = d.success ? d.podStatus : { cachePod: null, defaultPod: null };
+        } catch {
+          statuses[deployment.name] = { cachePod: null, defaultPod: null };
+        }
+      })
+    ).then(() => setDeploymentStatuses(statuses));
+    setLoading(false);
+  }, [deploymentsData]);
 
-  // Fetch environment configuration
-  const fetchEnvironmentConfig = async () => {
-    try {
-      const response = await fetch('/api/environments');
-      const data = await response.json();
+  useEffect(() => {
+    if (!envData?.success) return;
+    setCurrentEnvironment(envData.defaultEnvironment || '');
+    setApiKey(envData.defaultApiKey || '');
+    setApiDomain(envData.defaultApiDomain || '');
+    setUiDomain(envData.defaultUiDomain || '');
+  }, [envData]);
 
-      if (data.success) {
-        setCurrentEnvironment(data.defaultEnvironment || '');
-        setApiKey(data.defaultApiKey || '');
-        setApiDomain(data.defaultApiDomain || '');
-        setUiDomain(data.defaultUiDomain || '');
-      }
-    } catch (err) {
-      console.error('Error fetching environment config:', err);
-    }
-  };
+  useEffect(() => {
+    if (checkpointData?.success) setCheckpointMapping(checkpointData.data);
+  }, [checkpointData]);
 
-  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Restore focus to input after sending completes
   useEffect(() => {
-    if (!isSending) {
-      inputRef.current?.focus();
-    }
+    if (!isSending) inputRef.current?.focus();
   }, [isSending]);
 
-  // Auto-select deployment when there is only one option
+  // Auto-select single deployed bundle
   useEffect(() => {
     if (selectedDeployment) return;
     const deployed = bundleDeployments.filter((deployment) => {
-      const podStatusInfo = deploymentStatuses[deployment.name];
-      if (!podStatusInfo) return false;
-      const status = getBundleDeploymentStatus(podStatusInfo.cachePod, podStatusInfo.defaultPod);
-      return status === 'Deployed';
+      const info = deploymentStatuses[deployment.name];
+      if (!info) return false;
+      return getBundleDeploymentStatus(info.cachePod, info.defaultPod) === 'Deployed';
     });
     if (deployed.length === 1) {
       setSelectedDeployment(deployed[0].name);
@@ -216,23 +178,17 @@ export default function Playground() {
     }
   }, [bundleDeployments, deploymentStatuses, selectedDeployment]);
 
-  // Fetch models for a deployment
   const fetchModelsForDeployment = async (deploymentName: string) => {
     setLoadingModels(true);
     setModelsError(null);
     setAvailableModels([]);
     setSelectedModel('');
-
     try {
       const response = await fetch(`/api/deployment-models?deploymentName=${deploymentName}`);
       const data = await response.json();
-
       if (data.success && data.models) {
         setAvailableModels(data.models);
-        // Auto-select first model if available
-        if (data.models.length > 0) {
-          setSelectedModel(data.models[0]);
-        }
+        if (data.models.length > 0) setSelectedModel(data.models[0]);
       } else {
         setModelsError(data.error || 'Failed to fetch models');
       }
@@ -244,58 +200,36 @@ export default function Playground() {
     }
   };
 
-  // Handle deployment selection
-  const handleDeploymentChange = (event: SelectChangeEvent<string>) => {
-    const newDeployment = event.target.value;
+  const handleDeploymentChange = (newDeployment: string | null) => {
+    if (!newDeployment) return;
     setSelectedDeployment(newDeployment);
-    // Clear chat history when switching deployments
     setMessages([]);
-    // Clear previous models
     setAvailableModels([]);
     setSelectedModel('');
     setModelsError(null);
-
-    // Fetch models for the new deployment ONLY if a deployment is selected
     if (newDeployment) {
-      // Small delay to ensure the dropdown has rendered
-      setTimeout(() => {
-        fetchModelsForDeployment(newDeployment);
-      }, 100);
+      setTimeout(() => fetchModelsForDeployment(newDeployment), 100);
     }
   };
 
-  // Handle model selection
-  const handleModelChange = (event: SelectChangeEvent<string>) => {
-    setSelectedModel(event.target.value);
-    // Optionally clear chat history when switching models
+  const handleModelChange = (model: string | null) => {
+    if (!model) return;
+    setSelectedModel(model);
     setMessages([]);
   };
 
-  // Handle clear chat
-  const handleClearChat = () => {
-    setMessages([]);
-  };
-
-  // Get only deployed bundles
   const deployedBundles = bundleDeployments.filter((deployment) => {
-    const podStatusInfo = deploymentStatuses[deployment.name];
-    if (!podStatusInfo) return false;
-    const status = getBundleDeploymentStatus(
-      podStatusInfo.cachePod,
-      podStatusInfo.defaultPod
-    );
-    return status === 'Deployed';
+    const info = deploymentStatuses[deployment.name];
+    if (!info) return false;
+    return getBundleDeploymentStatus(info.cachePod, info.defaultPod) === 'Deployed';
   });
 
   const isEmbeddingModel = selectedModel
     ? checkpointMapping[selectedModel]?.model_type === 'embedding'
     : false;
 
-  // Handle send message
   const handleSendMessage = async () => {
-    if (!inputMessage.trim() || !selectedDeployment || !selectedModel) {
-      return;
-    }
+    if (!inputMessage.trim() || !selectedDeployment || !selectedModel) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -310,104 +244,90 @@ export default function Playground() {
 
     try {
       if (isEmbeddingModel) {
-        // Embeddings: no conversation history, one input at a time
         const response = await fetch('/api/embeddings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ input: inputMessage, model: selectedModel }),
         });
-
         const data = await response.json();
-
-        if (data.success) {
-          const assistantMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: 'assistant',
-            content: `${data.embedding.length}-dimensional embedding`,
-            timestamp: new Date(),
-            embeddingData: data.embedding,
-          };
-          setMessages((prev) => [...prev, assistantMessage]);
-        } else {
-          const errorMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: 'assistant',
-            content: data.error,
-            timestamp: new Date(),
-            isError: true,
-          };
-          setMessages((prev) => [...prev, errorMessage]);
-        }
+        setMessages((prev) => [
+          ...prev,
+          data.success
+            ? {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant' as const,
+                content: `${data.embedding.length}-dimensional embedding`,
+                timestamp: new Date(),
+                embeddingData: data.embedding,
+              }
+            : {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant' as const,
+                content: data.error,
+                timestamp: new Date(),
+                isError: true,
+              },
+        ]);
       } else {
-        // Chat: build conversation history
         const updatedMessages = [...messages, userMessage];
         const conversationHistory = [
           { role: 'system', content: 'You are a helpful assistant' },
           ...updatedMessages.map((msg) => ({ role: msg.role, content: msg.content })),
         ];
-
         const response = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages: conversationHistory, model: selectedModel }),
         });
-
         const data = await response.json();
-
-        if (data.success) {
-          const assistantMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: 'assistant',
-            content: data.content,
-            timestamp: new Date(),
-            metrics: data.metrics || undefined,
-          };
-          setMessages((prev) => [...prev, assistantMessage]);
-        } else {
-          const errorMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: 'assistant',
-            content: data.error,
-            timestamp: new Date(),
-            isError: true,
-          };
-          setMessages((prev) => [...prev, errorMessage]);
-        }
+        setMessages((prev) => [
+          ...prev,
+          data.success
+            ? {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant' as const,
+                content: data.content,
+                timestamp: new Date(),
+                metrics: data.metrics || undefined,
+              }
+            : {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant' as const,
+                content: data.error,
+                timestamp: new Date(),
+                isError: true,
+              },
+        ]);
       }
     } catch (err) {
       console.error('Error sending message:', err);
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: `Failed to send message - ${err instanceof Error ? err.message : 'Unknown error'}`,
-        timestamp: new Date(),
-        isError: true,
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant' as const,
+          content: `Failed to send message - ${err instanceof Error ? err.message : 'Unknown error'}`,
+          timestamp: new Date(),
+          isError: true,
+        },
+      ]);
     } finally {
       setIsSending(false);
     }
   };
 
-  // Handle copy error to clipboard
   const handleCopyError = (messageId: string, content: string) => {
     navigator.clipboard.writeText(content);
     setCopiedErrorId(messageId);
-    setTimeout(() => {
-      setCopiedErrorId(null);
-    }, 2000);
+    setTimeout(() => setCopiedErrorId(null), 2000);
   };
 
-  // Handle copy embedding array to clipboard
   const handleCopyEmbedding = (messageId: string, embedding: number[]) => {
     navigator.clipboard.writeText(JSON.stringify(embedding));
     setCopiedEmbeddingId(messageId);
-    setTimeout(() => {
-      setCopiedEmbeddingId(null);
-    }, 2000);
+    setTimeout(() => setCopiedEmbeddingId(null), 2000);
   };
 
-  // Handle get API key
   const handleGetApiKey = async () => {
     setShowApiKeyInstructionsDialog(true);
     setLoadingCredentials(true);
@@ -415,30 +335,20 @@ export default function Playground() {
     setKeycloakUsername('');
     setKeycloakPassword('');
     setShowPassword(false);
-
     try {
-      // Get current environment from bundleDeployments
       const response = await fetch('/api/environments');
       const data = await response.json();
-
       if (!data.success || !data.defaultEnvironment) {
         setCredentialsError('Please select an environment first');
         setLoadingCredentials(false);
         return;
       }
-
       const credResponse = await fetch('/api/get-keycloak-credentials', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          environment: data.defaultEnvironment,
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: data.defaultEnvironment }),
       });
-
       const credData = await credResponse.json();
-
       if (credData.success) {
         setKeycloakUsername(credData.username);
         setKeycloakPassword(credData.password);
@@ -453,64 +363,46 @@ export default function Playground() {
     }
   };
 
-  // Handle copy to clipboard
   const handleCopyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
   };
 
-  // Check if error is related to API key issues
   const isApiKeyError = (errorContent: string): boolean => {
     const lowerContent = errorContent.toLowerCase();
-    return lowerContent.includes('unauthorized') ||
-           lowerContent.includes('invalid api key') ||
-           lowerContent.includes('401') ||
-           lowerContent.includes('api key not found in app-config.json');
+    return (
+      lowerContent.includes('unauthorized') ||
+      lowerContent.includes('invalid api key') ||
+      lowerContent.includes('401') ||
+      lowerContent.includes('api key not found in app-config.json')
+    );
   };
 
-  // Parse error message to separate header and body
   const parseErrorMessage = (errorContent: string): { header: string; body: string } => {
-    // Check if the error follows the pattern "API request failed: STATUS - DETAILS"
-    // Look for " - " separator
     const dashIndex = errorContent.indexOf(' - ');
-
     if (dashIndex !== -1) {
       const potentialHeader = errorContent.substring(0, dashIndex).trim();
       const potentialBody = errorContent.substring(dashIndex + 3).trim();
-
-      // If we found a separator and the header looks like an error status line
-      if (potentialHeader && potentialBody &&
-          (potentialHeader.startsWith('API request failed:') ||
-           potentialHeader.startsWith('Failed to') ||
-           potentialHeader.includes('Error'))) {
-        return {
-          header: potentialHeader,
-          body: potentialBody,
-        };
+      if (
+        potentialHeader &&
+        potentialBody &&
+        (potentialHeader.startsWith('API request failed:') ||
+          potentialHeader.startsWith('Failed to') ||
+          potentialHeader.includes('Error'))
+      ) {
+        return { header: potentialHeader, body: potentialBody };
       }
     }
-
-    // For other error formats, check if it starts with a recognizable error pattern
     if (errorContent.startsWith('API request failed:')) {
-      // Extract just the status line as header
       const statusMatch = errorContent.match(/^(API request failed: \d+ [A-Z\s]+)/);
       if (statusMatch) {
         const header = statusMatch[1];
         const remainingText = errorContent.substring(header.length).trim();
-        return {
-          header: header,
-          body: remainingText || 'No additional details provided',
-        };
+        return { header, body: remainingText || 'No additional details provided' };
       }
     }
-
-    // Fallback: use "Error" as header and full content as body
-    return {
-      header: 'Error',
-      body: errorContent,
-    };
+    return { header: 'Error', body: errorContent };
   };
 
-  // Handle Enter key press
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -519,625 +411,354 @@ export default function Playground() {
   };
 
   return (
-    <Box>
-      {/* Documentation Panel */}
+    <div className="flex flex-col gap-4">
       <DocumentationPanel docFile="playground.md" />
 
-      <Typography variant="h4" component="h1" gutterBottom sx={{ fontWeight: 600, mb: 1 }}>
-        Playground
-      </Typography>
-      <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
-        Chat with your deployed models
-      </Typography>
+      <div>
+        <h1 className="text-2xl font-semibold">Playground</h1>
+        <p className="text-sm text-muted-foreground">Chat with your deployed models</p>
+      </div>
 
-      {/* Main Playground Container */}
-      <Paper
-        elevation={0}
-        sx={{
-          border: '1px solid',
-          borderColor: 'divider',
-          borderRadius: 2,
-          overflow: 'hidden',
-          height: 'calc(100vh - 250px)',
-          display: 'flex',
-          flexDirection: 'column',
-        }}
+      {/* Main Chat Container */}
+      <div
+        className="flex flex-col overflow-hidden rounded-xl border"
+        style={{ height: 'calc(100vh - 260px)' }}
       >
-        {/* Header with Bundle and Model Selectors */}
-        <Box
-          sx={{
-            p: 2,
-            borderBottom: '1px solid',
-            borderColor: 'divider',
-            backgroundColor: 'grey.50',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 2,
-            flexWrap: 'wrap',
-          }}
-        >
-          <FormControl sx={{ minWidth: 300 }} size="small">
-            <InputLabel id="deployment-select-label">Select Deployed Bundle</InputLabel>
-            <Select
-              labelId="deployment-select-label"
-              id="deployment-select"
-              value={selectedDeployment}
-              onChange={handleDeploymentChange}
-              label="Select Deployed Bundle"
-              disabled={loading || deployedBundles.length === 0}
-              sx={{ backgroundColor: 'white' }}
-            >
-              {deployedBundles.map((deployment) => (
-                <MenuItem key={deployment.name} value={deployment.name}>
-                  {deployment.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+        {/* Toolbar */}
+        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-3 py-2">
+          <Select
+            value={selectedDeployment}
+            onValueChange={handleDeploymentChange}
+          >
+            <SelectTrigger className="w-72 bg-background">
+              <SelectValue placeholder="Select deployed bundle..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {deployedBundles.length === 0 ? (
+                  <div className="px-2 py-3 text-center text-sm text-muted-foreground">
+                    No deployed bundles
+                  </div>
+                ) : (
+                  deployedBundles.map((d) => (
+                    <SelectItem key={d.name} value={d.name}>
+                      {d.name}
+                    </SelectItem>
+                  ))
+                )}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
 
           {selectedDeployment && (
-            <>
-              <FormControl sx={{ minWidth: 250 }} size="small">
-                <InputLabel id="model-select-label">Select Model</InputLabel>
-                <Select
-                  labelId="model-select-label"
-                  id="model-select"
-                  value={selectedModel}
-                  onChange={handleModelChange}
-                  label="Select Model"
-                  disabled={loadingModels || availableModels.length === 0}
-                  sx={{ backgroundColor: 'white' }}
-                >
-                  {availableModels.map((model) => (
-                    <MenuItem key={model} value={model}>
-                      {model}
-                    </MenuItem>
+            <Select
+              value={selectedModel}
+              onValueChange={handleModelChange}
+            >
+              <SelectTrigger className="w-56 bg-background" disabled={loadingModels}>
+                <SelectValue placeholder="Select model..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {availableModels.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {m}
+                    </SelectItem>
                   ))}
-                </Select>
-              </FormControl>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          )}
 
-              {selectedModel && (
-                <>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CodeIcon />}
-                    onClick={() => setViewCodeDialogOpen(true)}
-                    sx={{
-                      backgroundColor: 'white',
-                      textTransform: 'none',
-                    }}
-                  >
-                    View Code
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CleaningServicesIcon />}
-                    onClick={handleClearChat}
-                    disabled={messages.length === 0}
-                    sx={{
-                      backgroundColor: 'white',
-                      textTransform: 'none',
-                    }}
-                  >
-                    Clear Chat
-                  </Button>
-                </>
-              )}
+          {selectedModel && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-background"
+                onClick={() => setViewCodeDialogOpen(true)}
+              >
+                <Code2 data-icon="inline-start" />
+                View Code
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-background"
+                onClick={() => setMessages([])}
+                disabled={messages.length === 0}
+              >
+                <Eraser data-icon="inline-start" />
+                Clear Chat
+              </Button>
             </>
           )}
 
-          {loading && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <CircularProgress size={20} />
-              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                Loading deployments...
-              </Typography>
-            </Box>
+          {(loading || loadingModels) && (
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {loading ? 'Loading deployments...' : 'Loading models...'}
+            </div>
           )}
+        </div>
 
-          {loadingModels && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <CircularProgress size={20} />
-              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                Loading models...
-              </Typography>
-            </Box>
-          )}
-        </Box>
-
-        {/* Error State */}
+        {/* Alerts */}
         {error && (
-          <Box sx={{ p: 2 }}>
-            <Alert severity="error">{error}</Alert>
-          </Box>
+          <div className="px-3 pt-2">
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          </div>
         )}
-
-        {/* Models Error State */}
         {modelsError && selectedDeployment && (
-          <Box sx={{ p: 2 }}>
-            <Alert severity="warning">
-              Failed to load models: {modelsError}
+          <div className="px-3 pt-2">
+            <Alert>
+              <AlertDescription>Failed to load models: {modelsError}</AlertDescription>
             </Alert>
-          </Box>
+          </div>
         )}
-
-        {/* No Deployed Bundles State */}
         {!loading && deployedBundles.length === 0 && !error && (
-          <Box sx={{ p: 3 }}>
-            <Alert severity="info">
-              No deployed bundles found. Please deploy a bundle first to use the playground.
+          <div className="px-3 pt-2">
+            <Alert>
+              <AlertDescription>
+                No deployed bundles found. Please deploy a bundle first to use the playground.
+              </AlertDescription>
             </Alert>
-          </Box>
+          </div>
         )}
 
-        {/* Chat Interface - Only show when deployment and model are selected */}
-        {selectedDeployment && selectedModel && (
+        {/* Messages */}
+        {selectedDeployment && selectedModel ? (
           <>
-            {/* Messages Container */}
-            <Box
-              sx={{
-                flex: 1,
-                overflowY: 'auto',
-                p: 3,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 2,
-                backgroundColor: '#fafafa',
-              }}
-            >
+            <div className="flex flex-1 flex-col gap-3 overflow-y-auto bg-muted/10 px-4 py-4">
               {messages.length === 0 ? (
-                <Box
-                  sx={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    height: '100%',
-                    color: 'text.secondary',
-                  }}
-                >
-                  <SmartToyIcon sx={{ fontSize: 60, mb: 2, opacity: 0.3 }} />
-                  <Typography variant="h6" sx={{ mb: 1 }}>
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
+                  <Bot className="size-14 opacity-20" />
+                  <p className="text-base font-medium">
                     {isEmbeddingModel ? 'Generate embeddings' : 'Start a conversation'}
-                  </Typography>
-                  <Typography variant="body2">
-                    {isEmbeddingModel
-                      ? <>Enter text to embed with <strong>{selectedModel}</strong></>
-                      : <>Chatting with <strong>{selectedModel}</strong> in {selectedDeployment}</>
-                    }
-                  </Typography>
-                </Box>
+                  </p>
+                  <p className="text-sm">
+                    {isEmbeddingModel ? (
+                      <>Enter text to embed with <strong>{selectedModel}</strong></>
+                    ) : (
+                      <>Chatting with <strong>{selectedModel}</strong> in {selectedDeployment}</>
+                    )}
+                  </p>
+                </div>
               ) : (
                 <>
                   {messages.map((message) => (
-                    <Box
+                    <div
                       key={message.id}
-                      sx={{
-                        display: 'flex',
-                        gap: 2,
-                        alignItems: 'flex-start',
-                        flexDirection: message.role === 'user' ? 'row-reverse' : 'row',
-                      }}
+                      className={cn(
+                        'flex items-start gap-3',
+                        message.role === 'user' && 'flex-row-reverse'
+                      )}
                     >
                       {/* Avatar */}
-                      <Box
-                        sx={{
-                          width: 36,
-                          height: 36,
-                          borderRadius: '50%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                          backgroundColor: message.role === 'user' ? 'primary.main' : '#e0e0e0',
-                          color: message.role === 'user' ? 'white' : 'text.primary',
-                        }}
+                      <div
+                        className={cn(
+                          'flex size-9 shrink-0 items-center justify-center rounded-full',
+                          message.role === 'user'
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted'
+                        )}
                       >
                         {message.role === 'user' ? (
-                          <PersonIcon sx={{ fontSize: 20 }} />
+                          <User className="size-5" />
                         ) : (
-                          <Box
-                            component="img"
-                            src="/icon.svg"
-                            alt="AI Assistant"
-                            sx={{
-                              width: 24,
-                              height: 24,
-                            }}
-                          />
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src="/icon.svg" alt="AI" className="size-6" />
                         )}
-                      </Box>
+                      </div>
 
-                      {/* Message Content */}
-                      <Box sx={{ maxWidth: '70%' }}>
+                      {/* Bubble */}
+                      <div className="flex max-w-[70%] flex-col gap-1">
                         {message.isError ? (
-                          // Error Box with special styling
-                          (() => {
-                            const { header, body } = parseErrorMessage(message.content);
-                            return (
-                              <Box
-                                sx={{
-                                  border: '1px solid',
-                                  borderColor: 'error.main',
-                                  borderRadius: 2,
-                                  backgroundColor: '#fff5f5',
-                                  overflow: 'hidden',
-                                }}
+                          <div className="overflow-hidden rounded-lg border border-destructive/50">
+                            <div className="flex items-center justify-between border-b border-destructive/30 bg-destructive/10 px-3 py-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <AlertCircle className="size-4 text-destructive" />
+                                <span className="text-sm font-semibold text-destructive">
+                                  {parseErrorMessage(message.content).header}
+                                </span>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => handleCopyError(message.id, message.content)}
+                                className={cn(
+                                  copiedErrorId === message.id && 'text-green-600'
+                                )}
                               >
-                                <Box
-                                  sx={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'space-between',
-                                    backgroundColor: '#ffebee',
-                                    px: 2,
-                                    py: 1,
-                                    borderBottom: '1px solid',
-                                    borderColor: 'error.light',
-                                  }}
-                                >
-                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
-                                    <ErrorOutlineIcon sx={{ fontSize: 20, color: 'error.main' }} />
-                                    <Typography
-                                      variant="subtitle2"
-                                      sx={{ color: 'error.main', fontWeight: 600 }}
+                                <Copy />
+                              </Button>
+                            </div>
+                            <div className="p-3">
+                              <pre className="whitespace-pre-wrap break-words font-mono text-sm">
+                                {parseErrorMessage(message.content).body}
+                              </pre>
+                              {isApiKeyError(message.content) && (
+                                <div className="mt-3 border-t border-destructive/30 pt-3">
+                                  <p className="text-sm">
+                                    This error may be caused by an invalid or missing API key.
+                                    Please{' '}
+                                    <button
+                                      type="button"
+                                      onClick={handleGetApiKey}
+                                      className="text-primary underline underline-offset-4 hover:text-primary/80"
                                     >
-                                      {header}
-                                    </Typography>
-                                  </Box>
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleCopyError(message.id, message.content)}
-                                    sx={{
-                                      color: copiedErrorId === message.id ? 'success.main' : 'text.secondary',
-                                    }}
-                                  >
-                                    <ContentCopyIcon sx={{ fontSize: 18 }} />
-                                  </IconButton>
-                                </Box>
-                                <Box sx={{ p: 2 }}>
-                                  <Typography
-                                    variant="body2"
-                                    sx={{
-                                      whiteSpace: 'pre-wrap',
-                                      wordBreak: 'break-word',
-                                      color: 'text.primary',
-                                      fontFamily: 'monospace',
-                                      fontSize: '0.875rem',
-                                    }}
-                                  >
-                                    {body}
-                                  </Typography>
-
-                                  {/* Show remedial message for API key errors */}
-                                  {isApiKeyError(message.content) && (
-                                    <Box
-                                      sx={{
-                                        mt: 2,
-                                        pt: 2,
-                                        borderTop: '1px solid',
-                                        borderColor: 'error.light',
-                                      }}
-                                    >
-                                      <Typography
-                                        variant="body2"
-                                        sx={{
-                                          color: 'text.primary',
-                                          mb: 1,
-                                        }}
-                                      >
-                                        This error may be caused by an invalid or missing API key.
-                                      </Typography>
-                                      <Typography
-                                        variant="body2"
-                                        sx={{
-                                          color: 'text.primary',
-                                        }}
-                                      >
-                                        Please{' '}
-                                        <Link
-                                          component="button"
-                                          onClick={handleGetApiKey}
-                                          sx={{
-                                            color: 'primary.main',
-                                            cursor: 'pointer',
-                                            textDecoration: 'underline',
-                                            '&:hover': {
-                                              color: 'primary.dark',
-                                            },
-                                          }}
-                                        >
-                                          get your API key
-                                        </Link>
-                                        {' '}and update it on the Home page.
-                                      </Typography>
-                                    </Box>
-                                  )}
-
-                                  <Typography
-                                    variant="caption"
-                                    sx={{
-                                      display: 'block',
-                                      mt: 1.5,
-                                      color: 'text.secondary',
-                                    }}
-                                  >
-                                    {message.timestamp.toLocaleTimeString()}
-                                  </Typography>
-                                </Box>
-                              </Box>
-                            );
-                          })()
+                                      get your API key
+                                    </button>{' '}
+                                    and update it on the Home page.
+                                  </p>
+                                </div>
+                              )}
+                              <span className="mt-2 block text-xs text-muted-foreground">
+                                {message.timestamp.toLocaleTimeString()}
+                              </span>
+                            </div>
+                          </div>
                         ) : message.embeddingData ? (
-                          // Embedding Response Box
-                          <Box
-                            sx={{
-                              p: 2,
-                              borderRadius: 2,
-                              backgroundColor: 'white',
-                              boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                              minWidth: 280,
-                            }}
-                          >
-                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                              <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+                          <div className="rounded-lg border bg-card p-3 shadow-sm">
+                            <div className="mb-2 flex items-center justify-between">
+                              <span className="text-sm font-semibold text-muted-foreground">
                                 {message.embeddingData.length}-dimensional embedding
-                              </Typography>
-                              <IconButton
-                                size="small"
-                                onClick={() => handleCopyEmbedding(message.id, message.embeddingData!)}
-                                sx={{ color: copiedEmbeddingId === message.id ? 'success.main' : 'text.secondary' }}
-                                title={copiedEmbeddingId === message.id ? 'Copied!' : 'Copy array'}
+                              </span>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() =>
+                                  handleCopyEmbedding(message.id, message.embeddingData!)
+                                }
+                                className={cn(
+                                  copiedEmbeddingId === message.id && 'text-green-600'
+                                )}
                               >
-                                <ContentCopyIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </Box>
-                            <Typography
-                              variant="body2"
-                              sx={{
-                                fontFamily: 'monospace',
-                                fontSize: '0.75rem',
-                                color: 'text.secondary',
-                                wordBreak: 'break-all',
-                                backgroundColor: 'grey.50',
-                                borderRadius: 1,
-                                p: 1,
-                              }}
-                            >
+                                <Copy />
+                              </Button>
+                            </div>
+                            <p className="break-all rounded bg-muted px-2 py-1 font-mono text-xs text-muted-foreground">
                               [{message.embeddingData.slice(0, 8).map((v) => v.toFixed(8)).join(', ')}, ...]
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              sx={{ display: 'block', mt: 1, opacity: 0.7 }}
-                            >
+                            </p>
+                            <span className="mt-1.5 block text-xs opacity-70">
                               {message.timestamp.toLocaleTimeString()}
-                            </Typography>
-                          </Box>
+                            </span>
+                          </div>
                         ) : (
-                          // Normal Message Box
-                          <Box
-                            sx={{
-                              p: 2,
-                              borderRadius: 2,
-                              backgroundColor: message.role === 'user' ? 'primary.main' : 'white',
-                              color: message.role === 'user' ? 'white' : 'text.primary',
-                              boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                            }}
+                          <div
+                            className={cn(
+                              'rounded-2xl px-3 py-2 shadow-sm',
+                              message.role === 'user'
+                                ? 'bg-primary text-primary-foreground'
+                                : 'bg-card text-card-foreground'
+                            )}
                           >
-                            <Typography
-                              variant="body1"
-                              sx={{
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-word',
-                              }}
-                            >
+                            <p className="whitespace-pre-wrap break-words text-sm">
                               {message.content}
-                            </Typography>
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                display: 'block',
-                                mt: 1,
-                                opacity: 0.7,
-                              }}
+                            </p>
+                            <span
+                              className={cn(
+                                'mt-1 block text-xs',
+                                message.role === 'user'
+                                  ? 'text-primary-foreground/70'
+                                  : 'text-muted-foreground'
+                              )}
                             >
                               {message.timestamp.toLocaleTimeString()}
-                            </Typography>
-                          </Box>
+                            </span>
+                          </div>
                         )}
 
-                        {/* Metrics Panel - Only for assistant messages with metrics */}
+                        {/* Metrics */}
                         {message.role === 'assistant' && message.metrics && (
-                          <Box
-                            sx={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 1,
-                              mt: 1,
-                              px: 1.5,
-                              py: 0.75,
-                              backgroundColor: 'rgba(0, 0, 0, 0.03)',
-                              borderRadius: 1,
-                              fontSize: '0.75rem',
-                              color: 'text.secondary',
-                            }}
-                          >
-                            <RocketLaunchIcon sx={{ fontSize: 14, color: 'primary.main' }} />
+                          <div className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+                            <Rocket className="size-3 text-primary" />
                             {message.metrics.tokensPerSecond !== null && (
                               <>
-                                <Typography variant="caption" sx={{ fontSize: '0.75rem' }}>
-                                  {message.metrics.tokensPerSecond.toFixed(1)} t/s
-                                </Typography>
-                                <Typography variant="caption" sx={{ fontSize: '0.75rem', mx: 0.5 }}>
-                                  |
-                                </Typography>
+                                <span>{message.metrics.tokensPerSecond.toFixed(1)} t/s</span>
+                                <span className="text-muted-foreground/50">|</span>
                               </>
                             )}
                             {message.metrics.totalLatency !== null && (
                               <>
-                                <Typography variant="caption" sx={{ fontSize: '0.75rem' }}>
-                                  {message.metrics.totalLatency.toFixed(2)}s
-                                </Typography>
-                                <Typography variant="caption" sx={{ fontSize: '0.75rem', mx: 0.5 }}>
-                                  |
-                                </Typography>
+                                <span>{message.metrics.totalLatency.toFixed(2)}s</span>
+                                <span className="text-muted-foreground/50">|</span>
                               </>
                             )}
                             {message.metrics.timeToFirstToken !== null && (
-                              <Typography variant="caption" sx={{ fontSize: '0.75rem' }}>
+                              <span>
                                 {message.metrics.timeToFirstToken.toFixed(2)}s to first token
-                              </Typography>
+                              </span>
                             )}
-                          </Box>
+                          </div>
                         )}
-                      </Box>
-                    </Box>
+                      </div>
+                    </div>
                   ))}
+
                   {isSending && (
-                    <Box
-                      sx={{
-                        display: 'flex',
-                        gap: 2,
-                        alignItems: 'flex-start',
-                      }}
-                    >
-                      <Box
-                        sx={{
-                          width: 36,
-                          height: 36,
-                          borderRadius: '50%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          flexShrink: 0,
-                          backgroundColor: '#e0e0e0',
-                        }}
-                      >
-                        <Box
-                          component="img"
-                          src="/icon.svg"
-                          alt="AI Assistant"
-                          sx={{
-                            width: 24,
-                            height: 24,
-                          }}
-                        />
-                      </Box>
-                      <Box
-                        sx={{
-                          p: 2,
-                          borderRadius: 2,
-                          backgroundColor: 'white',
-                          boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                        }}
-                      >
-                        <CircularProgress size={20} />
-                      </Box>
-                    </Box>
+                    <div className="flex items-start gap-3">
+                      <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
+                        <img src="/icon.svg" alt="AI" className="size-6" />
+                      </div>
+                      <div className="rounded-2xl bg-card px-3 py-2.5 shadow-sm">
+                        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                      </div>
+                    </div>
                   )}
                   <div ref={messagesEndRef} />
                 </>
               )}
-            </Box>
+            </div>
 
-            {/* Input Section */}
-            <Box
-              sx={{
-                p: 2,
-                borderTop: '1px solid',
-                borderColor: 'divider',
-                backgroundColor: 'white',
-              }}
-            >
-              <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
-                <TextField
-                  id={inputMessageId}
-                  fullWidth
-                  multiline
-                  maxRows={4}
-                  placeholder={isEmbeddingModel ? 'Enter text to embed...' : 'Type your message...'}
+            {/* Input Area */}
+            <div className="border-t bg-background px-3 py-2">
+              <div className="flex items-end gap-2">
+                <Textarea
+                  ref={inputRef}
+                  placeholder={
+                    isEmbeddingModel ? 'Enter text to embed...' : 'Type your message...'
+                  }
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={handleKeyDown}
                   disabled={isSending}
-                  inputRef={inputRef}
-                  variant="outlined"
-                  size="small"
-                  sx={{
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: 2,
-                    },
-                  }}
+                  rows={1}
+                  className="min-h-[40px] resize-none"
                 />
                 <Button
-                  variant="contained"
-                  color="primary"
                   onClick={handleSendMessage}
                   disabled={!inputMessage.trim() || isSending}
-                  sx={{
-                    minWidth: 50,
-                    height: 40,
-                    borderRadius: 2,
-                  }}
+                  size="icon-sm"
+                  className="size-10 shrink-0"
                 >
-                  <SendIcon />
+                  <Send />
                 </Button>
-              </Box>
-              <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
                 Press Enter to send, Shift+Enter for new line
-              </Typography>
-            </Box>
+              </p>
+            </div>
           </>
+        ) : (
+          /* Placeholder states */
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
+            <Bot className="size-20 opacity-10" />
+            {!selectedDeployment && !loading && deployedBundles.length > 0 ? (
+              <>
+                <p className="text-base font-medium">Select a deployment to get started</p>
+                <p className="text-sm">Choose a deployed bundle from the dropdown above</p>
+              </>
+            ) : selectedDeployment && !selectedModel && !loadingModels && availableModels.length > 0 ? (
+              <>
+                <p className="text-base font-medium">Select a model to continue</p>
+                <p className="text-sm">Choose a model from the dropdown above</p>
+              </>
+            ) : null}
+          </div>
         )}
-
-        {/* Prompt to select model if deployment selected but no model */}
-        {selectedDeployment && !selectedModel && !loadingModels && availableModels.length > 0 && (
-          <Box
-            sx={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              p: 4,
-              color: 'text.secondary',
-            }}
-          >
-            <SmartToyIcon sx={{ fontSize: 80, mb: 2, opacity: 0.2 }} />
-            <Typography variant="h6" sx={{ mb: 1 }}>
-              Select a model to continue
-            </Typography>
-            <Typography variant="body2">
-              Choose a model from the dropdown above
-            </Typography>
-          </Box>
-        )}
-
-        {/* Prompt to select deployment if none selected */}
-        {!selectedDeployment && !loading && !error && deployedBundles.length > 0 && (
-          <Box
-            sx={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              p: 4,
-              color: 'text.secondary',
-            }}
-          >
-            <SmartToyIcon sx={{ fontSize: 80, mb: 2, opacity: 0.2 }} />
-            <Typography variant="h6" sx={{ mb: 1 }}>
-              Select a deployment to get started
-            </Typography>
-            <Typography variant="body2">
-              Choose a deployed bundle from the dropdown above
-            </Typography>
-          </Box>
-        )}
-      </Paper>
+      </div>
 
       {/* View Code Dialog */}
       <ViewCodeDialog
@@ -1152,143 +773,113 @@ export default function Playground() {
       {/* API Key Instructions Dialog */}
       <Dialog
         open={showApiKeyInstructionsDialog}
-        onClose={() => setShowApiKeyInstructionsDialog(false)}
-        maxWidth="sm"
-        fullWidth
+        onOpenChange={setShowApiKeyInstructionsDialog}
       >
-        <DialogTitle>API Key Instructions</DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ mb: 3 }}>
-            Login to the following UI domain using the following credentials to create your API key
-          </DialogContentText>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>API Key Instructions</DialogTitle>
+            <DialogDescription>
+              Login to the following UI domain using the credentials below to create your API key.
+            </DialogDescription>
+          </DialogHeader>
 
-          {/* Loading State */}
-          {loadingCredentials && (
-            <Box sx={{ display: 'flex', justifyContent: 'center', my: 3 }}>
-              <CircularProgress size={40} />
-            </Box>
-          )}
+          <div className="flex flex-col gap-4">
+            {loadingCredentials && (
+              <div className="flex justify-center py-4">
+                <Loader2 className="size-8 animate-spin text-primary" />
+              </div>
+            )}
+            {credentialsError && (
+              <Alert variant="destructive">
+                <AlertDescription>{credentialsError}</AlertDescription>
+              </Alert>
+            )}
+            {!loadingCredentials && uiDomain && (
+              <div className="flex flex-col gap-1">
+                <p className="text-sm font-semibold">UI Domain:</p>
+                <a
+                  href={uiDomain}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="break-all text-sm text-primary underline underline-offset-4 hover:text-primary/80"
+                >
+                  {uiDomain}
+                </a>
+              </div>
+            )}
+            {!loadingCredentials && keycloakUsername && keycloakPassword && (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-semibold">Username:</p>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id={keycloakUsernameId}
+                      value={keycloakUsername}
+                      readOnly
+                      className="font-mono"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => handleCopyToClipboard(keycloakUsername)}
+                    >
+                      <Copy />
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <p className="text-sm font-semibold">Password:</p>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Input
+                        id={keycloakPasswordId}
+                        type={showPassword ? 'text' : 'password'}
+                        value={keycloakPassword}
+                        readOnly
+                        className="font-mono pr-10"
+                      />
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="absolute right-1 top-1/2 -translate-y-1/2"
+                        onClick={() => setShowPassword(!showPassword)}
+                      >
+                        {showPassword ? <EyeOff /> : <Eye />}
+                      </Button>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => handleCopyToClipboard(keycloakPassword)}
+                    >
+                      <Copy />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {!loadingCredentials && !uiDomain && (
+              <Alert>
+                <AlertDescription>
+                  Please select an environment with a UI domain configured.
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
 
-          {/* Error State */}
-          {credentialsError && (
-            <Alert severity="error" sx={{ mb: 2 }}>
-              {credentialsError}
-            </Alert>
-          )}
-
-          {/* UI Domain */}
-          {!loadingCredentials && uiDomain && (
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                UI Domain:
-              </Typography>
-              <Typography
-                component="a"
-                href={uiDomain}
-                target="_blank"
-                rel="noopener noreferrer"
-                sx={{
-                  color: 'primary.main',
-                  textDecoration: 'underline',
-                  wordBreak: 'break-all',
-                  '&:hover': {
-                    color: 'primary.dark',
-                  },
-                }}
-              >
-                {uiDomain}
-              </Typography>
-            </Box>
-          )}
-
-          {/* Credentials */}
-          {!loadingCredentials && keycloakUsername && keycloakPassword && (
-            <Box>
-              {/* Username */}
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Username:
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TextField
-                    id={keycloakUsernameId}
-                    fullWidth
-                    value={keycloakUsername}
-                    variant="outlined"
-                    size="small"
-                    slotProps={{
-                      input: {
-                        readOnly: true,
-                      },
-                    }}
-                  />
-                  <IconButton
-                    onClick={() => handleCopyToClipboard(keycloakUsername)}
-                    size="small"
-                    sx={{ color: 'primary.main' }}
-                  >
-                    <ContentCopyIcon fontSize="small" />
-                  </IconButton>
-                </Box>
-              </Box>
-
-              {/* Password */}
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                  Password:
-                </Typography>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TextField
-                    id={keycloakPasswordId}
-                    fullWidth
-                    type={showPassword ? 'text' : 'password'}
-                    value={keycloakPassword}
-                    variant="outlined"
-                    size="small"
-                    slotProps={{
-                      input: {
-                        readOnly: true,
-                        endAdornment: (
-                          <InputAdornment position="end">
-                            <IconButton
-                              onClick={() => setShowPassword(!showPassword)}
-                              edge="end"
-                              size="small"
-                            >
-                              {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                            </IconButton>
-                          </InputAdornment>
-                        ),
-                      },
-                    }}
-                  />
-                  <IconButton
-                    onClick={() => handleCopyToClipboard(keycloakPassword)}
-                    size="small"
-                    sx={{ color: 'primary.main' }}
-                  >
-                    <ContentCopyIcon fontSize="small" />
-                  </IconButton>
-                </Box>
-              </Box>
-            </Box>
-          )}
-
-          {!loadingCredentials && !uiDomain && (
-            <Alert severity="warning">
-              Please select an environment with a UI domain configured.
-            </Alert>
-          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowApiKeyInstructionsDialog(false);
+                router.push('/');
+              }}
+            >
+              Close
+            </Button>
+          </DialogFooter>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => {
-            setShowApiKeyInstructionsDialog(false);
-            router.push('/');
-          }} autoFocus>
-            Close
-          </Button>
-        </DialogActions>
       </Dialog>
-    </Box>
+    </div>
   );
 }

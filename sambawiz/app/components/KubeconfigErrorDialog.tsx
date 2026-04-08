@@ -2,18 +2,13 @@
 
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  Alert,
-  Box,
-  List,
-  ListItem,
-  ListItemText,
-  Link,
-} from '@mui/material';
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 interface KubeconfigErrorDialogProps {
   open: boolean;
@@ -40,9 +35,12 @@ export default function KubeconfigErrorDialog({
         return (
           <>
             {errorDetails.slice(0, upgradeIndex)}
-            <Link component="button" onClick={onUpgrade} sx={{ fontWeight: 600, verticalAlign: 'baseline' }}>
+            <button
+              onClick={onUpgrade}
+              className="font-semibold underline underline-offset-2 hover:opacity-80 align-baseline"
+            >
               upgrade
-            </Link>
+            </button>
             {errorDetails.slice(upgradeIndex + 'upgrade'.length)}
           </>
         );
@@ -52,78 +50,61 @@ export default function KubeconfigErrorDialog({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle>Kubeconfig Validation Error</DialogTitle>
-      <DialogContent>
-        <Alert severity="error" sx={{ mb: 3 }}>
-          Failed to validate kubeconfig. The environment information could not be retrieved.
-        </Alert>
+    <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+      <DialogContent className="sm:max-w-2xl" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Kubeconfig Validation Error</DialogTitle>
+        </DialogHeader>
 
-        {helmCommand && (
-          <Box sx={{ mb: 3 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-              Helm Command:
-            </Typography>
-            <Box
-              sx={{
-                p: 2,
-                backgroundColor: '#f5f5f5',
-                borderRadius: 1,
-                fontFamily: 'monospace',
-                fontSize: '0.875rem',
-                overflowX: 'auto',
-              }}
-            >
-              {helmCommand}
-            </Box>
-          </Box>
-        )}
+        <div className="flex flex-col gap-4">
+          <Alert variant="destructive">
+            <AlertDescription>
+              Failed to validate kubeconfig. The environment information could not be retrieved.
+            </AlertDescription>
+          </Alert>
 
-        {errorDetails && (
-          <Box sx={{ mb: 3 }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-              Error Details:
-            </Typography>
-            <Box
-              sx={{
-                p: 2,
-                backgroundColor: '#ffebee',
-                borderRadius: 1,
-                fontFamily: 'monospace',
-                fontSize: '0.875rem',
-                overflowX: 'auto',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-              }}
-            >
-              {renderErrorDetails()}
-            </Box>
-          </Box>
-        )}
+          {helmCommand && (
+            <div>
+              <p className="text-sm font-semibold mb-2">Helm Command:</p>
+              <div className="rounded bg-muted px-3 py-2 font-mono text-sm overflow-x-auto">
+                {helmCommand}
+              </div>
+            </div>
+          )}
 
-        <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-          Possible Resolutions:
-        </Typography>
-        <List sx={{ pl: 2 }}>
-          <ListItem sx={{ display: 'list-item', listStyleType: 'decimal', pl: 0 }}>
-            <ListItemText
-              primary="Check the kubeconfig file for correctness"
-              secondary="Ensure the kubeconfig file exists and is properly formatted"
-            />
-          </ListItem>
-          <ListItem sx={{ display: 'list-item', listStyleType: 'decimal', pl: 0 }}>
-            <ListItemText
-              primary="Check if you have network access to the server"
-              secondary="Verify that you are on the right network/VPN to access the server specified in the kubeconfig file"
-            />
-          </ListItem>
-        </List>
+          {errorDetails && (
+            <div>
+              <p className="text-sm font-semibold mb-2">Error Details:</p>
+              <div className="rounded bg-red-50 px-3 py-2 font-mono text-sm overflow-x-auto whitespace-pre-wrap break-words">
+                {renderErrorDetails()}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <p className="text-sm font-semibold mb-2">Possible Resolutions:</p>
+            <ol className="list-decimal pl-5 flex flex-col gap-3 text-sm">
+              <li>
+                <p className="font-medium">Check the kubeconfig file for correctness</p>
+                <p className="text-muted-foreground">
+                  Ensure the kubeconfig file exists and is properly formatted
+                </p>
+              </li>
+              <li>
+                <p className="font-medium">Check if you have network access to the server</p>
+                <p className="text-muted-foreground">
+                  Verify that you are on the right network/VPN to access the server specified in the
+                  kubeconfig file
+                </p>
+              </li>
+            </ol>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button onClick={onClose}>OK</Button>
+        </DialogFooter>
       </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose} variant="contained">
-          OK
-        </Button>
-      </DialogActions>
     </Dialog>
   );
 }

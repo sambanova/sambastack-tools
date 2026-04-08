@@ -3,16 +3,14 @@
 import { useRouter } from 'next/navigation';
 import {
   Dialog,
-  DialogTitle,
   DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  Alert,
-  List,
-  ListItem,
-  ListItemText,
-} from '@mui/material';
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertTriangle } from 'lucide-react';
 
 interface NoKubeconfigsDialogProps {
   open: boolean;
@@ -31,49 +29,50 @@ export default function NoKubeconfigsDialog({ open, onClose }: NoKubeconfigsDial
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>No kubeconfigs found!</DialogTitle>
-      <DialogContent>
-        <Alert severity="warning" sx={{ mb: 3 }}>
-          No kubeconfig files were found in the kubeconfigs directory.
-        </Alert>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          To use SambaWiz, you need to provide a valid kubeconfig file. You have two options:
-        </Typography>
-        <List sx={{ pl: 2 }}>
-          <ListItem sx={{ display: 'list-item', listStyleType: 'decimal', pl: 0 }}>
-            <ListItemText
-              primary="Manually copy a kubeconfig file"
-              secondary="Copy your kubeconfig YAML file into the kubeconfigs directory and refresh this page."
-              primaryTypographyProps={{ fontWeight: 600 }}
-            />
-          </ListItem>
-          <ListItem sx={{ display: 'list-item', listStyleType: 'decimal', pl: 0 }}>
-            <ListItemText
-              primary="Add an environment using an encoded config"
-              secondary="Use the 'Add Environment' page to paste an encoded kubeconfig (e.g., from 1Password)."
-              primaryTypographyProps={{ fontWeight: 600 }}
-            />
-          </ListItem>
-        </List>
+    <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
+      <DialogContent className="sm:max-w-lg" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>No kubeconfigs found!</DialogTitle>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-4">
+          <Alert className="border-amber-200 bg-amber-50 text-amber-800">
+            <AlertTriangle className="size-4 text-amber-600" />
+            <AlertDescription className="text-amber-800">
+              No kubeconfig files were found in the kubeconfigs directory.
+            </AlertDescription>
+          </Alert>
+
+          <p className="text-sm text-muted-foreground">
+            To use SambaWiz, you need to provide a valid kubeconfig file. You have two options:
+          </p>
+
+          <ol className="list-decimal pl-5 flex flex-col gap-3 text-sm">
+            <li>
+              <p className="font-semibold">Manually copy a kubeconfig file</p>
+              <p className="text-muted-foreground">
+                Copy your kubeconfig YAML file into the kubeconfigs directory and refresh this page.
+              </p>
+            </li>
+            <li>
+              <p className="font-semibold">Add an environment using an encoded config</p>
+              <p className="text-muted-foreground">
+                Use the &apos;Add Environment&apos; page to paste an encoded kubeconfig (e.g., from
+                1Password).
+              </p>
+            </li>
+          </ol>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={handleRefresh}>
+            Refresh Page
+          </Button>
+          <Button onClick={handleAddEnvironment}>
+            Add Environment
+          </Button>
+        </DialogFooter>
       </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 3, pt: 1 }}>
-        <Button onClick={handleRefresh} variant="outlined">
-          Refresh Page
-        </Button>
-        <Button
-          onClick={handleAddEnvironment}
-          variant="contained"
-          sx={{
-            background: 'linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%)',
-            '&:hover': {
-              background: 'linear-gradient(135deg, #FF5722 0%, #FF7043 100%)',
-            },
-          }}
-        >
-          Add Environment
-        </Button>
-      </DialogActions>
     </Dialog>
   );
 }

@@ -41,3 +41,14 @@ CLAUDE.md
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# OpenMemory - IDE/Assistant specific rules
+.windsurf/rules/openmemory.md
+
+# Personal/local files — kept locally, not tracked
+debug.yaml
+email.md
+my_bundles/
+my_notes/
+openmemory.md
+sambawiz/kubeconfigs-archive/
