@@ -12,7 +12,7 @@
 ### Interactive terminal interface for SambaStack bundle management — no browser needed
 
 ![CLI](https://img.shields.io/badge/interface-CLI-6C3FC4?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.5.0-412AA0?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.4.0-412AA0?style=for-the-badge)
 ![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
@@ -63,7 +63,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
  ___) | (_| | | | | | | |_) | (_| |\ V  V / | |/ /
 |____/ \__,_|_| |_| |_|_.__/ \__,_| \_/\_/  |_/___|
 
-  SambaWiz CLI  v1.5.0
+  SambaWiz CLI  v1.4.0
   SambaStack Bundle Management
 ```
 
@@ -1038,7 +1038,7 @@ If cache pod logs show `[CRITICAL] Failed to access source storage`:
 
 <div align="center">
 
-*SambaWiz CLI v1.5.0 · Requires SambaStack Helm ≥ 0.5.6*
+*SambaWiz CLI v1.4.0 · Requires SambaStack Helm ≥ 0.5.6*
 
 ← Back to [Web UI docs (README.md)](README.md)
 
