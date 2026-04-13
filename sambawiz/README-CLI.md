@@ -12,7 +12,7 @@
 ### Interactive terminal interface for SambaStack bundle management — no browser needed
 
 ![CLI](https://img.shields.io/badge/interface-CLI-6C3FC4?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.4.0-412AA0?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.5.0-412AA0?style=for-the-badge)
 ![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
@@ -63,7 +63,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
  ___) | (_| | | | | | | |_) | (_| |\ V  V / | |/ /
 |____/ \__,_|_| |_| |_|_.__/ \__,_| \_/\_/  |_/___|
 
-  SambaWiz CLI  v1.4.0
+  SambaWiz CLI  v1.5.0
   SambaStack Bundle Management
 ```
 
@@ -453,9 +453,17 @@ Multi-select with `Space` to toggle, `a` to select/deselect all at once. Configs
 | PEF name | Processor Executable Format identifier |
 | `⚡SD` | Speculative decoding PEF — requires a draft model |
 
+After confirming, the menu collapses to a single summary line:
+
+```
+  › Configurations for Meta-Llama-3.3-70B-Instruct: 6 selected
+```
+
 ```
   ✅ Added 6 config(s) for Meta-Llama-3.3-70B-Instruct
 ```
+
+> **Removing a model:** Select the model again, deselect all configs, then press **Done - Confirm Selection** with nothing checked. All entries for that model are removed from the bundle.
 
 ---
 
@@ -517,54 +525,69 @@ Choosing **← Go back** returns to model selection with all existing selections
   3.  Meta-Llama-3.1-8B-Instruct             SS:4k    BS:1  ⚠ no draft — will fail validation
   ...
 
-  YAML Preview  (BUNDLE_NAME = placeholder):
-  ────────────────────────────────────────
+  ── YAML Preview  (my-bundle = placeholder) ─────────────────
   apiVersion: sambanova.ai/v1alpha1
   kind: BundleTemplate
   ...
-  ────────────────────────────────────────
-
-  › Proceed with this bundle? [Y/n]  Esc cancel:
+  ────────────────────────────────────────────────────────────
 ```
 
 Rows marked `⚠ no draft — will fail validation` are SD PEFs whose SS/BS had no matching draft model config.
 
 ---
 
-#### Step 5 — Name the bundle
+#### Step 5 — Name the bundle (and optionally edit YAML)
 
 ```
-  › Bundle name  Esc cancel: bundle-4291
+  › Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu: bundle-4291
 ```
 
-A 4-digit suffix is generated automatically. The default prefix is `bundle`. Resource names:
+A 4-digit suffix is pre-populated. The default prefix is `bundle`. Resource names are derived from what you type:
 
-- `BundleTemplate` → `bt-bundle-4291`
-- `Bundle` → `b-bundle-4291`
+- `BundleTemplate` → `bt-<name>`
+- `Bundle` → `b-<name>`
+
+Any `b-` or `bt-` prefix you accidentally type is stripped automatically.
+
+**Hotkeys at this prompt:**
+
+| Key | Action |
+|---|---|
+| `e` | Open YAML in `$EDITOR` (fallback: `vi`) — edited YAML is read back; bundle name is auto-detected from the saved file |
+| `Esc` | Go back to Bundle Builder (all model selections preserved) |
+| `Enter` | Confirm name and continue |
+
+After confirming a name the final YAML (with real resource names) is displayed before the action menu.
 
 ---
 
 #### Step 6 — YAML actions
 
 ```
+  ── Final YAML  (bundle-4291) ────────────────────────────────
+  apiVersion: sambanova.ai/v1alpha1
+  kind: BundleTemplate
+  metadata:
+    name: bt-bundle-4291
+  ...
+  ────────────────────────────────────────────────────────────
+
   › What next?
 
-  ▶  ✏️   Edit in editor
+  ▶  ✅  Apply to cluster to validate
      💾  Save to file
-     ✅  Apply to cluster to validate
      ← Skip (deploy later)
      ✕  Cancel
 ```
 
 | Option | Description |
 |---|---|
-| ✏️ Edit in editor | Opens `$EDITOR` (fallback: `vi`) — changes read back automatically |
-| 💾 Save to file | Prompts for filename and writes YAML to `saved_artifacts/` |
 | ✅ Apply to cluster to validate | Applies YAML via `kubectl apply` and polls for validation status |
-| ✏️ Edit in editor | Opens `$EDITOR` (fallback: `vi`) — changes read back automatically |
-| 💾 Save to file | Saves YAML to `saved_artifacts/<bundle-name>.yaml` (directory created automatically); path is pre-populated and editable |
+| 💾 Save to file | Saves YAML to `saved_artifacts/<bundle-name>.yaml`; path is pre-populated and editable |
 | ← Skip (deploy later) | Exits without applying; use **Bundle Deployment** later |
 | ✕ Cancel | Exits without saving or applying |
+
+> You can save to file and then apply in the same session — the menu loops until you choose Skip or Cancel.
 
 ---
 
@@ -577,16 +600,14 @@ A 4-digit suffix is generated automatically. The default prefix is `bundle`. Res
     bundletemplate.sambanova.ai/bt-bundle-4291 created
     bundle.sambanova.ai/b-bundle-4291 created
 
-  Press q or Esc to stop watching (validation continues in background)
-
-  ⠋  Pending  [░░░░░░░░░░░░░░░░]  3s  ValidationInProgress
-  ⠸  Pending  [████░░░░░░░░░░░░]  9s  ValidationInProgress
-  ✔  Ready    ValidationSucceeded                           [21s]
+  ⠋  Pending  3s  ValidationInProgress
+  ⠸  Pending  9s  ValidationInProgress
+  ⠼  Running  12s  ValidationSucceeded
 
   ✅ Bundle Validation Succeeded!
 ```
 
-`kubectl apply` output is displayed immediately after applying so you can confirm the resource names. Validation polls every 3 s; press `q` or `Esc` to stop watching (validation continues on the cluster).
+`kubectl apply` output is shown immediately after applying so you can confirm the resource names. Validation polls every 3 s with a braille spinner. Press `q` or `Esc` to stop watching — validation continues on the cluster.
 
 ---
 
@@ -1017,7 +1038,7 @@ If cache pod logs show `[CRITICAL] Failed to access source storage`:
 
 <div align="center">
 
-*SambaWiz CLI v1.4.0 · Requires SambaStack Helm ≥ 0.5.6*
+*SambaWiz CLI v1.5.0 · Requires SambaStack Helm ≥ 0.5.6*
 
 ← Back to [Web UI docs (README.md)](README.md)
 

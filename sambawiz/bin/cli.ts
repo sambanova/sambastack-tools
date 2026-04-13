@@ -407,7 +407,7 @@ class Spinner {
   start(text: string) {
     this.idx = 0;
     this.timer = setInterval(() => {
-      process.stdout.write(`\r${chalk.cyan(this.frames[this.idx])}  ${chalk.reset(text)}   `);
+      process.stdout.write(`\r${chalk.magenta(this.frames[this.idx])}  ${chalk.reset(text)}   `);
       this.idx = (this.idx + 1) % this.frames.length;
     }, 80);
     return this;
@@ -416,7 +416,7 @@ class Spinner {
   succeed(text: string) { this._stop(); process.stdout.write(`  ${chalk.green('✔')}  ${chalk.green(text)}\n`); }
   fail(text: string)    { this._stop(); process.stdout.write(`  ${chalk.red('✖')}  ${chalk.red(text)}\n`); }
   warn(text: string)    { this._stop(); process.stdout.write(`  ${chalk.yellow('⚠')}  ${chalk.yellow(text)}\n`); }
-  info(text: string)    { this._stop(); process.stdout.write(`  ${chalk.cyan('ℹ')}  ${text}\n`); }
+  info(text: string)    { this._stop(); process.stdout.write(`  ${chalk.magenta('ℹ')}  ${text}\n`); }
 
   private _stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
@@ -497,9 +497,10 @@ async function select(_rl: any, message: string, choices: Choice[], big = false)
   menuHint();
 
   let selectedIndex = 0;
+
   const isRaw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
-  ensureKeypressEvents();
+  process.stdin.resume();
 
   const maxVisible = Math.max(5, (process.stdout.rows || 24) - 6);
   let scrollOffset = 0;
@@ -522,9 +523,9 @@ async function select(_rl: any, message: string, choices: Choice[], big = false)
       if (big) {
         lines.push('');
         lines.push(`${cursor}${label}`);
-        if (choice.hint) lines.push(`     ${chalk.gray(choice.hint)}`);
+        if (choice.hint) lines.push(`     ${chalk.reset(choice.hint)}`);
       } else {
-        const hint = choice.hint ? chalk.gray(`  ${choice.hint}`) : '';
+        const hint = choice.hint ? chalk.reset(`  ${choice.hint}`) : '';
         lines.push(`${cursor}${label}${hint}`);
       }
     });
@@ -536,35 +537,64 @@ async function select(_rl: any, message: string, choices: Choice[], big = false)
     lines.forEach(l => process.stdout.write(`${l}\n`));
   };
 
+  const headerLines = 4 + extraLines.length; // blank + header + hint + blank
+
   const clear = () => {
     readlineModule.moveCursor(process.stdout, 0, -lastDrawnCount);
+    readlineModule.clearScreenDown(process.stdout);
+  };
+
+  const clearAll = () => {
+    readlineModule.moveCursor(process.stdout, 0, -(lastDrawnCount + headerLines));
     readlineModule.clearScreenDown(process.stdout);
   };
 
   draw();
 
   return new Promise((resolve) => {
-    const onKey = (_str: any, key: any) => {
-      if (!key) return;
-      if (key.name === 'up')     { clear(); selectedIndex = (selectedIndex - 1 + choices.length) % choices.length; draw(); }
-      else if (key.name === 'down') { clear(); selectedIndex = (selectedIndex + 1) % choices.length; draw(); }
-      else if (key.name === 'return') {
-        process.stdin.removeListener('keypress', onKey);
-        process.stdin.setRawMode(isRaw);
+    const cleanup = (val: any, selectedName?: string) => {
+      clearAll();
+      process.stdin.removeListener('data', onData);
+      process.stdin.setRawMode(isRaw);
+      if (selectedName !== undefined) {
+        process.stdout.write(`\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(mainLabel)}: ${chalk.reset(selectedName)}\n`);
+      } else {
         process.stdout.write('\n');
-        resolve(choices[selectedIndex].value);
-      } else if (key.name === 'q' || key.name === 'escape') {
-        process.stdin.removeListener('keypress', onKey);
-        process.stdin.setRawMode(isRaw);
-        process.stdout.write('\n');
-        resolve(null);
-      } else if (key.ctrl && key.name === 'c') {
-        process.stdin.removeListener('keypress', onKey);
-        process.stdin.setRawMode(isRaw);
-        resolve(null);
       }
+      resolve(val);
     };
-    process.stdin.on('keypress', onKey);
+
+    const onData = (chunk: Buffer) => {
+      const code = chunk[0];
+
+      // Arrow keys (ESC [ A/B)
+      if (code === 0x1b && chunk[1] === 0x5b) {
+        if (chunk[2] === 0x41) {       // up arrow
+          clear(); selectedIndex = (selectedIndex - 1 + choices.length) % choices.length; draw();
+        } else if (chunk[2] === 0x42) { // down arrow
+          clear(); selectedIndex = (selectedIndex + 1) % choices.length; draw();
+        }
+        return;
+      }
+
+      // Bare ESC or ESC+null → go back
+      if (code === 0x1b && (chunk.length === 1 || (chunk.length === 2 && chunk[1] === 0x00))) {
+        cleanup(null); return;
+      }
+
+      // Enter
+      if (code === 0x0d || code === 0x0a) {
+        cleanup(choices[selectedIndex].value, choices[selectedIndex].name); return;
+      }
+
+      // q → go back
+      if (code === 0x71) { cleanup(null); return; }
+
+      // Ctrl+C
+      if (code === 0x03) { cleanup(null); return; }
+    };
+
+    process.stdin.prependListener('data', onData);
   });
 }
 
@@ -583,8 +613,8 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
     selectAllItem,
     ...choices.slice(insertAt),
   ];
-  // Regular choices shift by +1 if selectAll was inserted before them
-  const checked = new Set<number>(preCheckedIndices ? Array.from(preCheckedIndices).map(i => i + 1) : []);
+  // Shift pre-checked indices: only items at or after the insertion point move by +1
+  const checked = new Set<number>(preCheckedIndices ? Array.from(preCheckedIndices).map(i => i >= insertAt ? i + 1 : i) : []);
 
   // Indices (into workChoices) that are regular toggleable items
   const regularIndices = workChoices
@@ -594,11 +624,20 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
   let selectedIndex = 0;
   const isRaw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
+  process.stdin.resume();
   ensureKeypressEvents();
 
   const maxVisible = Math.max(5, (process.stdout.rows || 24) - 6);
   let scrollOffset = 0;
   let lastDrawnCount = 0;
+  const msHeaderLines = 4; // \n + header + hint + \n
+
+  const msMainLabel = message.split('\n')[0];
+
+  const clearAll = () => {
+    readlineModule.moveCursor(process.stdout, 0, -(lastDrawnCount + msHeaderLines));
+    readlineModule.clearScreenDown(process.stdout);
+  };
 
   const draw = () => {
     if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
@@ -660,18 +699,26 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
         if (checked.has(selectedIndex)) checked.delete(selectedIndex); else checked.add(selectedIndex);
         clear(); draw();
       } else if (key.name === 'return') {
+        clearAll();
         process.stdin.removeListener('keypress', onKey);
         process.stdin.setRawMode(isRaw);
-        process.stdout.write('\n');
         const sv = workChoices[selectedIndex].value;
-        if (sv === 'back') resolve([sv]);
-        else resolve(Array.from(checked).filter(i => workChoices[i]?.value !== '__selectAll__').map(i => workChoices[i].value));
+        if (sv === 'back') {
+          process.stdout.write('\n');
+          resolve([sv]);
+        } else {
+          const result = Array.from(checked).filter(i => workChoices[i]?.value !== '__selectAll__').map(i => workChoices[i].value);
+          process.stdout.write(`\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(msMainLabel)} ${chalk.reset(`${result.length} selected`)}\n`);
+          resolve(result);
+        }
       } else if (key.name === 'q' || key.name === 'escape') {
+        clearAll();
         process.stdin.removeListener('keypress', onKey);
         process.stdin.setRawMode(isRaw);
         process.stdout.write('\n');
         resolve([]);
       } else if (key.ctrl && key.name === 'c') {
+        clearAll();
         process.stdin.removeListener('keypress', onKey);
         process.stdin.setRawMode(isRaw);
         resolve([]);
@@ -684,10 +731,12 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
 // ─── input() / confirm() ─────────────────────────────────────────────────────
 
 // Sentinel returned when user presses Esc during an input() prompt
-const ESC = '\x1b';
+const ESC  = '\x1b';
+const EDIT = '\x01EDIT\x01';  // sentinel returned by input() hotkey for 'e'
 
-async function input(_rl: any, message: string, defaultValue = ''): Promise<string> {
-  const prompt = `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)}  ${chalk.gray('Esc cancel')}: `;
+async function input(_rl: any, message: string, defaultValue = '', hint = 'Esc cancel', hotkeys?: Record<string, string>): Promise<string> {
+  const hintStr = hint ? `  ${chalk.reset(hint)}` : '';
+  const prompt = `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)}${hintStr}: `;
   process.stdout.write(prompt);
 
   // Save and remove ALL existing stdin listeners so readline cannot double-echo
@@ -761,6 +810,11 @@ async function input(_rl: any, message: string, defaultValue = ''): Promise<stri
 
       } else if (code >= 0x20) {                           // Printable character
         const ch = chunk.toString('utf8');
+        // Hotkey: intercept single char when buffer is untouched (no echo, returns sentinel)
+        if (hotkeys && buffer === defaultValue && hotkeys[ch] !== undefined) {
+          cleanup(hotkeys[ch]);
+          return;
+        }
         buffer = buffer.slice(0, cursor) + ch + buffer.slice(cursor);
         cursor += ch.length;
         process.stdout.write(ch);
@@ -800,7 +854,7 @@ async function addEnvironmentMenu(rl: any) {
     { name: chalk.green('➕  Add new environment'), value: 'add' },
     ...allEnvs.map(e => {
       const isCurrent = e === appConfig.currentKubeconfig;
-      return { name: isCurrent ? `${chalk.green('●')}  ${chalk.bold(e)}  ${chalk.cyan('← active')}` : `○  ${e}`, value: e };
+      return { name: isCurrent ? `${chalk.green('●')}  ${chalk.bold(e)}  ${chalk.green('← active')}` : `○  ${e}`, value: e };
     }),
     { name: chalk.reset('← Back'), value: 'back' },
   ];
@@ -816,7 +870,7 @@ async function addEnvironmentMenu(rl: any) {
     if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
 
     // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
-    process.stdout.write(chalk.gray('\n  Paste the base64-encoded kubeconfig or enter a file path.\n  The file will be saved as kubeconfigs/kubeconfig-' + name + '.yaml\n\n'));
+    process.stdout.write(chalk.reset('\n  Paste the base64-encoded kubeconfig or enter a file path.\n  The file will be saved as kubeconfigs/kubeconfig-' + name + '.yaml\n\n'));
     const kubeconfigInput = await input(rl, '2/6  Kubeconfig (base64 or file path)');
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
@@ -951,7 +1005,7 @@ async function addEnvironmentMenu(rl: any) {
     const freshConfig = requireJson(CONFIG_PATH);
     const isCurrent   = envName === freshConfig.currentKubeconfig;
     const actionChoices: Choice[] = [];
-    if (!isCurrent) actionChoices.push({ name: chalk.cyan('⚡  Activate'), value: 'activate' });
+    if (!isCurrent) actionChoices.push({ name: chalk.yellow('⚡  Activate'), value: 'activate' });
     actionChoices.push({ name: '🔍  Validate',         value: 'validate' });
     actionChoices.push({ name: '✏️   Edit',             value: 'edit' });
     actionChoices.push({ name: chalk.red('🗑️   Delete'), value: 'delete' });
@@ -1036,7 +1090,9 @@ async function addEnvironmentMenu(rl: any) {
 // ─── startCli() ──────────────────────────────────────────────────────────────
 
 async function startCli() {
-  const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout });
+  // terminal:false disables readline's built-in echo/line-editing so it doesn't
+  // interfere with our raw-mode input() / select() handlers
+  const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
 
   // ── Instance lock — only one CLI allowed at a time ───────────────────────────
   try {
@@ -1248,7 +1304,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
         process.stdout.write(chalk.red(`\n  The installed SambaStack Helm chart version (${chartVer}) is older than the minimum required version (${minVer}).\n  Please upgrade your SambaStack installation.\n\n`));
         allPassed = false;
       } else {
-        spinner.succeed(`SambaStack  ${chalk.reset(chartVer)}${minVer ? chalk.gray(`  (min: ${minVer})`) : ''}`);
+        spinner.succeed(`SambaStack  ${chalk.reset(chartVer)}${minVer ? chalk.reset(`  (min: ${minVer})`) : ''}`);
       }
     }
   } catch (e: any) {
@@ -1481,7 +1537,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
           const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
           try {
             process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+            try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
             execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+            try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
             finalYaml = readFileSync(tmp, 'utf-8');
             try { execSync(`rm "${tmp}"`); } catch {}
             yamlBox('Updated YAML', finalYaml);
@@ -1492,9 +1550,11 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         } else if (act === 'save') {
           const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
           if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
-          const fname = await input(rl, 'Filename', path.join(saveDir, bundleName + '.yaml'));
-          if (fname && fname !== ESC) {
-            try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+          const shortDefault = `saved_artifacts/${bundleName}.yaml`;
+          const fnameInput = await input(rl, 'Filename', shortDefault);
+          if (fnameInput && fnameInput !== ESC) {
+            const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
+            try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
           }
         } else if (act === 'validate') {
           const m  = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
@@ -1522,18 +1582,28 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
             applyOut1.trim().split('\n').forEach((line: string) => process.stdout.write(chalk.reset(`  ${line}\n`)));
             process.stdout.write('\n');
           }
-          const maxAttempts = 120; const pollInterval = 5000; let validated = false;
-          for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            await new Promise(r => setTimeout(r, pollInterval));
+          const spinFrames2 = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+          let   spinIdx2    = 0;
+          let   validated   = false;
+          const startMs2    = Date.now();
+          const maxWaitMs2  = 600_000; // 10 minutes
+
+          while ((Date.now() - startMs2) < maxWaitMs2) {
+            await new Promise(r => setTimeout(r, 3000));
+            const elapsed2   = Math.round((Date.now() - startMs2) / 1000);
+            const elapsedMin2 = Math.floor(elapsed2 / 60);
+            const elapsedSec2 = elapsed2 % 60;
+            const elapsedStr2 = elapsedMin2 > 0 ? `${elapsedMin2}m ${elapsedSec2}s` : `${elapsed2}s`;
+            const spin2      = chalk.magenta(spinFrames2[spinIdx2++ % spinFrames2.length]);
+
             try {
               const st   = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
               const conds = st.status?.conditions || [];
               const phase = st.status?.phase || 'Pending';
-              const elapsed = attempt * (pollInterval / 1000);
-              process.stdout.write(`\r  ${chalk.cyan('◉')}  ${chalk.bold(phase)}  ${chalk.reset(`[${elapsed}s]`)}                    `);
+
               if (conds.length > 0) {
                 const latest = conds[conds.length - 1];
-                process.stdout.write(`\r  ${chalk.cyan('◉')}  ${chalk.bold(phase)}  ${chalk.reset(`${latest.reason}: ${latest.message}`)}  ${chalk.reset(`[${elapsed}s]`)}   `);
+                process.stdout.write(`\r  ${spin2}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr2)}  ${chalk.reset(latest.reason)}                    `);
                 if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
                   process.stdout.write('\n'); successMsg('Bundle Validation Succeeded!');
                   validated = true; break;
@@ -1542,9 +1612,11 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
                   printValidationErrors(conds);
                   validated = true; break;
                 }
+              } else {
+                process.stdout.write(`\r  ${spin2}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr2)}                    `);
               }
             } catch {
-              process.stdout.write(`\r  ${chalk.yellow('⠋')}  Waiting for bundle resource...  ${chalk.reset(`[${attempt * pollInterval / 1000}s]`)}   `);
+              process.stdout.write(`\r  ${spin2}  Waiting for bundle resource...  ${chalk.reset(elapsedStr2)}                    `);
             }
           }
           if (!validated) { process.stdout.write('\n'); warnMsg(`Validation timeout — check: kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o yaml`); }
@@ -1635,7 +1707,16 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     });
 
     const selectedCombos = await multiSelect(rl, `Configurations for ${chalk.bold(selectedModel)}:`, comboChoices, preChecked);
-    if (!selectedCombos || selectedCombos.length === 0 || selectedCombos.includes('back')) continue;
+    if (!selectedCombos || selectedCombos.includes('back')) continue;
+
+    // User confirmed with zero selections → remove this model entirely
+    if (selectedCombos.length === 0) {
+      const keep = allSelections.filter((s: BundleSelection) => s.model !== selectedModel && s.draftFor !== selectedModel);
+      allSelections.length = 0;
+      allSelections.push(...keep);
+      successMsg(`Removed all configs for ${selectedModel}`);
+      continue;
+    }
 
     // Remove existing entries for this model (and its draft) before adding new selection
     const keep = allSelections.filter((s: BundleSelection) => s.model !== selectedModel && s.draftFor !== selectedModel);
@@ -1664,7 +1745,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       process.stdout.write(chalk.reset(`     Selected configs: ${selectedCombos.map((c: any) => `SS:${c.ss} BS:${c.bs}`).join(', ')}\n\n`));
 
       const draftChoices: Choice[] = [
-        { name: chalk.cyan('↩  Skip (no draft model)'), value: 'skip' },
+        { name: chalk.reset('↩  Skip (no draft model)'), value: 'skip' },
         ...availableModels.filter(m => m !== selectedModel).map(m => ({ name: m, value: m })),
         { name: chalk.reset('← Back'), value: 'back' },
       ];
@@ -1722,7 +1803,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     sdWithoutDraft.forEach(s => process.stdout.write(chalk.yellow(`     • ${s.pef}  (${s.model}  SS:${s.ss}  BS:${s.bs})\n`)));
     process.stdout.write(chalk.reset('     Either go back and assign a draft model, or the bundle will fail with ValidationFailed.\n\n'));
     const sdAction = await select(rl, 'How to proceed?', [
-      { name: chalk.cyan('← Go back to Bundle Builder  (re-edit selections)'), value: 'back'     },
+      { name: chalk.reset('← Go back to Bundle Builder  (re-edit selections)'), value: 'back'     },
       { name: chalk.yellow('▶ Continue anyway  (bundle may fail validation)'),  value: 'continue' },
       { name: chalk.red('✕  Cancel'),                                           value: 'cancel'   },
     ]);
@@ -1740,7 +1821,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     const warn     = (isSD && !hasDraft) ? chalk.yellow('  ⚠ no draft — will fail validation') : '';
     process.stdout.write(
       `  ${chalk.reset(`${i+1}.`)} ${chalk.reset.bold(sel.model.padEnd(38))} ` +
-      `${chalk.cyan(`SS:${sel.ss}`)}  ${chalk.cyan(`BS:${sel.bs}`)}${warn}\n`
+      `${chalk.reset.bold(`SS:${sel.ss}`)}  ${chalk.reset.bold(`BS:${sel.bs}`)}${warn}\n`
     );
   });
   process.stdout.write('\n');
@@ -1751,37 +1832,88 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     selections: allSelections as BundleSelection[],
     checkpointMapping,
     checkpointsDir: appConfig.checkpointsDir,
-    bundleName: 'BUNDLE_NAME',
+    bundleName: 'my-bundle',
   });
 
-  yamlBox('YAML Preview  (BUNDLE_NAME = placeholder)', previewYaml);
+  // Extract base bundle name from YAML (strips b- prefix from Bundle metadata.name)
+  const extractBundleName = (yaml: string): string => {
+    const m = yaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
+    return m ? m[1].replace(/^b-/, '') : '';
+  };
 
-  const proceed = await confirm(rl, 'Proceed with this bundle?');
-  if (!proceed) return;
+  let workingYaml = previewYaml;
+  yamlBox('YAML Preview  (my-bundle = placeholder)', workingYaml);
 
-  const bundleName = await input(rl, 'Bundle name', `bundle-${Date.now().toString().slice(-4)}`);
-  if (!bundleName || bundleName === ESC) return;
-  if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(bundleName)) {
-    errorMsg('Bundle name must be lowercase alphanumeric and hyphens only, 2–63 chars, start/end with a letter or digit.');
-    return;
+  // Name prompt:
+  //   • pre-populated from YAML (updates if user edits YAML via 'e')
+  //   • e    → open YAML in editor; name auto-updates from saved YAML
+  //   • Esc  → back to Bundle Builder (selections preserved)
+  //   • invalid name → re-prompt
+  let bundleName = '';
+  let suggestedName = extractBundleName(workingYaml);
+  while (true) {
+    const nameInput = await input(rl, chalk.yellow.bold('Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu'), suggestedName, '', { e: EDIT });
+
+    if (!nameInput || nameInput === ESC) continue builderLoop;
+
+    if (nameInput === EDIT) {
+      const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
+      const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+      writeFileSync(tmp, workingYaml);
+      try {
+        process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+        try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+        execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+        try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+        workingYaml = readFileSync(tmp, 'utf-8');
+        try { execSync(`rm "${tmp}"`); } catch {}
+        suggestedName = extractBundleName(workingYaml);
+        yamlBox('Updated YAML', workingYaml);
+      } catch (e: any) {
+        errorMsg(`Editor error: ${e.message}`);
+        try { execSync(`rm "${tmp}"`); } catch {}
+      }
+      continue;
+    }
+
+    // Strip accidental b- / bt- prefix (user may copy it from the YAML preview)
+    const cleanedName = nameInput.replace(/^bt-/, '').replace(/^b-/, '');
+    if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(cleanedName)) {
+      errorMsg('Name must be lowercase letters, numbers and hyphens only, 2–63 chars, and start/end with a letter or digit. Please try again.');
+      continue;
+    }
+    bundleName = cleanedName;
+    break;
   }
-  const { yaml: finalYamlBuilt, bundleManifestName: bName } = buildBundleYaml({
-    selections: allSelections as BundleSelection[],
-    checkpointMapping,
-    checkpointsDir: appConfig.checkpointsDir,
-    bundleName,
-  });
-  let finalYaml = finalYamlBuilt;
+
+  // Build final YAML — if user edited the preview, substitute name; otherwise rebuild cleanly
+  let finalYaml = '';
+  let activeBName = '';
+  if (workingYaml !== previewYaml) {
+    // Single-pass replacement to avoid double-substitution when bundleName itself
+    // contains "my-bundle" (e.g. "test-my-bundle" → would corrupt on a 3rd pass)
+    finalYaml = workingYaml.replace(/bt-my-bundle|b-my-bundle|my-bundle/g, (m) =>
+      m === 'bt-my-bundle' ? `bt-${bundleName}` : m === 'b-my-bundle' ? `b-${bundleName}` : bundleName
+    );
+    activeBName = `b-${bundleName}`;
+  } else {
+    const { yaml: builtYaml, bundleManifestName: builtBName } = buildBundleYaml({
+      selections: allSelections as BundleSelection[],
+      checkpointMapping,
+      checkpointsDir: appConfig.checkpointsDir,
+      bundleName,
+    });
+    finalYaml   = builtYaml;
+    activeBName = builtBName;
+  }
 
   yamlBox(`Final YAML  (${bundleName})`, finalYaml);
 
-  let activeBName = bName;
   let shouldApply = false;
 
   while (true) {
     const act = await select(rl, 'What next?', [
       { name: '✅  Apply to cluster to validate',   value: 'validate' },
-      { name: '✏️   Edit in editor',               value: 'edit' },
       { name: '💾  Save to file',                   value: 'save' },
       { name: chalk.reset('← Skip (deploy later)'), value: 'skip' },
       { name: chalk.red('✕  Cancel'),               value: 'cancel' },
@@ -1789,31 +1921,19 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
     if (!act || act === 'cancel') return;
 
-    if (act === 'edit') {
-      const tmp = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
-      writeFileSync(tmp, finalYaml);
-      const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
-      try {
-        process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
-        execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
-        finalYaml = readFileSync(tmp, 'utf-8');
-        try { execSync(`rm "${tmp}"`); } catch {}
-        yamlBox('Updated YAML', finalYaml);
-      } catch (e: any) {
-        errorMsg(`Editor error: ${e.message}`);
-        try { execSync(`rm "${tmp}"`); } catch {}
-      }
-    } else if (act === 'save') {
+    if (act === 'save') {
       const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
       if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
-      const fname = await input(rl, 'Filename', path.join(saveDir, `${bundleName}.yaml`));
-      if (fname && fname !== ESC) {
-        try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+      const shortDefault = `saved_artifacts/${bundleName}.yaml`;
+      const fnameInput = await input(rl, 'Filename', shortDefault);
+      if (fnameInput && fnameInput !== ESC) {
+        const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
+        try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
       }
     } else if (act === 'validate') {
       // Re-derive bundle name in case user edited the YAML
       const m = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-      activeBName = m ? m[1] : bName;
+      activeBName = m ? m[1] : activeBName;
       shouldApply = true;
       break;
     } else if (act === 'skip') {
@@ -1842,7 +1962,6 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     // Derive BundleTemplate name: b-xxx → bt-xxx
     const activeBtName = activeBName.replace(/^b-/, 'bt-');
 
-    process.stdout.write(chalk.reset('  Press q or Esc to stop watching (validation continues in background)\n\n'));
 
     // Enable keypress so user can cancel
     const valIsRaw = process.stdin.isRaw;
@@ -1869,7 +1988,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       const elapsedMin = Math.floor(elapsed / 60);
       const elapsedSec = elapsed % 60;
       const elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsed}s`;
-      const spin       = chalk.cyan(spinFrames[spinIdx++ % spinFrames.length]);
+      const spin       = chalk.magenta(spinFrames[spinIdx++ % spinFrames.length]);
 
       try {
         const st    = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
@@ -1889,15 +2008,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
           } catch {}
         }
 
-        // Progress bar (fills over 10 minutes max)
-        const barWidth  = 20;
-        const progress  = Math.min(elapsed / 600, 1);
-        const filled    = Math.round(progress * barWidth);
-        const bar       = chalk.cyan('█'.repeat(filled)) + chalk.reset('░'.repeat(barWidth - filled));
-
         if (conds.length > 0) {
           const latest = conds[conds.length - 1];
-          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  [${bar}]  ${chalk.reset(elapsedStr)}  ${chalk.reset(latest.reason)}                    `);
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}  ${chalk.reset(latest.reason)}                    `);
 
           if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
             process.stdout.write('\n');
@@ -1909,7 +2022,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
             validated = true; validationFailed = true; break;
           }
         } else {
-          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  [${bar}]  ${chalk.reset(elapsedStr)}${chalk.reset(btLine)}                    `);
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}${chalk.reset(btLine)}                    `);
         }
       } catch {
         process.stdout.write(`\r  ${spin}  Waiting for bundle resource...  ${chalk.reset(elapsedStr)}                    `);
@@ -1945,7 +2058,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       }
       fixChoices.push(
         { name: '✏️   Edit YAML in editor and re-apply',             value: 'edit'    },
-        { name: chalk.cyan('← Go back to Bundle Builder  (re-edit selections)'), value: 'builder' },
+        { name: chalk.reset('← Go back to Bundle Builder  (re-edit selections)'), value: 'builder' },
         { name: `🗑️   Delete ${activeBName} from cluster`,           value: 'delete'  },
         { name: chalk.reset('← Back to main menu'),                  value: 'back'    },
       );
@@ -1957,8 +2070,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         let fixedYaml = finalYaml;
         for (const pef of badPefs) {
           // Remove the config block that references this PEF (the - pef: line and any following spec_decoding lines)
+          const safePef = pef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/-/g, '\\-');
           fixedYaml = fixedYaml.replace(
-            new RegExp(`\\s*- pef: ${pef.replace(/[-]/g, '\\-')}:[^\\n]*(?:\\n\\s+spec_decoding:[^\\n]*(?:\\n\\s+[^\\n]+)*)?`, 'g'),
+            new RegExp(`\\s*- pef: ${safePef}:[^\\n]*(?:\\n\\s+spec_decoding:[^\\n]*(?:\\n\\s+[^\\n]+)*)?`, 'g'),
             ''
           );
         }
@@ -1979,7 +2093,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         writeFileSync(tmp, finalYaml);
         try {
           process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+          try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+          try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           finalYaml = readFileSync(tmp, 'utf-8');
           try { execSync(`rm "${tmp}"`); } catch {}
         } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { execSync(`rm "${tmp}"`); } catch {} }
@@ -2050,14 +2166,14 @@ async function bundleDeploymentMenu(rl: any, namespace: string) {
         items.forEach((i: any) => {
           const phase = i.status?.phase || '';
           const icon  = phase === 'Running' || phase === 'Deployed' ? chalk.green('●') : phase === 'Pending' ? chalk.yellow('◌') : chalk.red('○');
-          process.stdout.write(`  ${icon}  ${chalk.reset(i.metadata.name)}${phase ? `  ${chalk.gray(phase)}` : ''}\n`);
+          process.stdout.write(`  ${icon}  ${chalk.reset(i.metadata.name)}${phase ? `  ${chalk.reset(phase)}` : ''}\n`);
         });
         process.stdout.write('\n');
       } else {
-        process.stdout.write(chalk.gray('  No deployments found.\n\n'));
+        process.stdout.write(chalk.reset('  No deployments found.\n\n'));
       }
     } catch {
-      process.stdout.write(chalk.gray('  (Could not fetch deployments)\n\n'));
+      process.stdout.write(chalk.reset('  (Could not fetch deployments)\n\n'));
     }
 
     const action = await select(rl, 'Bundle Deployment:', [
@@ -2471,7 +2587,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
     let exitEmbed = false;
     while (!exitEmbed) {
-      const userInput = await input(rl, chalk.cyan.bold('Text to embed'));
+      const userInput = await input(rl, chalk.reset.bold('Text to embed'));
       if (userInput === ESC || ['exit', 'quit', '/back', 'q'].includes(userInput.toLowerCase())) {
         process.stdout.write(chalk.reset('\n  Returning to menu...\n\n'));
         exitEmbed = true;
@@ -2535,7 +2651,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
   let shownCodeExamples = false;
 
   while (!exitChat) {
-    const userInput = await input(rl, chalk.cyan.bold('You'));
+    const userInput = await input(rl, chalk.green.bold('You'));
     if (userInput === ESC || ['exit', 'quit', '/back', 'q'].includes(userInput.toLowerCase())) {
       process.stdout.write(chalk.reset('\n  Returning to menu...\n\n'));
       exitChat = true;
@@ -2591,7 +2707,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           if (tps)      parts.push(chalk.green.bold(`${tps} t/s`));
           if (totalSec) parts.push(chalk.reset(`${totalSec.toFixed(2)}s total`));
           if (ttft)     parts.push(chalk.reset(`${ttft.toFixed(2)}s to first token`));
-          process.stdout.write(`   ${chalk.gray('·')}   ${parts.join(chalk.gray('   ·   '))}`);
+          process.stdout.write(`   ${chalk.reset('·')}   ${parts.join(chalk.reset('   ·   '))}`);
         }
         process.stdout.write('\n');
 
@@ -2687,7 +2803,9 @@ async function installSambaStackMenu(rl: any, namespace: string) {
     writeFileSync(tmp, installYaml);
     try {
       process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+      try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
       execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+      try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
       installYaml = readFileSync(tmp, 'utf-8');
       try { execSync(`rm "${tmp}"`); } catch {}
       yamlBox('Updated YAML', installYaml);
