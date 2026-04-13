@@ -86,3 +86,6 @@ app/data/checkpoint_mapping.json
 
 # custom configurations and files
 custom/
+
+# scratch / response files
+response.txt

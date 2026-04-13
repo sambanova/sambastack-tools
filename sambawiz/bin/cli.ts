@@ -14,11 +14,12 @@ import readlinePromises from 'readline/promises';
 // ─── Inlined from cli-utils.ts ───────────────────────────────────────────────
 
 interface BundleSelection {
-  model:   string;
-  ss:      string;
-  bs:      string;
-  pef:     string;
-  version: string;
+  model:    string;
+  ss:       string;
+  bs:       string;
+  pef:      string;
+  version:  string;
+  draftFor?: string;  // set when this selection is a draft model for another model
 }
 
 interface PodInfo {
@@ -50,6 +51,13 @@ function generateCheckpointKey(modelName: string): string {
     .replace(/^_+|_+$/g, '') + '_CKPT';
 }
 
+/** Mirrors UI's generateVisionEmbeddingCheckpointName — strips _INSTRUCT suffix, adds _VISION_EMBD_CKPT */
+function generateVisionEmbeddingCkptKey(modelName: string): string {
+  const base = modelName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (base.endsWith('_INSTRUCT')) return base.replace(/_INSTRUCT$/, '') + '_VISION_EMBD_CKPT';
+  return base + '_VISION_EMBD_CKPT';
+}
+
 function getDeploymentStatus(cachePod: PodInfo | null, defaultPod: PodInfo | null): DeploymentStatus {
   if (!cachePod && !defaultPod) return 'Not Deployed';
   const cacheReady   = cachePod   ? cachePod.ready   === cachePod.total   : false;
@@ -79,9 +87,27 @@ function classifyPod(podName: string): 'cache' | 'default' | 'other' {
 
 interface BuildBundleYamlOptions {
   selections:        BundleSelection[];
-  checkpointMapping: Record<string, { path: string }>;
+  checkpointMapping: Record<string, { path: string; vision_embedding_checkpoint?: string }>;
   checkpointsDir:    string;
   bundleName:        string;
+}
+
+/** Format Kubernetes bundle validation errors the same way the UI does */
+function printValidationErrors(conds: any[]): void {
+  const errCond = conds.find((c: any) => c.reason === 'ValidationFailed' || (c.status === 'False' && c.message));
+  const msg = errCond?.message || conds.map((c: any) => c.message).filter(Boolean).join('\n');
+
+  process.stdout.write(chalk.red.bold('Validation failed with the following errors:\n'));
+
+  if (msg) {
+    const lines = msg.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
+    lines.forEach((line: string) => {
+      process.stdout.write(chalk.red(`${line}\n`));
+    });
+  } else {
+    conds.forEach((c: any) => process.stdout.write(chalk.red(`${c.type}: ${c.reason} — ${c.message}\n`)));
+  }
+  process.stdout.write('\n');
 }
 
 function buildBundleYaml(opts: BuildBundleYamlOptions): { yaml: string; templateName: string; bundleManifestName: string } {
@@ -92,17 +118,107 @@ function buildBundleYaml(opts: BuildBundleYamlOptions): { yaml: string; template
   const bmod: Record<string, string> = {};
   const ckpt: Record<string, string> = {};
 
+  // Build lookup: targetModel+ss+bs → draftModelName
+  const draftLookup: Record<string, string> = {};
   for (const sel of selections) {
-    const ck = generateCheckpointKey(sel.model);
-    const cd = checkpointMapping[sel.model];
-    // Extract speculative decoding k-value from PEF name, e.g. "...-sd9-..." → 9
-    const sdMatch = sel.pef.match(/-sd(\d+)(?:-|$)/);
-    const sdLine  = sdMatch ? `\n            spec_decoding: ${sdMatch[1]}` : '';
-    const expert = `        ${sel.ss}:\n          configs:\n          - pef: ${sel.pef}:${sel.version}${sdLine}\n`;
-    if (tmpl[sel.model]) tmpl[sel.model] += expert;
-    else                 tmpl[sel.model] = `      experts:\n${expert}`;
-    bmod[sel.model] = `    ${sel.model}:\n      checkpoint: ${ck}\n      template: ${sel.model}\n`;
+    if (sel.draftFor) {
+      draftLookup[`${sel.draftFor}|${sel.ss}|${sel.bs}`] = sel.model;
+    }
+  }
+
+  // Group non-draft selections by model → SS (mirrors UI bundle-yaml-generator.ts expert grouping)
+  const modelSsGroups: Record<string, Record<string, BundleSelection[]>> = {};
+  for (const sel of selections) {
+    if (sel.draftFor) continue;
+    if (!modelSsGroups[sel.model]) modelSsGroups[sel.model] = {};
+    if (!modelSsGroups[sel.model][sel.ss]) modelSsGroups[sel.model][sel.ss] = [];
+    modelSsGroups[sel.model][sel.ss].push(sel);
+  }
+
+  for (const [model, ssGroups] of Object.entries(modelSsGroups)) {
+    const cd  = checkpointMapping[model];
+    const ck  = generateCheckpointKey(model);
     const dir = checkpointsDir.endsWith('/') ? checkpointsDir : checkpointsDir + '/';
+    let expertBlock = '      experts:\n';
+
+    for (const [ss, configs] of Object.entries(ssGroups)) {
+      // Split DYT PEFs (multi-BS, use dynamic_dims) from regular PEFs (single BS)
+      const dytByPef: Record<string, { pef: string; version: string; bsValues: number[] }> = {};
+      const regularConfigs: BundleSelection[] = [];
+      for (const c of configs) {
+        if (/-dyt-/.test(c.pef)) {
+          if (!dytByPef[c.pef]) dytByPef[c.pef] = { pef: c.pef, version: c.version, bsValues: [] };
+          dytByPef[c.pef].bsValues.push(parseInt(c.bs, 10));
+        } else {
+          regularConfigs.push(c);
+        }
+      }
+
+      expertBlock += `        ${ss}:\n          configs:\n`;
+
+      // DYT PEFs: one entry per PEF with dynamic_dims (matches UI bundle-yaml-generator.ts)
+      for (const { pef, version, bsValues } of Object.values(dytByPef)) {
+        expertBlock += `          - dynamic_dims:\n              batch_size:\n                values:\n`;
+        bsValues.sort((a, b) => a - b).forEach(bs => { expertBlock += `                - ${bs}\n`; });
+        expertBlock += `            pef: ${pef}:${version}\n`;
+      }
+
+      // Regular PEFs: use default_config_values when all have draft + multiple configs
+      const allHaveDraft = regularConfigs.length > 0 && regularConfigs.every(c => !!draftLookup[`${c.model}|${c.ss}|${c.bs}`]);
+      const hasMultiple  = regularConfigs.length > 1;
+      const firstDraft   = regularConfigs.length > 0 ? draftLookup[`${regularConfigs[0].model}|${regularConfigs[0].ss}|${regularConfigs[0].bs}`] : undefined;
+
+      if (allHaveDraft && hasMultiple && firstDraft) {
+        for (const c of regularConfigs) {
+          expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
+        }
+        expertBlock += `          default_config_values:\n            spec_decoding:\n              draft_model: ${firstDraft}\n`;
+      } else {
+        for (const c of regularConfigs) {
+          const cfgDraft = draftLookup[`${c.model}|${c.ss}|${c.bs}`];
+          expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
+          if (cfgDraft) {
+            expertBlock += `            spec_decoding:\n              draft_model: ${cfgDraft}\n`;
+          }
+        }
+      }
+    }
+
+    tmpl[model] = expertBlock;
+    ckpt[ck]    = `    ${ck}:\n      source: ${dir}${cd.path}\n      toolSupport: true\n`;
+    // Vision embedding checkpoint (Llama-4-Maverick, gemma-3-12b-it, etc.)
+    const vck = cd.vision_embedding_checkpoint ? generateVisionEmbeddingCkptKey(model) : null;
+    if (vck && cd.vision_embedding_checkpoint) {
+      ckpt[vck] = `    ${vck}:\n      source: ${dir}${cd.vision_embedding_checkpoint}\n      toolSupport: true\n`;
+    }
+    let modelEntry = `    ${model}:\n      checkpoint: ${ck}\n      template: ${model}\n`;
+    if (vck) modelEntry += `      vision_embedding_checkpoint: ${vck}\n`;
+    bmod[model] = modelEntry;
+  }
+
+  // Draft models also need their own template entries and checkpoints
+  // Group by model → SS to avoid duplicate SS keys (same fix as non-draft loop above)
+  const draftSsGroups: Record<string, Record<string, BundleSelection[]>> = {};
+  for (const sel of selections) {
+    if (!sel.draftFor) continue;
+    if (!draftSsGroups[sel.model]) draftSsGroups[sel.model] = {};
+    if (!draftSsGroups[sel.model][sel.ss]) draftSsGroups[sel.model][sel.ss] = [];
+    draftSsGroups[sel.model][sel.ss].push(sel);
+  }
+  for (const [draftModel, ssGroups] of Object.entries(draftSsGroups)) {
+    const cd  = checkpointMapping[draftModel];
+    const ck  = generateCheckpointKey(draftModel);
+    const dir = checkpointsDir.endsWith('/') ? checkpointsDir : checkpointsDir + '/';
+    if (!cd) continue;
+    let expertBlock = '      experts:\n';
+    for (const [ss, configs] of Object.entries(ssGroups)) {
+      expertBlock += `        ${ss}:\n          configs:\n`;
+      for (const c of configs) {
+        expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
+      }
+    }
+    if (!tmpl[draftModel]) tmpl[draftModel] = expertBlock;
+    if (!bmod[draftModel]) bmod[draftModel] = `    ${draftModel}:\n      checkpoint: ${ck}\n      template: ${draftModel}\n`;
     ckpt[ck] = `    ${ck}:\n      source: ${dir}${cd.path}\n      toolSupport: true\n`;
   }
 
@@ -454,12 +570,28 @@ async function select(_rl: any, message: string, choices: Choice[], big = false)
 
 // ─── multiSelect() ───────────────────────────────────────────────────────────
 
-async function multiSelect(_rl: any, message: string, choices: Choice[]): Promise<any[]> {
+async function multiSelect(_rl: any, message: string, choices: Choice[], preCheckedIndices?: Set<number>): Promise<any[]> {
   process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(message)}\n`);
-  process.stdout.write(chalk.reset('  Space toggle   Enter confirm   q / Esc to go back\n\n'));
+  process.stdout.write(chalk.reset('  Space toggle   a select all   Enter confirm   q / Esc to go back\n\n'));
+
+  // Insert "Select All" after the first 'finish' action item (so Done comes first, then Select All)
+  const selectAllItem: Choice = { name: chalk.bold('Select All / Deselect All'), value: '__selectAll__' };
+  const finishIdx = choices.findIndex(c => c.value === 'finish');
+  const insertAt  = finishIdx >= 0 ? finishIdx + 1 : 0;
+  const workChoices: Choice[] = [
+    ...choices.slice(0, insertAt),
+    selectAllItem,
+    ...choices.slice(insertAt),
+  ];
+  // Regular choices shift by +1 if selectAll was inserted before them
+  const checked = new Set<number>(preCheckedIndices ? Array.from(preCheckedIndices).map(i => i + 1) : []);
+
+  // Indices (into workChoices) that are regular toggleable items
+  const regularIndices = workChoices
+    .map((_, i) => i)
+    .filter(i => workChoices[i].value !== '__selectAll__' && workChoices[i].value !== 'back' && workChoices[i].value !== 'finish');
 
   let selectedIndex = 0;
-  const checked = new Set<number>();
   const isRaw = process.stdin.isRaw;
   process.stdin.setRawMode(true);
   ensureKeypressEvents();
@@ -472,23 +604,29 @@ async function multiSelect(_rl: any, message: string, choices: Choice[]): Promis
     if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
     else if (selectedIndex >= scrollOffset + maxVisible) scrollOffset = selectedIndex - maxVisible + 1;
 
-    const visible = choices.slice(scrollOffset, scrollOffset + maxVisible);
+    const visible = workChoices.slice(scrollOffset, scrollOffset + maxVisible);
     const lines: string[] = [];
 
     if (scrollOffset > 0) lines.push(chalk.reset(`   ↑ ${scrollOffset} more above`));
 
     visible.forEach((choice, i) => {
       const ri = scrollOffset + i;
-      const active   = ri === selectedIndex;
-      const isAction = choice.value === 'back' || choice.value === 'finish';
-      const cursor   = active ? chalk.hex(BRAND).bold(' ❯ ') : '   ';
-      let checkbox   = '';
-      if (!isAction) checkbox = checked.has(ri) ? chalk.green(' ◉  ') : chalk.reset(' ○  ');
+      const active      = ri === selectedIndex;
+      const isAction    = choice.value === 'back' || choice.value === 'finish';
+      const isSelectAll = choice.value === '__selectAll__';
+      const cursor      = active ? chalk.hex(BRAND).bold(' ❯ ') : '   ';
+      let checkbox      = '';
+      if (isSelectAll) {
+        const allChecked = regularIndices.length > 0 && regularIndices.every(j => checked.has(j));
+        checkbox = allChecked ? chalk.green(' ◉  ') : chalk.reset(' ○  ');
+      } else if (!isAction) {
+        checkbox = checked.has(ri) ? chalk.green(' ◉  ') : chalk.reset(' ○  ');
+      }
       const label = active ? chalk.hex(BRAND).bold(choice.name) : chalk.reset(choice.name);
       lines.push(`${cursor}${checkbox}${label}`);
     });
 
-    const remaining = choices.length - scrollOffset - maxVisible;
+    const remaining = workChoices.length - scrollOffset - maxVisible;
     if (remaining > 0) lines.push(chalk.reset(`   ↓ ${remaining} more below`));
 
     lastDrawnCount = lines.length;
@@ -500,15 +638,24 @@ async function multiSelect(_rl: any, message: string, choices: Choice[]): Promis
     readlineModule.clearScreenDown(process.stdout);
   };
 
+  const toggleAll = () => {
+    const allChecked = regularIndices.every(i => checked.has(i));
+    if (allChecked) regularIndices.forEach(i => checked.delete(i));
+    else regularIndices.forEach(i => checked.add(i));
+    clear(); draw();
+  };
+
   draw();
 
   return new Promise((resolve) => {
     const onKey = (_str: any, key: any) => {
       if (!key) return;
-      if (key.name === 'up')   { clear(); selectedIndex = (selectedIndex - 1 + choices.length) % choices.length; draw(); }
-      else if (key.name === 'down')  { clear(); selectedIndex = (selectedIndex + 1) % choices.length; draw(); }
+      if (key.name === 'up')   { clear(); selectedIndex = (selectedIndex - 1 + workChoices.length) % workChoices.length; draw(); }
+      else if (key.name === 'down')  { clear(); selectedIndex = (selectedIndex + 1) % workChoices.length; draw(); }
+      else if (key.name === 'a') { toggleAll(); }
       else if (key.name === 'space') {
-        const c = choices[selectedIndex];
+        const c = workChoices[selectedIndex];
+        if (c.value === '__selectAll__') { toggleAll(); return; }
         if (c.value === 'back' || c.value === 'finish') return;
         if (checked.has(selectedIndex)) checked.delete(selectedIndex); else checked.add(selectedIndex);
         clear(); draw();
@@ -516,9 +663,9 @@ async function multiSelect(_rl: any, message: string, choices: Choice[]): Promis
         process.stdin.removeListener('keypress', onKey);
         process.stdin.setRawMode(isRaw);
         process.stdout.write('\n');
-        const sv = choices[selectedIndex].value;
+        const sv = workChoices[selectedIndex].value;
         if (sv === 'back') resolve([sv]);
-        else resolve(Array.from(checked).map(i => choices[i].value));
+        else resolve(Array.from(checked).filter(i => workChoices[i]?.value !== '__selectAll__').map(i => workChoices[i].value));
       } else if (key.name === 'q' || key.name === 'escape') {
         process.stdin.removeListener('keypress', onKey);
         process.stdin.setRawMode(isRaw);
@@ -1320,9 +1467,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
       while (true) {
         const act = await select(rl, 'What next?', [
+          { name: '✅  Apply to cluster to validate',   value: 'validate' },
           { name: '✏️   Edit in editor',               value: 'edit'     },
           { name: '💾  Save to file',                   value: 'save'     },
-          { name: '✅  Apply to cluster to validate',   value: 'validate' },
           { name: chalk.reset('← Skip (deploy later)'), value: 'skip'     },
           { name: chalk.red('✕  Cancel'),               value: 'cancel'   },
         ]);
@@ -1343,7 +1490,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
             try { execSync(`rm "${tmp}"`); } catch {}
           }
         } else if (act === 'save') {
-          const fname = await input(rl, 'Filename', bundleName + '.yaml');
+          const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
+          if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
+          const fname = await input(rl, 'Filename', path.join(saveDir, bundleName + '.yaml'));
           if (fname && fname !== ESC) {
             try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
           }
@@ -1366,9 +1515,14 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
           writeFileSync(tempPath, finalYaml);
           spinner.start('Applying bundle to cluster...');
           await tick();
-          execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          const applyOut1 = execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
           spinner.succeed('Bundle applied — polling for validation status...');
-          const maxAttempts = 30; const pollInterval = 3000; let validated = false;
+          if (applyOut1?.trim()) {
+            process.stdout.write(chalk.reset('\nkubectl apply output:\n'));
+            applyOut1.trim().split('\n').forEach((line: string) => process.stdout.write(chalk.reset(`  ${line}\n`)));
+            process.stdout.write('\n');
+          }
+          const maxAttempts = 120; const pollInterval = 5000; let validated = false;
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             await new Promise(r => setTimeout(r, pollInterval));
             try {
@@ -1382,11 +1536,10 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
                 process.stdout.write(`\r  ${chalk.cyan('◉')}  ${chalk.bold(phase)}  ${chalk.reset(`${latest.reason}: ${latest.message}`)}  ${chalk.reset(`[${elapsed}s]`)}   `);
                 if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
                   process.stdout.write('\n'); successMsg('Bundle Validation Succeeded!');
-                  conds.forEach((c: any) => process.stdout.write(`  ${chalk.reset(`${c.type}: ${c.reason} — ${c.message}`)}\n`));
                   validated = true; break;
                 } else if (latest.reason === 'ValidationFailed' || latest.status === 'False') {
-                  process.stdout.write('\n'); errorMsg('Bundle Validation Failed');
-                  conds.forEach((c: any) => process.stdout.write(`  ${chalk.red(`${c.type}: ${c.reason} — ${c.message}`)}\n`));
+                  process.stdout.write('\n');
+                  printValidationErrors(conds);
                   validated = true; break;
                 }
               }
@@ -1405,6 +1558,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     }
   }
   // ────────────────────────────────────────────────────────────────────────────
+
+  builderLoop: while (true) {   // outer loop — allows "Go Back" from SD warning or validation failure to re-enter model selection
+    addingModels = true;
 
   while (addingModels) {
     const choices: Choice[] = [
@@ -1442,17 +1598,49 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
     if (modelConfigs.length === 0) { warnMsg(`No PEF configs found for ${selectedModel}`); continue; }
 
+    // Sort by SS ascending, then BS ascending
+    const ssToNum = (ss: string) => ss.endsWith('k') ? parseFloat(ss) * 1024 : parseInt(ss, 10);
+    modelConfigs.sort((a, b) => {
+      const ssDiff = ssToNum(a.ss) - ssToNum(b.ss);
+      return ssDiff !== 0 ? ssDiff : parseInt(a.bs, 10) - parseInt(b.bs, 10);
+    });
+
+    // Find any previously selected configs for this model (for pre-checking on re-edit)
+    const prevSelForModel = allSelections.filter((s: BundleSelection) => s.model === selectedModel && !s.draftFor);
+
     const comboChoices: Choice[] = [
       { name: chalk.green('✅  Done - Confirm Selection'), value: 'finish' },
-      ...modelConfigs.map(c => ({
-        name:  `SS: ${String(c.ss).padEnd(6)} │ BS: ${String(c.bs).padEnd(3)} │ ${chalk.reset(c.pefName)}`,
-        value: c,
-      })),
+      ...modelConfigs.map(c => {
+        const isSD   = /-sd\d+/.test(c.pefName);
+        const sdBadge = isSD ? chalk.yellow(' ⚡SD') : '';
+        const hint    = isSD ? 'requires draft model' : undefined;
+        return {
+          name:  `SS: ${String(c.ss).padEnd(6)} │ BS: ${String(c.bs).padEnd(3)} │ ${chalk.reset(c.pefName)}${sdBadge}`,
+          value: c,
+          hint,
+        };
+      }),
       { name: chalk.red('✕  Back'), value: 'back' },
     ];
 
-    const selectedCombos = await multiSelect(rl, `Configurations for ${chalk.bold(selectedModel)}:`, comboChoices);
+    // Pre-check indices that match previously selected configs for this model
+    const preChecked = new Set<number>();
+    comboChoices.forEach((choice, idx) => {
+      if (choice.value && choice.value !== 'finish' && choice.value !== 'back') {
+        const c = choice.value;
+        if (prevSelForModel.some((ps: BundleSelection) => ps.pef === c.pefName && ps.ss === c.ss && ps.bs === c.bs)) {
+          preChecked.add(idx);
+        }
+      }
+    });
+
+    const selectedCombos = await multiSelect(rl, `Configurations for ${chalk.bold(selectedModel)}:`, comboChoices, preChecked);
     if (!selectedCombos || selectedCombos.length === 0 || selectedCombos.includes('back')) continue;
+
+    // Remove existing entries for this model (and its draft) before adding new selection
+    const keep = allSelections.filter((s: BundleSelection) => s.model !== selectedModel && s.draftFor !== selectedModel);
+    allSelections.length = 0;
+    allSelections.push(...keep);
 
     selectedCombos.forEach((c: any) => {
       allSelections.push({ model: selectedModel, ss: c.ss, bs: c.bs, pef: c.pefName, version: c.latestVersion || '1' });
@@ -1462,8 +1650,17 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     // Draft model (speculative decoding)
     const supportsSD = modelPefs.length > 0 && modelPefs.some(p => p.split('-').some((s: string) => /^sd\d+$/.test(s)));
     if (supportsSD) {
-      process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} supports speculative decoding.\n`));
-      process.stdout.write(chalk.reset('     A smaller draft model can significantly improve throughput.\n'));
+      // Check if ALL PEFs for this model are SD PEFs — if so, draft model is mandatory
+      const allPefsAreSD = modelPefs.length > 0 && modelPefs.every(p => /-sd\d+/.test(p));
+
+      if (allPefsAreSD) {
+        process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} uses ONLY speculative decoding PEFs.\n`));
+        process.stdout.write(chalk.reset('     A draft model is REQUIRED — this model cannot run without one.\n'));
+        process.stdout.write(chalk.reset('     Recommended: Meta-Llama-3.1-8B-Instruct\n\n'));
+      } else {
+        process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} supports speculative decoding.\n`));
+        process.stdout.write(chalk.reset('     A smaller draft model can significantly improve throughput.\n'));
+      }
       process.stdout.write(chalk.reset(`     Selected configs: ${selectedCombos.map((c: any) => `SS:${c.ss} BS:${c.bs}`).join(', ')}\n\n`));
 
       const draftChoices: Choice[] = [
@@ -1472,7 +1669,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         { name: chalk.reset('← Back'), value: 'back' },
       ];
 
-      const draftModel = await select(rl, `Draft model for ${selectedModel}:`, draftChoices);
+      const draftModel = await select(rl, `${allPefsAreSD ? '⚠  Required' : 'Optional'}: Draft model for ${selectedModel}:`, draftChoices);
       if (draftModel && draftModel !== 'skip' && draftModel !== 'back') {
         if (!checkpointMapping[draftModel]?.path) {
           warnMsg(`Draft model "${draftModel}" has no checkpoint — skipping`);
@@ -1492,7 +1689,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
               }
               const match = entries.find(e => e.ss === targetConfig.ss && e.bs === targetConfig.bs);
               if (match) {
-                allSelections.push({ model: draftModel, ss: match.ss, bs: match.bs, pef: dp, version: match.latestVersion || '1' });
+                allSelections.push({ model: draftModel, ss: match.ss, bs: match.bs, pef: dp, version: match.latestVersion || '1', draftFor: selectedModel });
                 matchedConfigs.push(`SS:${match.ss} BS:${match.bs}`);
                 draftAdded++;
                 break;
@@ -1513,12 +1710,37 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
   if (allSelections.length === 0) return;
   if (!appConfig.checkpointsDir) { errorMsg('checkpointsDir not set in app-config.json'); return; }
 
+  // Warn if any SD PEFs selected without a matching draft model
+  const sdWithoutDraft = allSelections.filter(s =>
+    !s.draftFor &&
+    /-sd\d+/.test(s.pef) &&
+    !allSelections.some(d => d.draftFor === s.model && d.ss === s.ss && d.bs === s.bs)
+  );
+  if (sdWithoutDraft.length > 0) {
+    process.stdout.write('\n');
+    process.stdout.write(chalk.yellow('  ⚠  The following SD PEFs have no draft model assigned and will fail cluster validation:\n'));
+    sdWithoutDraft.forEach(s => process.stdout.write(chalk.yellow(`     • ${s.pef}  (${s.model}  SS:${s.ss}  BS:${s.bs})\n`)));
+    process.stdout.write(chalk.reset('     Either go back and assign a draft model, or the bundle will fail with ValidationFailed.\n\n'));
+    const sdAction = await select(rl, 'How to proceed?', [
+      { name: chalk.cyan('← Go back to Bundle Builder  (re-edit selections)'), value: 'back'     },
+      { name: chalk.yellow('▶ Continue anyway  (bundle may fail validation)'),  value: 'continue' },
+      { name: chalk.red('✕  Cancel'),                                           value: 'cancel'   },
+    ]);
+    if (!sdAction || sdAction === 'cancel') return;
+    if (sdAction === 'back') continue;  // restart outer loop → re-enter model selection
+  }
+
+  // no SD issues, or user chose Continue — fall through to YAML generation
+
   // Summary
   sectionHeader('Bundle Summary', '📋');
-  allSelections.forEach((sel, i) => {
+  allSelections.forEach((sel: BundleSelection, i: number) => {
+    const isSD     = /-sd\d+/.test(sel.pef);
+    const hasDraft = sel.draftFor || allSelections.some((d: BundleSelection) => d.draftFor === sel.model && d.ss === sel.ss && d.bs === sel.bs);
+    const warn     = (isSD && !hasDraft) ? chalk.yellow('  ⚠ no draft — will fail validation') : '';
     process.stdout.write(
       `  ${chalk.reset(`${i+1}.`)} ${chalk.reset.bold(sel.model.padEnd(38))} ` +
-      `${chalk.cyan(`SS:${sel.ss}`)}  ${chalk.cyan(`BS:${sel.bs}`)}\n`
+      `${chalk.cyan(`SS:${sel.ss}`)}  ${chalk.cyan(`BS:${sel.bs}`)}${warn}\n`
     );
   });
   process.stdout.write('\n');
@@ -1537,7 +1759,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
   const proceed = await confirm(rl, 'Proceed with this bundle?');
   if (!proceed) return;
 
-  const bundleName = await input(rl, 'Bundle name', `my-bundle-${Date.now().toString().slice(-4)}`);
+  const bundleName = await input(rl, 'Bundle name', `bundle-${Date.now().toString().slice(-4)}`);
   if (!bundleName || bundleName === ESC) return;
   if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(bundleName)) {
     errorMsg('Bundle name must be lowercase alphanumeric and hyphens only, 2–63 chars, start/end with a letter or digit.');
@@ -1558,9 +1780,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
   while (true) {
     const act = await select(rl, 'What next?', [
+      { name: '✅  Apply to cluster to validate',   value: 'validate' },
       { name: '✏️   Edit in editor',               value: 'edit' },
       { name: '💾  Save to file',                   value: 'save' },
-      { name: '✅  Apply to cluster to validate',   value: 'validate' },
       { name: chalk.reset('← Skip (deploy later)'), value: 'skip' },
       { name: chalk.red('✕  Cancel'),               value: 'cancel' },
     ]);
@@ -1582,7 +1804,9 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         try { execSync(`rm "${tmp}"`); } catch {}
       }
     } else if (act === 'save') {
-      const fname = await input(rl, 'Filename', `${bundleName}.yaml`);
+      const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
+      if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
+      const fname = await input(rl, 'Filename', path.join(saveDir, `${bundleName}.yaml`));
       if (fname && fname !== ESC) {
         try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fname}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
       }
@@ -1600,59 +1824,210 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     }
   }
 
-  if (!shouldApply) return;
+  if (!shouldApply) break builderLoop;
 
   const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
   try {
     writeFileSync(tempPath, finalYaml);
     spinner.start('Applying bundle to cluster...');
     await tick();
-    execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+    const applyOut = execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     spinner.succeed('Bundle applied — polling for validation status...');
+    if (applyOut?.trim()) {
+      process.stdout.write(chalk.reset('\nkubectl apply output:\n'));
+      applyOut.trim().split('\n').forEach((line: string) => process.stdout.write(chalk.reset(`  ${line}\n`)));
+      process.stdout.write('\n');
+    }
 
-    const maxAttempts = 30;
-    const pollInterval = 3000;
-    let validated = false;
+    // Derive BundleTemplate name: b-xxx → bt-xxx
+    const activeBtName = activeBName.replace(/^b-/, 'bt-');
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      await new Promise(r => setTimeout(r, pollInterval));
+    process.stdout.write(chalk.reset('  Press q or Esc to stop watching (validation continues in background)\n\n'));
+
+    // Enable keypress so user can cancel
+    const valIsRaw = process.stdin.isRaw;
+    process.stdin.setRawMode(true);
+    ensureKeypressEvents();
+    let valUserExit = false;
+    const valOnKey  = (_s: any, key: any) => {
+      if (!key) return;
+      if (key.name === 'q' || key.name === 'escape' || (key.ctrl && key.name === 'c')) valUserExit = true;
+    };
+    process.stdin.on('keypress', valOnKey);
+
+    const spinFrames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+    let   spinIdx    = 0;
+    let   validated       = false;
+    let   validationFailed = false;
+    const startMs          = Date.now();
+
+    while (!valUserExit) {
+      await new Promise(r => setTimeout(r, 3000));
+      if (valUserExit) break;
+
+      const elapsed    = Math.round((Date.now() - startMs) / 1000);
+      const elapsedMin = Math.floor(elapsed / 60);
+      const elapsedSec = elapsed % 60;
+      const elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsed}s`;
+      const spin       = chalk.cyan(spinFrames[spinIdx++ % spinFrames.length]);
+
       try {
-        const st  = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        const st    = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
-        const elapsed = attempt * (pollInterval / 1000);
-        process.stdout.write(`\r  ${chalk.cyan('◉')}  ${chalk.bold(phase)}  ${chalk.reset(`[${elapsed}s]`)}                    `);
+
+        // BundleTemplate status while bundle is still pending
+        let btLine = '';
+        if (phase === 'Pending' || conds.length === 0) {
+          try {
+            const bt       = JSON.parse(execSync(`kubectl get bundletemplate.sambanova.ai ${activeBtName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+            const btPhase  = bt.status?.phase || '';
+            const btConds  = bt.status?.conditions || [];
+            const btLatest = btConds[btConds.length - 1];
+            const btMsg    = btLatest?.reason || btPhase || '…';
+            btLine = `  │  BT: ${btMsg}`;
+          } catch {}
+        }
+
+        // Progress bar (fills over 10 minutes max)
+        const barWidth  = 20;
+        const progress  = Math.min(elapsed / 600, 1);
+        const filled    = Math.round(progress * barWidth);
+        const bar       = chalk.cyan('█'.repeat(filled)) + chalk.reset('░'.repeat(barWidth - filled));
 
         if (conds.length > 0) {
           const latest = conds[conds.length - 1];
-          process.stdout.write(`\r  ${chalk.cyan('◉')}  ${chalk.bold(phase)}  ${chalk.reset(`${latest.reason}: ${latest.message}`)}  ${chalk.reset(`[${elapsed}s]`)}   `);
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  [${bar}]  ${chalk.reset(elapsedStr)}  ${chalk.reset(latest.reason)}                    `);
+
           if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
             process.stdout.write('\n');
             successMsg('Bundle Validation Succeeded!');
-            conds.forEach((c: any) => process.stdout.write(`  ${chalk.reset(`${c.type}: ${c.reason} — ${c.message}`)}\n`));
             validated = true; break;
           } else if (latest.reason === 'ValidationFailed' || latest.status === 'False') {
             process.stdout.write('\n');
-            errorMsg('Bundle Validation Failed');
-            conds.forEach((c: any) => process.stdout.write(`  ${chalk.red(`${c.type}: ${c.reason} — ${c.message}`)}\n`));
-            validated = true; break;
+            printValidationErrors(conds);
+            validated = true; validationFailed = true; break;
           }
+        } else {
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  [${bar}]  ${chalk.reset(elapsedStr)}${chalk.reset(btLine)}                    `);
         }
       } catch {
-        process.stdout.write(`\r  ${chalk.yellow('⠋')}  Waiting for bundle resource...  ${chalk.reset(`[${attempt * pollInterval / 1000}s]`)}   `);
+        process.stdout.write(`\r  ${spin}  Waiting for bundle resource...  ${chalk.reset(elapsedStr)}                    `);
       }
     }
 
+    process.stdin.removeListener('keypress', valOnKey);
+    process.stdin.setRawMode(valIsRaw);
+
     if (!validated) {
       process.stdout.write('\n');
-      warnMsg('Validation timeout — check manually:');
+      warnMsg('Still validating — check status with:');
       process.stdout.write(chalk.reset(`  kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o yaml\n\n`));
+    }
+
+    // ── Recovery menu after ValidationFailed ──────────────────────────────────
+    if (validationFailed) {
+      process.stdout.write('\n');
+
+      // Parse SD PEF names from the error message to offer auto-fix
+      const allConds: any[] = [];
+      try {
+        const st = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        allConds.push(...(st.status?.conditions || []));
+      } catch {}
+      const errText    = allConds.map((c: any) => c.message || '').join('\n');
+      const badPefMatches = [...errText.matchAll(/PEF ([\w-]+) is a spec decoding PEF/g)];
+      const badPefs    = badPefMatches.map(m => m[1]);
+
+      const fixChoices: Choice[] = [];
+      if (badPefs.length > 0) {
+        fixChoices.push({ name: `🔧  Remove ${badPefs.length} SD PEF(s) without draft model and re-apply`, value: 'autofix' });
+      }
+      fixChoices.push(
+        { name: '✏️   Edit YAML in editor and re-apply',             value: 'edit'    },
+        { name: chalk.cyan('← Go back to Bundle Builder  (re-edit selections)'), value: 'builder' },
+        { name: `🗑️   Delete ${activeBName} from cluster`,           value: 'delete'  },
+        { name: chalk.reset('← Back to main menu'),                  value: 'back'    },
+      );
+
+      const fix = await select(rl, 'What would you like to do?', fixChoices);
+
+      if (fix === 'autofix') {
+        // Remove the offending SD PEF config lines from the YAML
+        let fixedYaml = finalYaml;
+        for (const pef of badPefs) {
+          // Remove the config block that references this PEF (the - pef: line and any following spec_decoding lines)
+          fixedYaml = fixedYaml.replace(
+            new RegExp(`\\s*- pef: ${pef.replace(/[-]/g, '\\-')}:[^\\n]*(?:\\n\\s+spec_decoding:[^\\n]*(?:\\n\\s+[^\\n]+)*)?`, 'g'),
+            ''
+          );
+        }
+        yamlBox('Fixed YAML (SD PEFs removed)', fixedYaml);
+        const reApplyFixed = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
+        try {
+          writeFileSync(reApplyFixed, fixedYaml);
+          spinner.start('Re-applying fixed bundle...');
+          await tick();
+          execSync(`kubectl apply -f ${reApplyFixed} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          spinner.succeed('Fixed bundle re-applied — use 📈 Check Deployment Progress to monitor validation');
+        } catch (e: any) { spinner.fail(`Re-apply failed: ${e.message.split('\n')[0]}`); }
+        finally { try { execSync(`rm "${reApplyFixed}"`); } catch {} }
+
+      } else if (fix === 'edit') {
+        const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_fix_${Date.now()}.yaml`);
+        const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+        writeFileSync(tmp, finalYaml);
+        try {
+          process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+          execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+          finalYaml = readFileSync(tmp, 'utf-8');
+          try { execSync(`rm "${tmp}"`); } catch {}
+        } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { execSync(`rm "${tmp}"`); } catch {} }
+
+        // Re-derive bundle name from edited YAML
+        const mFixed = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
+        if (mFixed) activeBName = mFixed[1];
+
+        const reApplyPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
+        try {
+          writeFileSync(reApplyPath, finalYaml);
+          spinner.start('Re-applying bundle...');
+          await tick();
+          execSync(`kubectl apply -f ${reApplyPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          spinner.succeed('Bundle re-applied — check 📈 Check Deployment Progress for status');
+        } catch (e: any) { spinner.fail(`Re-apply failed: ${e.message.split('\n')[0]}`); }
+        finally { try { execSync(`rm "${reApplyPath}"`); } catch {} }
+
+      } else if (fix === 'builder') {
+        // Delete the failed bundle from the cluster so the builder can create fresh
+        try {
+          execSync(`kubectl delete bundle.sambanova.ai ${activeBName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+        } catch {}
+        try {
+          execSync(`kubectl delete bundletemplate.sambanova.ai ${activeBtName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+        } catch {}
+        // Clear selections and restart model selection with old selections preserved (pre-checked)
+        continue builderLoop;
+
+      } else if (fix === 'delete') {
+        spinner.start(`Deleting ${activeBName} and ${activeBtName}...`);
+        await tick();
+        try {
+          try { execSync(`kubectl delete bundle.sambanova.ai ${activeBName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
+          try { execSync(`kubectl delete bundletemplate.sambanova.ai ${activeBtName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
+          spinner.succeed(`Deleted ${activeBName} and ${activeBtName} from cluster`);
+        } catch (e: any) { spinner.fail(`Delete failed: ${e.message.split('\n')[0]}`); }
+      }
+      return;  // don't show "bundle ready" hint after failure
     }
   } catch (e: any) {
     errorMsg(`Error applying bundle: ${e.message}`);
   } finally {
     try { execSync(`rm "${tempPath}"`); } catch {}
   }
+
+  break builderLoop;
+  }  // end builderLoop
 
   process.stdout.write('\n');
   process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
@@ -1787,7 +2162,13 @@ async function bundleDeleteAction(rl: any, namespace: string) {
 
     process.stdout.write('\n');
     process.stdout.write(chalk.red.bold(`  ⚠  The following will be permanently deleted:\n\n`));
-    selected.forEach((n: string) => process.stdout.write(chalk.red(`  ·  ${n}\n`)));
+    selected.forEach((n: string) => {
+      process.stdout.write(chalk.red(`  ·  ${n}\n`));
+      if (deleteType === 'template') {
+        const assocBundle = n.replace(/^bt-/, 'b-');
+        process.stdout.write(chalk.red(`     ↳  ${assocBundle}  (associated Bundle)\n`));
+      }
+    });
     process.stdout.write('\n');
 
     if (!await confirm(rl, chalk.red.bold('Confirm deletion? This cannot be undone'), false)) {
@@ -1802,6 +2183,19 @@ async function bundleDeleteAction(rl: any, namespace: string) {
         spinner.succeed(`Deleted ${name}`);
       } catch (e: any) {
         spinner.fail(`Failed to delete ${name}: ${e.message.split('\n')[0]}`);
+      }
+
+      // Cascade: when a BundleTemplate is deleted, also delete the associated Bundle
+      if (deleteType === 'template') {
+        const assocBundle = name.replace(/^bt-/, 'b-');
+        spinner.start(`Deleting associated Bundle ${assocBundle}...`);
+        await tick();
+        try {
+          execSync(`kubectl delete bundle.sambanova.ai ${assocBundle} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          spinner.succeed(`Deleted associated Bundle ${assocBundle}`);
+        } catch {
+          spinner.info(`Bundle ${assocBundle} not found or already deleted — skipping`);
+        }
       }
     }
   } catch (e: any) {

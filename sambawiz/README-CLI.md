@@ -78,6 +78,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 | `↑` `↓` | Move cursor up / down |
 | `Enter` | Select / confirm |
 | `Space` | Toggle checkbox *(multi-select menus only)* |
+| `a` | Select all / deselect all *(multi-select menus only)* |
 | `q` or `Esc` | Go back / cancel |
 | `Ctrl+C` | Force exit |
 
@@ -390,6 +391,22 @@ Guides you through selecting models, configuring PEF settings, previewing YAML, 
 
 > Requires `checkpoint_mapping.json`. This is generated automatically when you Add, Activate, or successfully Validate an environment.
 
+#### Start — New or load saved
+
+If saved bundle files exist in `saved_artifacts/`, you are asked how to start:
+
+```
+  › Bundle Builder — start from:
+
+  ▶  🆕  Build new bundle
+     📂  Load from saved_artifacts/
+     ✕  Cancel
+```
+
+Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
+
+---
+
 #### Step 1 — Select models
 
 ```
@@ -407,61 +424,84 @@ Guides you through selecting models, configuring PEF settings, previewing YAML, 
      ✕  Cancel
 ```
 
-Only models present in **both** `checkpoint_mapping.json` and `pef_mapping.json` are shown. Select models one at a time, adding as many as needed. Select **✅ Finish and Create Bundle** when done.
+Only models present in **both** `checkpoint_mapping.json` and `pef_mapping.json` are shown. Select models one at a time, adding as many as needed. To edit an already-added model, select it again — its previous selections are pre-checked. Select **✅ Finish and Create Bundle** when done.
 
 ---
 
 #### Step 2 — Select PEF configurations
 
-Multi-select (`Space` to toggle):
+Multi-select with `Space` to toggle, `a` to select/deselect all at once. Configs are listed in ascending SS → BS order.
 
 ```
-  › Configurations for DeepSeek-R1-0528:
-  Space toggle   Enter confirm   q / Esc to go back
+  › Configurations for Meta-Llama-3.3-70B-Instruct:
+  Space toggle   a select all   Enter confirm   q / Esc to go back
 
-      ○  SS: 128k  │ BS: 8   │ deepseek-ss131072-bs8
-   ❯  ◉  SS: 16k   │ BS: 1   │ deepseek-ss16384-bs1
-      ○  SS: 32k   │ BS: 4   │ deepseek-ss32768-bs4
-
-      ✅  Done - Confirm Selection
-      ✕  Back
+  ❯ ✅  Done - Confirm Selection
+     ○  Select All / Deselect All
+     ○  SS: 4k    │ BS: 1   │ llama-3p1-70b-ss4096-bs1-sd5  ⚡SD
+     ○  SS: 4k    │ BS: 2   │ llama-3p1-70b-ss4096-bs2-sd5  ⚡SD
+     ○  SS: 8k    │ BS: 1   │ llama-3p1-70b-ss8192-bs1-sd5  ⚡SD
+     ○  SS: 16k   │ BS: 1   │ llama-3p1-70b-ss16384-bs1-sd5 ⚡SD
+     ...
+    ✕  Back
 ```
 
 | Column | Meaning |
 |---|---|
-| SS | Sequence size (context window) |
-| BS | Batch size |
+| SS | Sequence size (context window), sorted ascending |
+| BS | Batch size, sorted ascending within each SS |
 | PEF name | Processor Executable Format identifier |
+| `⚡SD` | Speculative decoding PEF — requires a draft model |
 
 ```
-  ✅ Added 2 config(s) for DeepSeek-R1-0528
+  ✅ Added 6 config(s) for Meta-Llama-3.3-70B-Instruct
 ```
 
 ---
 
 #### Step 3 — Draft model for speculative decoding *(optional)*
 
-Shown only when the selected model supports speculative decoding:
+Shown only when the selected model supports speculative decoding. **Skip** is always available regardless of whether all PEFs require a draft:
 
 ```
-  ⚡ DeepSeek-R1-0528 supports speculative decoding.
+  ⚡ Meta-Llama-3.3-70B-Instruct supports speculative decoding.
      A smaller draft model can significantly improve throughput.
-     Selected configs: SS:128k BS:8
+     Selected configs: SS:4k BS:1  SS:4k BS:2  SS:8k BS:1  ...
 
-  › Draft model for DeepSeek-R1-0528:
+  › Draft model for Meta-Llama-3.3-70B-Instruct:
 
   ▶  ↩  Skip (no draft model)
-     DeepSeek-R1
      Meta-Llama-3.1-8B-Instruct
      ← Back
 ```
 
-If a matching draft is found, its configs are added automatically:
+If a matching draft is found, its configs are added automatically (matched by SS and BS):
 
 ```
-  ✅ Auto-added 1 draft config(s) for DeepSeek-R1
-     Note: matched configs — SS:128k BS:8
+  ✅ Auto-added 3 draft config(s) for Meta-Llama-3.1-8B-Instruct
+     Note: matched configs — SS:4k BS:1, SS:4k BS:2, SS:8k BS:1
 ```
+
+> Draft configs that have no matching SS/BS in the draft model are silently skipped. The bundle summary will mark those configs with `⚠ no draft — will fail validation`.
+
+---
+
+#### SD warning — SD PEFs without a draft model
+
+If SD PEFs were added but no draft model assigned, a warning appears before proceeding:
+
+```
+  ⚠  The following SD PEFs have no draft model and will fail cluster validation:
+     • llama-3p1-70b-ss32768-bs1-sd5  (Meta-Llama-3.3-70B-Instruct  SS:32k  BS:1)
+
+  › How to proceed?
+
+  ▶  ← Go back to Bundle Builder  (re-edit selections)
+     ▶ Continue anyway  (bundle may fail validation)
+     ✕  Cancel
+```
+
+Choosing **← Go back** returns to model selection with all existing selections preserved and pre-checked.
 
 ---
 
@@ -472,32 +512,35 @@ If a matching draft is found, its configs are added automatically:
   │ 📋  Bundle Summary                                       │
   ╰──────────────────────────────────────────────────────────╯
 
-  1.  DeepSeek-R1-0528                       SS:128k  BS:8
-  2.  DeepSeek-R1                            SS:128k  BS:8
+  1.  Meta-Llama-3.3-70B-Instruct            SS:4k    BS:1
+  2.  Meta-Llama-3.3-70B-Instruct            SS:4k    BS:2
+  3.  Meta-Llama-3.1-8B-Instruct             SS:4k    BS:1  ⚠ no draft — will fail validation
+  ...
 
   YAML Preview  (BUNDLE_NAME = placeholder):
   ────────────────────────────────────────
   apiVersion: sambanova.ai/v1alpha1
   kind: BundleTemplate
-  metadata:
-    name: bt-BUNDLE_NAME
   ...
   ────────────────────────────────────────
 
   › Proceed with this bundle? [Y/n]  Esc cancel:
 ```
 
+Rows marked `⚠ no draft — will fail validation` are SD PEFs whose SS/BS had no matching draft model config.
+
 ---
 
 #### Step 5 — Name the bundle
 
 ```
-  › Bundle name  Esc cancel: deepseek-prod
+  › Bundle name  Esc cancel: bundle-4291
 ```
 
-Resource names generated:
-- `BundleTemplate` → `bt-deepseek-prod`
-- `Bundle` → `b-deepseek-prod`
+A 4-digit suffix is generated automatically. The default prefix is `bundle`. Resource names:
+
+- `BundleTemplate` → `bt-bundle-4291`
+- `Bundle` → `b-bundle-4291`
 
 ---
 
@@ -508,49 +551,71 @@ Resource names generated:
 
   ▶  ✏️   Edit in editor
      💾  Save to file
-     ⏭️   Continue to deploy
+     ✅  Apply to cluster to validate
+     ← Skip (deploy later)
      ✕  Cancel
 ```
 
 | Option | Description |
 |---|---|
 | ✏️ Edit in editor | Opens `$EDITOR` (fallback: `vi`) — changes read back automatically |
-| 💾 Save to file | Prompts for filename and writes YAML |
-| ⏭️ Continue to deploy | Proceeds without saving |
-| ✕ Cancel | Exits without applying |
+| 💾 Save to file | Prompts for filename and writes YAML to `saved_artifacts/` |
+| ✅ Apply to cluster to validate | Applies YAML via `kubectl apply` and polls for validation status |
+| ✏️ Edit in editor | Opens `$EDITOR` (fallback: `vi`) — changes read back automatically |
+| 💾 Save to file | Saves YAML to `saved_artifacts/<bundle-name>.yaml` (directory created automatically); path is pre-populated and editable |
+| ← Skip (deploy later) | Exits without applying; use **Bundle Deployment** later |
+| ✕ Cancel | Exits without saving or applying |
 
 ---
 
-#### Step 7 — Apply to cluster *(optional)*
+#### Step 7 — Apply and validate
 
 ```
-  › Apply to cluster to validate? [Y/n]  Esc cancel:
-
-  ✔  Applying bundle to cluster...
   ✔  Bundle applied — polling for validation status...
 
-  ◉  Pending  ValidationInProgress: Checking PEF files  [9s]
-  ◉  Ready    ValidationSucceeded: All checks passed    [21s]
+  kubectl apply output:
+    bundletemplate.sambanova.ai/bt-bundle-4291 created
+    bundle.sambanova.ai/b-bundle-4291 created
+
+  Press q or Esc to stop watching (validation continues in background)
+
+  ⠋  Pending  [░░░░░░░░░░░░░░░░]  3s  ValidationInProgress
+  ⠸  Pending  [████░░░░░░░░░░░░]  9s  ValidationInProgress
+  ✔  Ready    ValidationSucceeded                           [21s]
 
   ✅ Bundle Validation Succeeded!
-     Validated: ValidationSucceeded — All checks passed
 ```
 
-On failure:
+`kubectl apply` output is displayed immediately after applying so you can confirm the resource names. Validation polls every 3 s; press `q` or `Esc` to stop watching (validation continues on the cluster).
+
+---
+
+#### Validation failure — recovery options
+
+When validation fails, a recovery menu appears:
 
 ```
-  ○  Failed   ValidationFailed: PEF not found  [18s]
+  Validation failed with the following errors:
+  Validation Errors: Legalization failed, see legalizerInfo for details
 
-  ❌ Bundle Validation Failed
-     Validated: ValidationFailed — PEF file not found in storage
+  › What would you like to do?
+
+  ▶  🔧  Remove 2 SD PEF(s) without draft model and re-apply
+     ✏️   Edit YAML in editor and re-apply
+     ← Go back to Bundle Builder  (re-edit selections)
+     🗑️   Delete b-bundle-4291 from cluster
+     ← Back to main menu
 ```
 
-On timeout (90 s):
+| Option | Description |
+|---|---|
+| 🔧 Remove SD PEFs | Auto-removes SD PEFs that lack a draft model and re-applies |
+| ✏️ Edit YAML | Opens editor, then re-applies the edited YAML |
+| ← Go back to Bundle Builder | Deletes the failed bundle from cluster and returns to model selection with all previous selections preserved and pre-checked |
+| 🗑️ Delete from cluster | Removes the bundle and template from the cluster |
+| ← Back to main menu | Leaves resources on cluster, returns to main menu |
 
-```
-  ⚠ Validation timeout — check manually:
-    kubectl get bundle.sambanova.ai b-deepseek-prod -n default -o yaml
-```
+> **🔧 Remove SD PEFs** is only shown when the error message identifies specific SD PEFs as the cause.
 
 ---
 
@@ -671,6 +736,19 @@ Answering `y` jumps straight into the live monitor.
 ```
 
 > Deletion is permanent and immediate. There is no undo.
+
+**BundleTemplate cascade delete**
+
+When deleting a `BundleTemplate`, the associated `Bundle` is automatically deleted too. Both resources are shown in the confirmation list:
+
+```
+  ⚠  The following will be permanently deleted:
+
+  ·  bt-bundle-4291
+     ↳  b-bundle-4291  (associated Bundle)
+
+  › Confirm deletion? This cannot be undone [y/N]  Esc cancel:
+```
 
 ---
 
