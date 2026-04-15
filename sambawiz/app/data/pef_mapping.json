@@ -69,11 +69,10 @@
   "gemma-3-12b-it": [
     "gemma3-12b-ss131072-bs8-dyt-1"
   ],
+  "gemma-3-27b-it": [
+    "gemma3-27b-ss131072-bs8-dyt-1"
+  ],
   "gpt-oss-120b": [
-    "gpt-oss-fp8-ss131072-bs2",
-    "gpt-oss-fp8-ss32768-bs2",
-    "gpt-oss-fp8-ss65536-bs2",
-    "gpt-oss-fp8-ss8192-bs2",
     "gpt-oss-fp8-ss131072-bs8-dyt-1"
   ],
   "Llama-3.3-Swallow-70B-Instruct-v0.4": [
@@ -197,15 +196,12 @@
     "qwen-3-32b-ss8192-bs4"
   ],
   "MiniMax-M2.5": [    
+    "minimax-m2p5-ss163840-bs2-dyt-1",
     "minimax-m2p5-ss32768-bs8-dyt-1"
   ],
   "Qwen3-235B": [
-    "qwen-3-235b-ss131072-bs2",
-    "qwen-3-235b-ss16384-bs2",
-    "qwen-3-235b-ss32768-bs2",
-    "qwen-3-235b-ss65536-bs2",
-    "qwen-3-235b-ss8192-bs2",
-    "qwen-3-235b-ss8192-bs8"
+    "qwen-3-235b-ss131072-bs2-dyt-1",
+    "qwen-3-235b-ss32768-bs8-dyt-1"
   ],
   "Whisper-Large-v3": [
     "whisper-ss448-bs1",
