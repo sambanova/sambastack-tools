@@ -13,10 +13,11 @@ import {
 import BuildIcon from '@mui/icons-material/Build';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
-import HomeIcon from '@mui/icons-material/Home';
+import TuneIcon from '@mui/icons-material/Tune';
 import Image from 'next/image';
 import { useRouter, usePathname } from 'next/navigation';
 import KubeconfigErrorDialog from './KubeconfigErrorDialog';
+import { useAppContext } from '../context/AppContext';
 
 const drawerWidth = 240;
 
@@ -30,7 +31,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
 
   // Derive selected item directly from pathname instead of using state
   const getSelectedItem = () => {
-    if (pathname === '/') return 'home';
+    if (pathname === '/') return 'environment-settings';
     if (pathname === '/bundle-builder') return 'bundle-builder';
     if (pathname === '/bundle-deployment') return 'bundle-deployment';
     if (pathname === '/playground') return 'playground';
@@ -38,65 +39,26 @@ export default function AppLayout({ children }: AppLayoutProps) {
   };
   const selectedItem = getSelectedItem();
 
-  const [envVersion, setEnvVersion] = useState<string | null>(null);
-  const [envName, setEnvName] = useState<string | null>(null);
-  const [namespace, setNamespace] = useState<string | null>(null);
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const {
+    envVersion,
+    envName,
+    namespace,
+    validationError,
+    helmCommand,
+    errorDetails,
+    helmVersionError,
+    hasNonNumericalSuffix,
+  } = useAppContext();
+
   const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
-  const [helmCommand, setHelmCommand] = useState<string>('');
-  const [errorDetails, setErrorDetails] = useState<string>('');
-  const [helmVersionError, setHelmVersionError] = useState<boolean>(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  const [hasNonNumericalSuffix, setHasNonNumericalSuffix] = useState<boolean>(false);
 
-  // Validate kubeconfig on component mount
+  // Show error dialog when validation fails
   useEffect(() => {
-    const validateKubeconfig = async () => {
-      try {
-        const response = await fetch('/api/kubeconfig-validate');
-        const data = await response.json();
-
-        console.log('Kubeconfig validation response:', data);
-
-        if (data.success) {
-          setEnvVersion(data.version);
-          setEnvName(data.envName);
-          setNamespace(data.namespace);
-          setHasNonNumericalSuffix(data.hasNonNumericalSuffix || false);
-          setValidationError(null);
-          setShowErrorDialog(false);
-          setHelmVersionError(false);
-        } else {
-          console.log('Validation failed, showing error dialog');
-          setValidationError(data.error || 'Failed to validate kubeconfig');
-          setHelmCommand(data.helmCommand || '');
-          setErrorDetails(data.errorDetails || data.error || '');
-          setShowErrorDialog(true);
-          setEnvVersion(null);
-          setEnvName(null);
-          setNamespace(null);
-          setHasNonNumericalSuffix(false);
-          // Check if this is a helm version error
-          setHelmVersionError(data.helmVersionError || false);
-        }
-
-
-      } catch (error) {
-        console.error('Failed to validate kubeconfig:', error);
-        setValidationError('Failed to validate kubeconfig');
-        setHelmCommand('');
-        setErrorDetails('Network error or server unreachable');
-        setShowErrorDialog(true);
-        setEnvVersion(null);
-        setEnvName(null);
-        setNamespace(null);
-        setHasNonNumericalSuffix(false);
-        setHelmVersionError(false);
-      }
-    };
-
-    validateKubeconfig();
-  }, []);
+    if (validationError) {
+      setShowErrorDialog(true);
+    }
+  }, [validationError]);
 
   // Fetch app version on component mount
   useEffect(() => {
@@ -178,11 +140,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
           </ListItemIcon>
           <ListItemText
             primary="Bundle Builder"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'bundle-builder' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
+            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'bundle-builder' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
           />
         </ListItemButton>
 
@@ -225,11 +183,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
           </ListItemIcon>
           <ListItemText
             primary="Bundle Deployment"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'bundle-deployment' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
+            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'bundle-deployment' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
           />
         </ListItemButton>
 
@@ -272,11 +226,7 @@ export default function AppLayout({ children }: AppLayoutProps) {
           </ListItemIcon>
           <ListItemText
             primary="Playground"
-            primaryTypographyProps={{
-              fontSize: '0.875rem',
-              fontWeight: selectedItem === 'playground' ? 600 : 500,
-              fontFamily: 'var(--font-geist-sans)',
-            }}
+            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'playground' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
           />
         </ListItemButton>
       </Box>
@@ -284,94 +234,91 @@ export default function AppLayout({ children }: AppLayoutProps) {
       {/* Spacer to push version display to bottom */}
       <Box sx={{ flexGrow: 1 }} />
 
-      {/* Fallback home button when kubeconfig validation failed and not on home page */}
-      {validationError && pathname !== '/' && (
-        <Box
+      {/* Environment Settings nav item with env details */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+        <ListItemButton
+          selected={selectedItem === 'environment-settings'}
           onClick={() => router.push('/')}
           sx={{
             mx: 2,
-            mt: 2,
-            p: 1.5,
+            px: 1,
+            py: 1.25,
             borderRadius: 2,
-            backgroundColor: 'rgb(232, 229, 234)',
-            border: '1px solid rgb(209, 204, 213)',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease-in-out',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+            gap: 2,
+            alignItems: 'flex-start',
+            '&.Mui-selected': {
+              backgroundColor: 'rgb(232, 229, 234)',
+              '&:hover': { backgroundColor: 'rgb(232, 229, 234)' },
+            },
             '&:hover': {
-              backgroundColor: 'rgb(220, 217, 224)',
-              border: '1px solid rgb(199, 194, 203)',
-              transform: 'scale(1.02)',
+              backgroundColor: 'rgb(232, 229, 234)',
+              borderRadius: 2,
             },
           }}
         >
-          <HomeIcon sx={{ fontSize: '1.25rem', color: 'primary.main' }} />
-        </Box>
-      )}
-
-      {/* Environment version display - clickable to go to home */}
-      {envVersion && envName && (
-        <Box
-          onClick={() => {
-            router.push('/');
-          }}
-          sx={{
-            mx: 2,
-            mt: 2,
-            p: 1.5,
-            borderRadius: 2,
-            backgroundColor: 'rgb(232, 229, 234)',
-            border: '1px solid rgb(209, 204, 213)',
-            cursor: 'pointer',
-            transition: 'all 0.2s ease-in-out',
-            '&:hover': {
-              backgroundColor: 'rgb(220, 217, 224)',
-              border: '1px solid rgb(199, 194, 203)',
-              transform: 'scale(1.02)',
-            },
-          }}
-        >
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', mb: 0.5 }}>
-            <HomeIcon sx={{ fontSize: '1rem', color: 'primary.main', mr: 0.75 }} />
+          <ListItemIcon
+            sx={{
+              minWidth: 'auto',
+              color: selectedItem === 'environment-settings' ? 'primary.main' : '#71717A',
+              mt: '2px',
+            }}
+          >
+            <TuneIcon />
+          </ListItemIcon>
+          <Box>
             <Typography
               sx={{
                 fontSize: '0.875rem',
-                fontWeight: 600,
-                color: 'primary.main',
+                fontWeight: selectedItem === 'environment-settings' ? 600 : 500,
                 fontFamily: 'var(--font-geist-sans)',
+                color: 'text.primary',
+                lineHeight: 1.5,
               }}
             >
-              {envName}
+              Environment Settings
             </Typography>
+            {envName && (
+              <Typography
+                sx={{
+                  fontSize: '0.75rem',
+                  fontWeight: 500,
+                  color: 'primary.main',
+                  fontFamily: 'var(--font-geist-sans)',
+                  lineHeight: 1.4,
+                }}
+              >
+                {envName}
+              </Typography>
+            )}
+            {envVersion && (
+              <Typography
+                sx={{
+                  fontSize: '0.7rem',
+                  fontWeight: 600,
+                  color: '#71717A',
+                  fontFamily: 'var(--font-geist-sans)',
+                  lineHeight: 1.4,
+                }}
+              >
+                version: {envVersion}{hasNonNumericalSuffix ? '**' : ''}
+              </Typography>
+            )}
+            {namespace && (
+              <Typography
+                sx={{
+                  fontSize: '0.7rem',
+                  fontWeight: 600,
+                  color: '#71717A',
+                  fontFamily: 'var(--font-geist-sans)',
+                  lineHeight: 1.4,
+                }}
+              >
+                namespace: {namespace}
+              </Typography>
+            )}
           </Box>
-          <Typography
-            sx={{
-              fontSize: '0.75rem',
-              fontWeight: 500,
-              color: '#71717A',
-              fontFamily: 'var(--font-geist-sans)',
-              textAlign: 'center',
-            }}
-          >
-            version: {envVersion}{hasNonNumericalSuffix ? '**' : ''}
-          </Typography>
-          {namespace && (
-            <Typography
-              sx={{
-                fontSize: '0.75rem',
-                fontWeight: 500,
-                color: '#71717A',
-                fontFamily: 'var(--font-geist-sans)',
-                textAlign: 'center',
-              }}
-            >
-              namespace: {namespace}
-            </Typography>
-          )}
-        </Box>
-      )}
+        </ListItemButton>
+      </Box>
 
       {/* App version display */}
       {appVersion && (

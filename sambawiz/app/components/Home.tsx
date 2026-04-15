@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useId } from 'react';
+import { useAppContext } from '../context/AppContext';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Box,
@@ -103,9 +104,7 @@ export default function Home() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
-  const [fullHelmVersion, setFullHelmVersion] = useState<string | null>(null);
-  const [helmVersionTooOld, setHelmVersionTooOld] = useState<boolean>(false);
-  const [minimumHelmVersion, setMinimumHelmVersion] = useState<string | null>(null);
+  const { fullVersion: fullHelmVersion, helmVersionError: helmVersionTooOld, minimumVersion: minimumHelmVersion } = useAppContext();
   const [showInstallDialog, setShowInstallDialog] = useState<boolean>(false);
   const [installYaml, setInstallYaml] = useState<string>('');
   const [installing, setInstalling] = useState<boolean>(false);
@@ -238,36 +237,6 @@ export default function Home() {
 
     fetchEnvironments();
   }, []);
-
-  // Function to fetch helm version
-  const fetchHelmVersion = useCallback(async () => {
-    try {
-      const response = await fetch('/api/kubeconfig-validate');
-      const data = await response.json();
-
-      if (data.success && data.fullVersion) {
-        setFullHelmVersion(data.fullVersion);
-        setHelmVersionTooOld(false);
-        setMinimumHelmVersion(null);
-      } else if (data.helmVersionError && data.version) {
-        setFullHelmVersion(data.version);
-        setHelmVersionTooOld(true);
-        setMinimumHelmVersion(data.minimumVersion || null);
-      } else {
-        setFullHelmVersion(null);
-        setHelmVersionTooOld(false);
-        setMinimumHelmVersion(null);
-      }
-    } catch (error) {
-      console.error('Failed to fetch helm version:', error);
-      setFullHelmVersion(null);
-    }
-  }, []);
-
-  // Fetch helm version on component mount
-  useEffect(() => {
-    fetchHelmVersion();
-  }, [fetchHelmVersion]);
 
   // Auto-refresh installer logs every 3 seconds when enabled
   useEffect(() => {

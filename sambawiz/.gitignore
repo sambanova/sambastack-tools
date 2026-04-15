@@ -1,6 +1,17 @@
 # SambaWiz-specific .gitignore
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+# CLI compiled output (source is bin/cli.ts, run via tsx)
+bin/cli.js
+bin/cli-utils.js
+dist/
+
+# CLI temp files
+bin/temp_*.yaml
+temp_*.yaml
+.tmp_*.yaml
+.tmp_*.json
+
 # dependencies
 /node_modules
 /.pnp
@@ -75,3 +86,6 @@ app/data/checkpoint_mapping.json
 
 # custom configurations and files
 custom/
+
+# scratch / response files
+response.txt
