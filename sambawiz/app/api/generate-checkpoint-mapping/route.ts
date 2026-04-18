@@ -144,6 +144,11 @@ export async function POST() {
     const outputPath = path.join(process.cwd(), 'app/data/checkpoint_mapping.json');
     await fs.writeFile(outputPath, JSON.stringify(checkpointMapping, null, 2));
 
+    // Re-run PEF config generation so model_type (e.g. "embedding") is populated
+    // on the freshly written checkpoint_mapping.json from PEF spec.metadata.task_name
+    const { generatePefConfigs } = await import('../../utils/pef-config-generator');
+    await generatePefConfigs();
+
     return NextResponse.json({
       success: true,
       count: Object.keys(checkpointMapping).length,

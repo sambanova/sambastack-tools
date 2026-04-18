@@ -265,7 +265,8 @@ ${Object.entries(model.experts).map(([ss, expert]) => {
 ${expert.configs.map(config => {
   if (config._isDyt && config.dynamic_dims) {
     let configStr = `          - dynamic_dims:\n              batch_size:\n                values:`;
-    config.dynamic_dims.batch_size.values.forEach(bs => {
+    const uniqueSortedValues = [...new Set(config.dynamic_dims.batch_size.values)].sort((a, b) => a - b);
+    uniqueSortedValues.forEach(bs => {
       configStr += `\n                - ${bs}`;
     });
     configStr += `\n            pef: ${config.pef}`;

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useId } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -20,9 +20,8 @@ import {
 export default function AddEnvironment() {
   const router = useRouter();
 
-  // Generate stable IDs for form fields to prevent hydration mismatches
-  const encodedConfigId = useId();
-  const environmentNameId = useId();
+  const encodedConfigId = 'add-env-encoded-config';
+  const environmentNameId = 'add-env-environment-name';
 
   const [encodedConfig, setEncodedConfig] = useState<string>('');
   const [environmentName, setEnvironmentName] = useState<string>('sambastack-dev-0');

@@ -31,8 +31,8 @@ interface KubectlPefItem {
     name?: string;
   };
   spec?: {
-    task_name?: string;
     metadata?: {
+      task_name?: string;
       dynamic_dims?: {
         batch_size?: {
           values?: number[];
@@ -289,19 +289,30 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
       );
       let checkpointMappingUpdated = false;
 
-      for (const item of items) {
-        const taskName = item.spec?.task_name;
-        const pefName = item.metadata?.name;
-        if (!taskName || !pefName) continue;
+      // spec.metadata is not included in list responses — fetch one PEF per model individually
+      for (const [modelName, pefNames] of Object.entries(pefMapping)) {
+        if (!checkpointMapping[modelName]) continue;
+        if (checkpointMapping[modelName].model_type) continue; // already set
 
-        // Find the model name whose PEF list contains this PEF
-        const modelName = Object.keys(pefMapping).find((model) => pefMapping[model].includes(pefName));
-        if (!modelName) continue;
+        // Find the first PEF for this model that exists in the cluster
+        const representativePef = pefNames.find((name) => items.some((item) => item.metadata?.name === name));
+        if (!representativePef) continue;
 
-        if (checkpointMapping[modelName] && checkpointMapping[modelName].model_type !== taskName) {
-          checkpointMapping[modelName].model_type = taskName;
-          checkpointMappingUpdated = true;
-          console.log(`[PEF Generator] Set model_type="${taskName}" for ${modelName}`);
+        try {
+          const individualOutput = execSync(`kubectl -n ${namespace} get pef ${representativePef} -o json`, {
+            encoding: 'utf-8',
+            env: { ...process.env, KUBECONFIG: kubeconfigPath },
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          const individualPef: KubectlPefItem = JSON.parse(individualOutput);
+          const taskName = individualPef.spec?.metadata?.task_name;
+          if (taskName) {
+            checkpointMapping[modelName].model_type = taskName;
+            checkpointMappingUpdated = true;
+            console.log(`[PEF Generator] Set model_type="${taskName}" for ${modelName}`);
+          }
+        } catch (err) {
+          console.warn(`[PEF Generator] Failed to get task_name for ${modelName}:`, err);
         }
       }
 

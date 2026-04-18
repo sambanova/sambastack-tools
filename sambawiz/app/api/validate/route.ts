@@ -58,9 +58,21 @@ interface BundleCondition {
   observedGeneration?: number;
 }
 
+interface LegalizerInfo {
+  errors?: string[];
+  warnings?: string[];
+  status?: string;
+  utilization?: {
+    ddr?: string;
+    hbm_resident?: string;
+    host?: string;
+  };
+}
+
 interface BundleStatus {
   status?: {
     conditions?: BundleCondition[];
+    legalizerInfo?: LegalizerInfo;
   };
 }
 
@@ -68,6 +80,7 @@ function extractValidationStatus(jsonOutput: string): {
   reason: string;
   message: string;
   isValid: boolean;
+  legalizerInfo?: LegalizerInfo;
 } {
   try {
     const bundle: BundleStatus = JSON.parse(jsonOutput);
@@ -82,11 +95,13 @@ function extractValidationStatus(jsonOutput: string): {
 
     // Get the first condition (typically the validation result)
     const condition = bundle.status.conditions[0];
+    const legalizerInfo = bundle.status.legalizerInfo;
 
     return {
       reason: condition.reason || 'Unknown',
       message: condition.message || 'No message provided',
       isValid: condition.reason === 'ValidationSucceeded' || condition.status === 'True',
+      legalizerInfo,
     };
   } catch (error) {
     return {

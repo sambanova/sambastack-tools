@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useId } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -74,14 +74,13 @@ export default function Home() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Generate stable IDs for form fields to prevent hydration mismatches
-  const namespaceId = useId();
-  const apiDomainId = useId();
-  const uiDomainId = useId();
-  const apiKeyId = useId();
-  const keycloakUsernameId = useId();
-  const keycloakPasswordId = useId();
-  const installYamlId = useId();
+  const namespaceId = 'home-namespace';
+  const apiDomainId = 'home-api-domain';
+  const uiDomainId = 'home-ui-domain';
+  const apiKeyId = 'home-api-key';
+  const keycloakUsernameId = 'home-keycloak-username';
+  const keycloakPasswordId = 'home-keycloak-password';
+  const installYamlId = 'home-install-yaml';
 
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
   const [namespace, setNamespace] = useState<string>('');
@@ -414,18 +413,7 @@ export default function Home() {
     setSaveError(null);
 
     try {
-      // Generate checkpoint_mapping.json from the cluster's model resources
-      const generateResponse = await fetch('/api/generate-checkpoint-mapping', {
-        method: 'POST',
-      });
-      const generateData = await generateResponse.json();
-
-      if (!generateData.success) {
-        setSaveError(`Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`);
-        setSaving(false);
-        return;
-      }
-
+      // Save the selected environment first so generate-checkpoint-mapping uses it
       const response = await fetch('/api/update-config', {
         method: 'POST',
         headers: {
@@ -442,15 +430,31 @@ export default function Home() {
 
       const data = await response.json();
 
-      if (data.success) {
-        setSaveSuccess(true);
-        // Reload the page after a short delay to refresh the navbar and all app state
-        setTimeout(() => {
-          window.location.reload();
-        }, 1000);
-      } else {
+      if (!data.success) {
         setSaveError(data.error || 'Failed to save configuration');
+        return;
       }
+
+      // Generate checkpoint_mapping.json from the cluster's model resources
+      // (must run after update-config so it uses the newly selected environment)
+      const generateResponse = await fetch('/api/generate-checkpoint-mapping', {
+        method: 'POST',
+      });
+      const generateData = await generateResponse.json();
+
+      if (!generateData.success) {
+        setSaveError(`Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`);
+        setSaving(false);
+        return;
+      }
+
+      setSaveSuccess(true);
+      // Clear playground state so it re-fetches against the new environment
+      fetch('/api/playground-state', { method: 'DELETE' }).catch(() => {});
+      // Reload the page after a short delay to refresh the navbar and all app state
+      setTimeout(() => {
+        window.location.reload();
+      }, 1000);
     } catch (error) {
       console.error('Error saving configuration:', error);
       setSaveError('Failed to save configuration');

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useId } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -30,6 +30,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import CodeIcon from '@mui/icons-material/Code';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
@@ -71,10 +72,9 @@ export default function Playground() {
 
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Generate stable IDs for form fields to prevent hydration mismatches
-  const inputMessageId = useId();
-  const keycloakUsernameId = useId();
-  const keycloakPasswordId = useId();
+  const inputMessageId = 'playground-input-message';
+  const keycloakUsernameId = 'playground-keycloak-username';
+  const keycloakPasswordId = 'playground-keycloak-password';
 
   const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
   const [selectedDeployment, setSelectedDeployment] = useState<string>('');
@@ -84,6 +84,12 @@ export default function Playground() {
   }>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Refs to access latest state values inside async callbacks without stale closures
+  const bundleDeploymentsRef = useRef<BundleDeployment[]>([]);
+  const deploymentStatusesRef = useRef<Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }>>({});
+  useEffect(() => { bundleDeploymentsRef.current = bundleDeployments; }, [bundleDeployments]);
+  useEffect(() => { deploymentStatusesRef.current = deploymentStatuses; }, [deploymentStatuses]);
 
   const [checkpointMapping, setCheckpointMapping] = useState<Record<string, { model_type?: string }>>({});
 
@@ -115,6 +121,33 @@ export default function Playground() {
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [uiDomain, setUiDomain] = useState<string>('');
+
+  // Save playground state to avoid kubectl calls on subsequent page loads
+  const savePlaygroundState = async (
+    deployments: BundleDeployment[],
+    statuses: Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }>,
+    deployment: string,
+    models: string[],
+    model: string,
+  ) => {
+    try {
+      await fetch('/api/playground-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          state: {
+            bundleDeployments: deployments,
+            deploymentStatuses: statuses,
+            selectedDeployment: deployment,
+            availableModels: models,
+            selectedModel: model,
+          },
+        }),
+      });
+    } catch {
+      // Non-critical — ignore save errors
+    }
+  };
 
   // Fetch bundle deployments and their statuses
   const fetchBundleDeployments = async () => {
@@ -164,7 +197,29 @@ export default function Playground() {
   };
 
   useEffect(() => {
-    fetchBundleDeployments();
+    const initializePlayground = async () => {
+      try {
+        const stateResponse = await fetch('/api/playground-state');
+        const stateData = await stateResponse.json();
+
+        if (stateData.success && stateData.state) {
+          const saved = stateData.state;
+          setBundleDeployments(saved.bundleDeployments);
+          setDeploymentStatuses(saved.deploymentStatuses);
+          setSelectedDeployment(saved.selectedDeployment);
+          setAvailableModels(saved.availableModels);
+          setSelectedModel(saved.selectedModel);
+          setLoading(false);
+          return;
+        }
+      } catch {
+        // If state check fails, fall through to normal fetch
+      }
+
+      fetchBundleDeployments();
+    };
+
+    initializePlayground();
     fetchEnvironmentConfig();
     fetch('/api/checkpoint-mapping')
       .then((r) => r.json())
@@ -230,9 +285,18 @@ export default function Playground() {
       if (data.success && data.models) {
         setAvailableModels(data.models);
         // Auto-select first model if available
-        if (data.models.length > 0) {
-          setSelectedModel(data.models[0]);
+        const firstModel = data.models.length > 0 ? data.models[0] : '';
+        if (firstModel) {
+          setSelectedModel(firstModel);
         }
+        // Persist state so subsequent page loads skip kubectl calls
+        savePlaygroundState(
+          bundleDeploymentsRef.current,
+          deploymentStatusesRef.current,
+          deploymentName,
+          data.models,
+          firstModel,
+        );
       } else {
         setModelsError(data.error || 'Failed to fetch models');
       }
@@ -266,9 +330,18 @@ export default function Playground() {
 
   // Handle model selection
   const handleModelChange = (event: SelectChangeEvent<string>) => {
-    setSelectedModel(event.target.value);
+    const newModel = event.target.value;
+    setSelectedModel(newModel);
     // Optionally clear chat history when switching models
     setMessages([]);
+    // Persist updated model selection
+    savePlaygroundState(
+      bundleDeploymentsRef.current,
+      deploymentStatusesRef.current,
+      selectedDeployment,
+      availableModels,
+      newModel,
+    );
   };
 
   // Handle clear chat
@@ -510,6 +583,20 @@ export default function Playground() {
     };
   };
 
+  // Handle manual refresh — clears cached state and re-runs kubectl calls
+  const handleRefresh = async () => {
+    setSelectedDeployment('');
+    setAvailableModels([]);
+    setSelectedModel('');
+    setMessages([]);
+    try {
+      await fetch('/api/playground-state', { method: 'DELETE' });
+    } catch {
+      // Non-critical
+    }
+    fetchBundleDeployments();
+  };
+
   // Handle Enter key press
   const handleKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -523,9 +610,21 @@ export default function Playground() {
       {/* Documentation Panel */}
       <DocumentationPanel docFile="playground.md" />
 
-      <Typography variant="h4" component="h1" gutterBottom sx={{ fontWeight: 600, mb: 1 }}>
-        Playground
-      </Typography>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+        <Typography variant="h4" component="h1" sx={{ fontWeight: 600 }}>
+          Playground
+        </Typography>
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
+          onClick={handleRefresh}
+          disabled={loading}
+          sx={{ textTransform: 'none' }}
+        >
+          Refresh
+        </Button>
+      </Box>
       <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
         Chat with your deployed models
       </Typography>

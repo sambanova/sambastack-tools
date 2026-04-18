@@ -64,6 +64,7 @@ SambaWiz provides an intuitive interface to:
 
 ```bash
 npm install
+npm audit fix --force
 ```
 
 ### 2. Configure Application Settings

@@ -586,6 +586,16 @@ spec:
         if (monitoredDeployment === deploymentToDelete) {
           setMonitoredDeployment('');
         }
+        // Clear playground state if it references the deleted deployment
+        try {
+          const stateResponse = await fetch('/api/playground-state');
+          const stateData = await stateResponse.json();
+          if (stateData.success && stateData.state?.selectedDeployment === deploymentToDelete) {
+            await fetch('/api/playground-state', { method: 'DELETE' });
+          }
+        } catch {
+          // Non-critical — ignore errors
+        }
       } else {
         setError(`Failed to delete ${deploymentToDelete}: ${data.error}`);
       }

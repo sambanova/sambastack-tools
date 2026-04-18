@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect, useId, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -43,6 +43,7 @@ import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type { PefConfigs, PefMapping, CheckpointMapping, ConfigSelection } from '../types/bundle';
 import { generateBundleYaml } from '../utils/bundle-yaml-generator';
 import DocumentationPanel from './DocumentationPanel';
+import GaugeChart from 'react-gauge-chart';
 
 // Import the JSON data
 import pefConfigsData from '../data/pef_configs.json';
@@ -71,9 +72,8 @@ interface ModelConfig {
 export default function BundleForm() {
   const router = useRouter();
 
-  // Generate stable IDs for form fields to prevent hydration mismatches
-  const bundleNameId = useId();
-  const generatedYamlId = useId();
+  const bundleNameId = 'bundle-form-bundle-name';
+  const generatedYamlId = 'bundle-form-generated-yaml';
 
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [selectedConfigs, setSelectedConfigs] = useState<ConfigSelection[]>([]);
@@ -91,6 +91,16 @@ export default function BundleForm() {
       reason: string;
       message: string;
       isValid: boolean;
+      legalizerInfo?: {
+        errors?: string[];
+        warnings?: string[];
+        status?: string;
+        utilization?: {
+          ddr?: string;
+          hbm_resident?: string;
+          host?: string;
+        };
+      };
     };
     bundleName?: string;
   } | null>(null);
@@ -669,7 +679,23 @@ export default function BundleForm() {
             renderValue={(selected) => (
               <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
                 {selected.map((value) => (
-                  <Chip key={value} label={value} size="small" />
+                  <Chip
+                    key={value}
+                    label={value}
+                    size="small"
+                    onDelete={(e) => {
+                      e.stopPropagation();
+                      const updated = selectedModels.filter((m) => m !== value);
+                      setSelectedModels(updated);
+                      setSelectedConfigs((prev) => prev.filter((c) => c.modelName !== value));
+                      setDraftModels((prev) => {
+                        const next = { ...prev };
+                        delete next[value];
+                        return next;
+                      });
+                    }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  />
                 ))}
               </Box>
             )}
@@ -933,7 +959,7 @@ export default function BundleForm() {
             <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
               Please refer to our{' '}
               <a
-                href="https://docs.sambanova.ai/docs/en/admin/administration/custom-bundle-deployment"
+                href="https://docs.sambanova.ai/docs/en/sambastack/service-administration/custom-bundle-deployment"
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{ color: 'inherit', textDecoration: 'underline' }}
@@ -1004,22 +1030,47 @@ export default function BundleForm() {
                       : 'Validation failed with the following errors:'}
                   </Typography>
                   {!validationResult.validationStatus.isValid && (
-                    <Box
-                      component="pre"
-                      sx={{
-                        mt: 1,
-                        p: 1.5,
-                        bgcolor: 'black',
-                        color: 'white',
-                        borderRadius: 1,
-                        fontSize: '0.75rem',
-                        overflow: 'auto',
-                        maxHeight: '300px',
-                        whiteSpace: 'pre-wrap',
-                        wordWrap: 'break-word',
-                      }}
-                    >
-                      {validationResult.validationStatus.message}
+                    <Box>
+                      {/* Show legalizerInfo errors if available, otherwise fall back to condition message */}
+                      {validationResult.validationStatus.legalizerInfo?.errors && validationResult.validationStatus.legalizerInfo.errors.length > 0 ? (
+                        <Box>
+                          <Box
+                            component="pre"
+                            sx={{
+                              mt: 1,
+                              p: 1.5,
+                              bgcolor: 'black',
+                              color: 'white',
+                              borderRadius: 1,
+                              fontSize: '0.75rem',
+                              overflow: 'auto',
+                              maxHeight: '300px',
+                              whiteSpace: 'pre-wrap',
+                              wordWrap: 'break-word',
+                            }}
+                          >
+                            {validationResult.validationStatus.legalizerInfo.errors.join('\n')}
+                          </Box>
+                        </Box>
+                      ) : (
+                        <Box
+                          component="pre"
+                          sx={{
+                            mt: 1,
+                            p: 1.5,
+                            bgcolor: 'black',
+                            color: 'white',
+                            borderRadius: 1,
+                            fontSize: '0.75rem',
+                            overflow: 'auto',
+                            maxHeight: '300px',
+                            whiteSpace: 'pre-wrap',
+                            wordWrap: 'break-word',
+                          }}
+                        >
+                          {validationResult.validationStatus.message}
+                        </Box>
+                      )}
                     </Box>
                   )}
                 </Box>
@@ -1035,6 +1086,55 @@ export default function BundleForm() {
               )}
             </Box>
           )}
+
+          {/* Memory Utilization Pie Charts */}
+          {(() => {
+            const utilization = validationResult?.validationStatus?.legalizerInfo?.utilization;
+            const parseDDR = utilization?.ddr !== undefined ? parseFloat(utilization.ddr) : NaN;
+            const parseHost = utilization?.host !== undefined ? parseFloat(utilization.host) : NaN;
+
+            const Gauge = ({ value, label }: { value: number; label: string }) => {
+              const isNaN_ = Number.isNaN(value);
+              const pct = isNaN_ ? 0 : Math.min(Math.max(value, 0), 1);
+              const displayLabel = isNaN_ ? '—' : `${(value * 100).toFixed(1)}%`;
+
+              return (
+                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  <Box sx={{ opacity: isValidating ? 0.4 : 1, transition: 'opacity 0.3s' }}>
+                    <GaugeChart
+                      id={`gauge-${label}`}
+                      percent={isNaN_ ? 0 : pct}
+                      nrOfLevels={2}
+                      arcsLength={[0.8, 0.2]}
+                      colors={['#2e7d32', '#b71c1c']}
+                      arcWidth={0.3}
+                      arcPadding={0.02}
+                      needleColor="#aaaaaa"
+                      needleBaseColor="#aaaaaa"
+                      animate={false}
+                      hideText={true}
+                      style={{ width: 160 }}
+                    />
+                  </Box>
+                  <Typography variant="body2" sx={{ fontWeight: 700, mt: -1, color: pct > 0.8 ? '#ef5350' : '#66bb6a' }}>
+                    {displayLabel}
+                  </Typography>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', textAlign: 'center', fontWeight: 700 }}>
+                    {label}
+                  </Typography>
+                </Box>
+              );
+            };
+
+            return (
+              <Tooltip title="Validate your bundle to refresh memory utilization stats" arrow>
+                <Box sx={{ mt: 3, display: 'flex', gap: 4, justifyContent: 'center' }}>
+                  <Gauge value={parseDDR} label="DDR Memory Utilization" />
+                  <Gauge value={parseHost} label="Host Memory Utilization" />
+                </Box>
+              </Tooltip>
+            );
+          })()}
 
           {/* Save Result */}
           {saveResult && (

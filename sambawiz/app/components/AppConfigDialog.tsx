@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useId } from 'react';
+import { useState } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -20,8 +20,7 @@ interface AppConfigDialogProps {
 }
 
 export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppConfigDialogProps) {
-  // Generate stable ID for form field to prevent hydration mismatches
-  const checkpointsDirId = useId();
+  const checkpointsDirId = 'app-config-checkpoints-dir';
 
   const [checkpointsDir, setCheckpointsDir] = useState('');
   const [creating, setCreating] = useState(false);
