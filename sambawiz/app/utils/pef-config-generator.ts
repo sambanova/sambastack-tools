@@ -33,6 +33,7 @@ interface KubectlPefItem {
   spec?: {
     metadata?: {
       task_name?: string;
+      batch_size?: number;
       dynamic_dims?: {
         batch_size?: {
           values?: number[];
@@ -211,8 +212,10 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
             maxBuffer: 2 * 1024 * 1024, // 100MB to handle large PEF output
           });
           const individualPef: KubectlPefItem = JSON.parse(individualOutput);
-          const dynamicDims = individualPef.spec?.metadata?.dynamic_dims;
+          const pefMetadata = individualPef.spec?.metadata;
+          const dynamicDims = pefMetadata?.dynamic_dims;
           const batchSizeValues = dynamicDims?.batch_size?.values;
+          const topLevelBatchSize = pefMetadata?.batch_size;
           const ssMax = dynamicDims?.decode_seq?.max;
           const ssMin = dynamicDims?.decode_seq?.min;
           const ssStep = dynamicDims?.decode_seq?.step;
@@ -238,6 +241,15 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
               );
               processedCount++;
             }
+          } else if (topLevelBatchSize !== undefined && ssMax !== undefined) {
+            // Static batch size DYT: single (ss, bs) entry, stored as a single
+            // object so downstream code emits a plain `pef:` line (no dynamic_dims).
+            configs[pefName] = {
+              ss: formatSsValue(ssMax),
+              bs: topLevelBatchSize.toString(),
+              latestVersion: dytLatestVersion,
+            };
+            processedCount++;
           } else {
             console.warn(`[PEF Generator] DYT PEF ${pefName} missing dynamic_dims data, skipping`);
           }

@@ -427,6 +427,54 @@ describe('pef-config-generator', () => {
       expect(writtenData['model-ss1024-bs1']).toBeDefined();
     });
 
+    it('should handle DYT PEFs with static batch_size (no batch_size under dynamic_dims)', async () => {
+      const listOutput = {
+        items: [
+          {
+            metadata: { name: 'minimax-m2p5-ss163840-bs2-dyt-1' },
+            spec: { versions: { '1': {} } },
+          },
+        ],
+      };
+
+      const individualPefOutput = {
+        metadata: { name: 'minimax-m2p5-ss163840-bs2-dyt-1' },
+        spec: {
+          metadata: {
+            batch_size: 2,
+            dynamic_dims: {
+              decode_seq: { min: 4096, max: 163840, step: 4096 },
+              kv_seq: { min: 4096, max: 163840, step: 4096 },
+              prefill_seq: { min: 4096, max: 163840, step: 4096 },
+            },
+          },
+          versions: { '1': {} },
+        },
+      };
+
+      (execSync as jest.Mock).mockImplementation((cmd: string) => {
+        if (cmd === 'kubectl -n default get pef -o json') {
+          return JSON.stringify(listOutput);
+        }
+        return JSON.stringify(individualPefOutput);
+      });
+
+      const result = await generatePefConfigs();
+
+      expect(result.success).toBe(true);
+
+      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
+      const writtenData = JSON.parse(writeCall[1]);
+
+      // Stored as a single object (not array) so downstream code emits a plain
+      // `pef:` line instead of `dynamic_dims`.
+      expect(writtenData['minimax-m2p5-ss163840-bs2-dyt-1']).toEqual({
+        ss: '160k',
+        bs: '2',
+        latestVersion: '1',
+      });
+    });
+
     it('should skip DYT PEFs missing dynamic_dims data', async () => {
       const listOutput = {
         items: [

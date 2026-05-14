@@ -90,6 +90,7 @@ interface BuildBundleYamlOptions {
   checkpointMapping: Record<string, { path: string; vision_embedding_checkpoint?: string }>;
   checkpointsDir:    string;
   bundleName:        string;
+  pefConfigs?:       Record<string, unknown>;
 }
 
 /** Format Kubernetes bundle validation errors the same way the UI does */
@@ -111,7 +112,12 @@ function printValidationErrors(conds: any[]): void {
 }
 
 function buildBundleYaml(opts: BuildBundleYamlOptions): { yaml: string; templateName: string; bundleManifestName: string } {
-  const { selections, checkpointMapping, checkpointsDir, bundleName } = opts;
+  const { selections, checkpointMapping, checkpointsDir, bundleName, pefConfigs } = opts;
+  // A PEF emits `dynamic_dims` in the YAML only when its pef_configs entry is an array
+  // (multiple SS/BS combos). Single-object entries — including static-batch DYT PEFs —
+  // render as a plain `pef:` line, matching bundle-yaml-generator.ts.
+  const isDynamicDimsPef = (pefName: string): boolean =>
+    Array.isArray(pefConfigs?.[pefName]);
   const templateName       = `bt-${bundleName}`;
   const bundleManifestName = `b-${bundleName}`;
   const tmpl: Record<string, string> = {};
@@ -146,7 +152,7 @@ function buildBundleYaml(opts: BuildBundleYamlOptions): { yaml: string; template
       const dytByPef: Record<string, { pef: string; version: string; bsValues: number[] }> = {};
       const regularConfigs: BundleSelection[] = [];
       for (const c of configs) {
-        if (/-dyt-/.test(c.pef)) {
+        if (isDynamicDimsPef(c.pef)) {
           if (!dytByPef[c.pef]) dytByPef[c.pef] = { pef: c.pef, version: c.version, bsValues: [] };
           dytByPef[c.pef].bsValues.push(parseInt(c.bs, 10));
         } else {
@@ -1833,6 +1839,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     checkpointMapping,
     checkpointsDir: appConfig.checkpointsDir,
     bundleName: 'my-bundle',
+    pefConfigs,
   });
 
   // Extract base bundle name from YAML (strips b- prefix from Bundle metadata.name)
@@ -1902,6 +1909,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       checkpointMapping,
       checkpointsDir: appConfig.checkpointsDir,
       bundleName,
+      pefConfigs,
     });
     finalYaml   = builtYaml;
     activeBName = builtBName;
