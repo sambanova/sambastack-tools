@@ -51,14 +51,18 @@ export default function AppLayout({ children }: AppLayoutProps) {
   } = useAppContext();
 
   const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
+  const [prevValidationError, setPrevValidationError] = useState<typeof validationError>(validationError);
   const [appVersion, setAppVersion] = useState<string | null>(null);
 
-  // Show error dialog when validation fails
-  useEffect(() => {
+  // Open the dialog whenever validationError transitions to a new truthy value.
+  // Using the "store previous value" pattern instead of an effect so dismissal
+  // (setShowErrorDialog(false)) is preserved until a new error arrives.
+  if (validationError !== prevValidationError) {
+    setPrevValidationError(validationError);
     if (validationError) {
       setShowErrorDialog(true);
     }
-  }, [validationError]);
+  }
 
   // Fetch app version on component mount
   useEffect(() => {

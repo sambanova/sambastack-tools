@@ -18,6 +18,8 @@ const config: Config = {
     '^react-markdown$': '<rootDir>/app/__mocks__/react-markdown.js',
     '^react-syntax-highlighter$': '<rootDir>/app/__mocks__/react-syntax-highlighter.js',
     '^react-syntax-highlighter/dist/esm/(.*)$': '<rootDir>/app/__mocks__/react-syntax-highlighter.js',
+    // Mock react-gauge-chart (pulls in d3 ESM which jest can't parse)
+    '^react-gauge-chart$': '<rootDir>/app/__mocks__/react-gauge-chart.js',
   },
   testMatch: [
     '**/__tests__/**/*.test.[jt]s?(x)',

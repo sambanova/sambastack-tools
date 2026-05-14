@@ -403,6 +403,7 @@ export default function BundleDeploymentManager() {
       completedRefreshRef.current = monitoredDeployment;
       fetchBundleDeployments();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [podStatus, monitoredDeployment]);
 
   // Auto-refresh pod status with adaptive back-off

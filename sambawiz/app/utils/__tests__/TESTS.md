@@ -2,9 +2,9 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** 2026-03-27 - DYT always enabled (removed betaFeatures gate); removed checkpoint_mapping.json checks from Home/AppLayout; checkpoint mapping loaded dynamically in Playground; removed stale Checkpoint Mapping Validation manual test section
+**Last Updated:** 2026-05-14 - Restored failing test suites: installed missing `@testing-library/dom` peer dep, mocked `react-gauge-chart` (d3 ESM parse error), wrapped `renderWithProviders` with `AppContextProvider` so components consuming `useAppContext` render in tests; also fixed AppLayout setState-in-effect lint error and broken cli:lint script (removed non-existent `bin/cli-utils.ts` reference)
 **Total Tests:** 75 automated + comprehensive manual test plan
-**Test Status:** ✅ All 75 tests passing with clean console output
+**Test Status:** ✅ All 75 tests across 7 suites passing
 **Focus:** Core business logic, API integration, and new feature validation
 
 ## Table of Contents

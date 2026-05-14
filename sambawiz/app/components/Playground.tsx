@@ -269,6 +269,7 @@ export default function Playground() {
       setSelectedDeployment(deployed[0].name);
       fetchModelsForDeployment(deployed[0].name);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bundleDeployments, deploymentStatuses, selectedDeployment]);
 
   // Fetch models for a deployment

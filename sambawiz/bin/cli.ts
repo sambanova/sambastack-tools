@@ -2776,6 +2776,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
 // ─── installSambaStackMenu() ──────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function installSambaStackMenu(rl: any, namespace: string) {
   sectionHeader('Install SambaStack', '🔧');
 
