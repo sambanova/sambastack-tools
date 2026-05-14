@@ -59,6 +59,15 @@
     "deepseek-ss8192-bs1",
     "deepseek-ss8192-bs4"
   ],
+  "DeepSeek-V3.2": [
+    "deepseek-ss131072-bs1",
+    "deepseek-ss16384-bs1",
+    "deepseek-ss32768-bs1",
+    "deepseek-ss4096-bs1",
+    "deepseek-ss4096-bs4",
+    "deepseek-ss8192-bs1",
+    "deepseek-ss8192-bs4"
+  ],
   "E5-Mistral-7B-Instruct": [
     "e5-mistral-7b-ss4096-bs1",
     "e5-mistral-7b-ss4096-bs16",

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   Box,
@@ -151,6 +151,9 @@ export default function BundleDeploymentManager() {
     cachePod: PodStatusInfo | null;
     defaultPod: PodStatusInfo | null;
   }>>({});
+  // Names of deployments just kicked off via the Deploy button — shown as "Deploying"
+  // in Section 1 until kubectl actually reports their pods.
+  const [pendingDeployingNames, setPendingDeployingNames] = useState<Set<string>>(new Set());
 
   // Save functionality
   const [saveDialogOpen, setSaveDialogOpen] = useState<boolean>(false);
@@ -363,6 +366,45 @@ export default function BundleDeploymentManager() {
     };
   }, [monitoredDeployment]);
 
+  // Track which deployment we've already auto-refreshed Section 1 for, to avoid re-firing
+  const completedRefreshRef = useRef<string>('');
+
+  // Once kubectl reports pods for a pending deployment, drop the optimistic override
+  useEffect(() => {
+    setPendingDeployingNames((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set(prev);
+      for (const name of prev) {
+        const info = allDeploymentStatuses[name];
+        if (info && (info.cachePod || info.defaultPod)) {
+          next.delete(name);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [allDeploymentStatuses]);
+
+  // When the monitored deployment becomes fully ready, auto-refresh Section 1 once
+  useEffect(() => {
+    if (!monitoredDeployment) {
+      completedRefreshRef.current = '';
+      return;
+    }
+    const { cachePod, defaultPod } = podStatus;
+    if (
+      cachePod &&
+      defaultPod &&
+      cachePod.ready === cachePod.total &&
+      defaultPod.ready === defaultPod.total &&
+      completedRefreshRef.current !== monitoredDeployment
+    ) {
+      completedRefreshRef.current = monitoredDeployment;
+      fetchBundleDeployments();
+    }
+  }, [podStatus, monitoredDeployment]);
+
   // Auto-refresh pod status with adaptive back-off
   useEffect(() => {
     if (!monitoredDeployment) {
@@ -530,6 +572,12 @@ spec:
         });
         // Set the monitored deployment to start log monitoring
         setMonitoredDeployment(deploymentName);
+        // Mark as pending so Section 1 shows "Deploying" even before pods are visible
+        setPendingDeployingNames((prev) => {
+          const next = new Set(prev);
+          next.add(deploymentName);
+          return next;
+        });
         // Refresh the bundle deployments list
         await fetchBundleDeployments();
       } else {
@@ -628,6 +676,12 @@ spec:
       podStatusInfo.cachePod,
       podStatusInfo.defaultPod
     );
+
+    // If we just kicked off this deployment, pods may not be visible yet —
+    // surface "Deploying" instead of "Not Deployed" until kubectl catches up.
+    if (status === 'Not Deployed' && pendingDeployingNames.has(deployment.name)) {
+      return { text: 'Deploying', color: 'warning.main' };
+    }
 
     switch (status) {
       case 'Deployed':
@@ -898,6 +952,9 @@ spec:
                       {copiedYaml ? 'Copied!' : 'Copy'}
                     </Button>
                   </Box>
+                  <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
+                    Feel free to edit the YAML below as needed or use it as-is
+                  </Typography>
                   <TextField
                     fullWidth
                     multiline
