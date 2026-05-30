@@ -81,8 +81,14 @@
   "gemma-3-27b-it": [
     "gemma3-27b-ss131072-bs8-dyt-1"
   ],
+  "gemma-4-31B-it": [
+    "gemma4-31b-ss131072-bs8-dyt-1"
+  ], 
+  "gpt-oss-20b": [
+    "gpt-oss-20b-fp8-ss131072-bs8-dyt-1-cd"
+  ],   
   "gpt-oss-120b": [
-    "gpt-oss-fp8-ss131072-bs8-dyt-1"
+    "gpt-oss-fp8-ss131072-bs8-dyt-1-cd"
   ],
   "Llama-3.3-Swallow-70B-Instruct-v0.4": [
     "llama-3p1-70b-ss131072-bs1-sd5",
@@ -204,11 +210,18 @@
     "qwen-3-32b-ss8192-bs1",
     "qwen-3-32b-ss8192-bs4"
   ],
-  "MiniMax-M2.5": [    
-    "minimax-m2p5-ss163840-bs2-dyt-1",
-    "minimax-m2p5-ss32768-bs8-dyt-1"
+  "MiniMax-M2.5": [  
+    "minimax-m2p5-ss196608-bs2-dyt-1-cd",
+    "minimax-m2p5-ss32768-bs8-dyt-1-cd"    
   ],
-  "Qwen3-235B": [
+  "MiniMax-M2.7": [  
+    "minimax-m2p5-ss196608-bs2-dyt-1-cd",
+    "minimax-m2p5-ss32768-bs8-dyt-1-cd"    
+  ],
+  "Mistral-Large-3-675B-Instruct-2512": [  
+    "mistral-large-3-ss8192-bs1"   
+  ],
+  "Qwen3-235B-A22B-Instruct-2507": [
     "qwen-3-235b-ss131072-bs2-dyt-1",
     "qwen-3-235b-ss32768-bs8-dyt-1"
   ],
