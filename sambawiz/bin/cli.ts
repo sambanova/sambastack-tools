@@ -44,6 +44,12 @@ function normalizeApiUrl(apiDomain: string): string {
   return base;
 }
 
+function normalizeCheckpointsDir(dir: string): string {
+  const trimmed = dir.trim();
+  if (trimmed === '') return '';
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+}
+
 function generateCheckpointKey(modelName: string): string {
   return modelName
     .toUpperCase()
@@ -312,9 +318,16 @@ function highestVersion(versions: Record<string, any>): string {
   })[keys.length - 1];
 }
 
-async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, checkpointOverrides: Record<string, string> = {}): Promise<{ count: number }> {
-  spinner.start('Generating checkpoint mapping from cluster...');
-  await tick();
+const ckLog  = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[Checkpoint] ${msg}\n`)); };
+const pefLog = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[PEF Generator] ${msg}\n`)); };
+
+async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, checkpointOverrides: Record<string, string> = {}, verbose = true, skipPefGeneration = false): Promise<{ count: number }> {
+  try {
+    const cfg = JSON.parse(readFileSync(path.join(PROJECT_ROOT, 'app-config.json'), 'utf-8'));
+    ckLog(`Using environment: ${cfg.currentKubeconfig || 'unknown'}`, verbose);
+  } catch { /* skip if config unreadable */ }
+  ckLog(`Using namespace: ${namespace}`, verbose);
+  ckLog('Running kubectl get models -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
   let rawOutput: string;
@@ -322,11 +335,14 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
     rawOutput = execSync(`kubectl -n ${namespace} get models -o json`, {
       env,
       encoding: 'utf-8',
-      timeout: 60000,
+      timeout: 15000,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e: any) {
-    const detail = e.stderr ? String(e.stderr).trim().split('\n')[0] : e.message.split('\n')[0];
+    const raw = e.stderr ? String(e.stderr).trim() : e.message;
+    const errField = raw.match(/err="([^"]+)"/);
+    const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
+    const detail   = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
     throw new Error(`kubectl get models failed: ${detail}`);
   }
 
@@ -360,11 +376,274 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
     mapping[modelName] = entry;
   }
 
+  const count = Object.keys(mapping).length;
   const outputPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
   writeFileSync(outputPath, JSON.stringify(mapping, null, 2) + '\n');
-  spinner.succeed('Checkpoint mapping generated');
-  return { count: Object.keys(mapping).length };
+  ckLog(`✓ Generated checkpoint_mapping.json with ${count} models`, verbose);
+
+  // Mirror UI: immediately generate pef_configs.json and populate model_type
+  if (!skipPefGeneration) {
+    try {
+      await generatePefConfigs(kubeconfigPath, namespace, verbose);
+    } catch (e: any) {
+      if (verbose) process.stdout.write(chalk.yellow(`  PEF config generation skipped: ${e.message.split('\n')[0]}\n`));
+    }
+  }
+
+  return { count };
 }
+
+// ─── generatePefConfigs() ─────────────────────────────────────────────────────
+
+function parsePefName(pefName: string): { ss: number; bs: number } | null {
+  const ssMatch = pefName.match(/ss(\d+)/);
+  const bsMatch = pefName.match(/bs(\d+)/);
+  if (!ssMatch || !bsMatch) return null;
+  return { ss: parseInt(ssMatch[1], 10), bs: parseInt(bsMatch[1], 10) };
+}
+
+function formatSsValue(ss: number): string {
+  if (ss < 1024) return ss.toString();
+  return `${ss / 1024}k`;
+}
+
+function getLatestVersionFromVersions(versions: Record<string, unknown> | undefined): string {
+  if (!versions || typeof versions !== 'object') return '1';
+  const nums = Object.keys(versions).map(v => parseInt(v, 10)).filter(v => !isNaN(v));
+  return nums.length === 0 ? '1' : Math.max(...nums).toString();
+}
+
+function selectDytSsValues(ssMin: number, ssMax: number, ssStep: number): number[] {
+  const valid = new Set<number>();
+  for (let ss = ssMin; ss <= ssMax; ss += ssStep) valid.add(ss);
+  const selected: number[] = [];
+  let cur = ssMax;
+  while (cur >= ssMin) {
+    if (valid.has(cur)) selected.push(cur);
+    cur = Math.floor(cur / 2);
+  }
+  return selected.filter(ss => ss >= 32768);
+}
+
+async function generatePefConfigs(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number; modelTypeCount: number }> {
+  pefLog('Running kubectl get pef -o json...', verbose);
+
+  const env = { ...process.env, KUBECONFIG: kubeconfigPath };
+
+  let rawPef: string;
+  try {
+    rawPef = execSync(`kubectl -n ${namespace} get pef -o json`, {
+      env, encoding: 'utf-8', timeout: 30000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e: any) {
+    const raw = e.stderr ? String(e.stderr).trim() : e.message;
+    const errField = raw.match(/err="([^"]+)"/);
+    const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
+    const detail   = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
+    throw new Error(`kubectl get pef failed: ${detail}`);
+  }
+
+  const pefData = JSON.parse(rawPef);
+  const items: any[] = pefData.items || [];
+
+  pefLog(`Found ${items.length} PEFs`, verbose);
+  pefLog('Processing PEFs...', verbose);
+
+  const configs: Record<string, any> = {};
+  let processedCount = 0;
+
+  for (const item of items) {
+    const pefName: string = item.metadata?.name;
+    if (!pefName) continue;
+
+    const versions = item.spec?.versions;
+    const latestVersion = getLatestVersionFromVersions(versions);
+    const isDyt = pefName.includes('dyt');
+
+    if (isDyt) {
+      try {
+        const indOut = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
+          env, encoding: 'utf-8', timeout: 15000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        const ind: any = JSON.parse(indOut);
+        const pefMeta    = ind.spec?.metadata;
+        const dynDims    = pefMeta?.dynamic_dims;
+        const bsValues: number[] = dynDims?.batch_size?.values;
+        const topLevelBs: number | undefined = pefMeta?.batch_size;
+        const ssMax: number | undefined = dynDims?.decode_seq?.max;
+        const ssMin: number | undefined = dynDims?.decode_seq?.min;
+        const ssStep: number | undefined = dynDims?.decode_seq?.step;
+        const dytVer = getLatestVersionFromVersions(ind.spec?.versions);
+
+        if (bsValues?.length > 0 && ssMax !== undefined) {
+          const selectedSs = (ssMin !== undefined && ssStep !== undefined)
+            ? selectDytSsValues(ssMin, ssMax, ssStep)
+            : [ssMax];
+          if (selectedSs.length > 0) {
+            configs[pefName] = selectedSs.flatMap((ss: number) =>
+              bsValues.map((bs: number) => ({ ss: formatSsValue(ss), bs: bs.toString(), latestVersion: dytVer }))
+            );
+            processedCount++;
+          }
+        } else if (topLevelBs !== undefined && ssMax !== undefined) {
+          configs[pefName] = { ss: formatSsValue(ssMax), bs: topLevelBs.toString(), latestVersion: dytVer };
+          processedCount++;
+        }
+      } catch { /* skip individual DYT PEF on error */ }
+    } else {
+      const parsed = parsePefName(pefName);
+      if (parsed) {
+        configs[pefName] = { ss: formatSsValue(parsed.ss), bs: parsed.bs.toString(), latestVersion };
+        processedCount++;
+      }
+    }
+  }
+
+  pefLog(`✓ Processed ${processedCount}/${items.length} PEFs`, verbose);
+
+  // Apply DYT precedence: if a model has DYT PEFs, remove non-DYT ones
+  const pefMappingPath = path.join(DATA_DIR, 'pef_mapping.json');
+  if (existsSync(pefMappingPath)) {
+    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
+    for (const pefNames of Object.values(pefMapping)) {
+      const hasDyt = pefNames.some(name => name.includes('dyt') && configs[name] !== undefined);
+      if (hasDyt) {
+        for (const name of pefNames) {
+          if (!name.includes('dyt')) delete configs[name];
+        }
+      }
+    }
+  }
+
+  // Update checkpoint_mapping.json with model_type from pef spec.metadata.task_name
+  let modelTypeCount = 0;
+  const checkpointMappingPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
+  if (existsSync(checkpointMappingPath) && existsSync(pefMappingPath)) {
+    const checkpointMapping: Record<string, any> = JSON.parse(readFileSync(checkpointMappingPath, 'utf-8'));
+    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
+    let updated = false;
+
+    for (const [modelName, pefNames] of Object.entries(pefMapping)) {
+      if (!checkpointMapping[modelName]) continue;
+      if (checkpointMapping[modelName].model_type) continue;
+
+      const repPef = pefNames.find(name => items.some((i: any) => i.metadata?.name === name));
+      if (!repPef) continue;
+
+      try {
+        const indOut = execSync(`kubectl -n ${namespace} get pef ${repPef} -o json`, {
+          env, encoding: 'utf-8', timeout: 15000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        const ind: any = JSON.parse(indOut);
+        const taskName = ind.spec?.metadata?.task_name;
+        if (taskName) {
+          checkpointMapping[modelName].model_type = taskName;
+          pefLog(`Set model_type="${taskName}" for ${modelName}`, verbose);
+          updated = true;
+          modelTypeCount++;
+        }
+      } catch { /* skip on error */ }
+    }
+
+    if (updated) {
+      writeFileSync(checkpointMappingPath, JSON.stringify(checkpointMapping, null, 2) + '\n');
+      pefLog('✓ Updated checkpoint_mapping.json with model_type fields', verbose);
+    }
+  }
+
+  // Write pef_configs.json
+  const pefConfigsPath = path.join(DATA_DIR, 'pef_configs.json');
+  writeFileSync(pefConfigsPath, JSON.stringify(configs, null, 2) + '\n');
+
+  pefLog(`✓ Generated pef_configs.json with ${processedCount} entries`, verbose);
+  return { count: processedCount, modelTypeCount };
+}
+
+// ─── runDataFileStepTracker() ─────────────────────────────────────────────────
+// Shared step-tracker UI used at startup, activate, and add-env.
+// Shows [1/2] / [2/2] animated lines with spinner + timing.
+
+async function runDataFileStepTracker(
+  kPath: string,
+  namespace: string,
+  overrides: Record<string, string>,
+  label?: string,
+): Promise<void> {
+  const LABEL_W = 26;
+  const DOTS    = '  ........  ';
+  const FRAMES  = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+
+  if (label) {
+    process.stdout.write('\n');
+    process.stdout.write(chalk.hex(BRAND).bold('  Initializing') + chalk.reset(`  [${label}]\n\n`));
+  }
+
+  // Step 1 — checkpoint_mapping.json
+  const lbl1 = 'checkpoint_mapping.json'.padEnd(LABEL_W);
+  let fr1 = 0;
+  const s1 = Date.now();
+  process.stdout.write(`  [1/2]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[0])}  `);
+  const tick1 = setInterval(() => {
+    fr1++;
+    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[fr1 % FRAMES.length])}  `);
+  }, 80);
+
+  let ckCount = 0; let ckOk = false;
+  try {
+    const r = await generateCheckpointMapping(kPath, namespace, overrides, false, true);
+    ckCount = r.count; ckOk = true;
+  } catch { /* handled below */ }
+  clearInterval(tick1);
+  const t1 = ((Date.now() - s1) / 1000).toFixed(1) + 's';
+
+  if (ckOk) {
+    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${chalk.green('✓')}  ${`${ckCount} models`.padEnd(12)}  ${chalk.reset(`(${t1})`)}\n`);
+  } else {
+    const cached = existsSync(path.join(DATA_DIR, 'checkpoint_mapping.json'));
+    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? 'cached' : 'failed').padEnd(12)}\n`);
+    if (!cached) {
+      process.stdout.write(chalk.yellow(`\n  Bundle Builder unavailable until cluster reachable.\n`));
+    }
+  }
+
+  // Step 2 — pef_configs.json
+  const lbl2 = 'pef_configs.json'.padEnd(LABEL_W);
+  let fr2 = 0;
+  const s2 = Date.now();
+  process.stdout.write(`  [2/2]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[0])}  `);
+  const tick2 = setInterval(() => {
+    fr2++;
+    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[fr2 % FRAMES.length])}  `);
+  }, 80);
+
+  let pefCount = 0; let typeCount = 0; let pefOk = false;
+  try {
+    const r = await generatePefConfigs(kPath, namespace, false);
+    pefCount = r.count; typeCount = r.modelTypeCount; pefOk = true;
+  } catch {
+    if (existsSync(path.join(DATA_DIR, 'pef_configs.json'))) {
+      pefCount = Object.keys(JSON.parse(readFileSync(path.join(DATA_DIR, 'pef_configs.json'), 'utf-8'))).length;
+    }
+  }
+  clearInterval(tick2);
+  const t2 = ((Date.now() - s2) / 1000).toFixed(1) + 's';
+
+  if (pefOk) {
+    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${chalk.green('✓')}  ${`${pefCount} PEFs`.padEnd(12)}  ${chalk.reset(`(${t2})`)}\n`);
+    if (typeCount > 0) {
+      process.stdout.write(`         ${chalk.reset('└─')} model_type set for ${typeCount} models\n`);
+    }
+  } else {
+    const cached = existsSync(path.join(DATA_DIR, 'pef_configs.json'));
+    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? `cached (${pefCount} PEFs)` : 'failed').padEnd(12)}\n`);
+  }
+
+  process.stdout.write('\n');
+}
+
 const CONFIG_PATH = path.join(PROJECT_ROOT, 'app-config.json');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -870,31 +1149,39 @@ async function addEnvironmentMenu(rl: any) {
 
   if (selected === 'add') {
     // ── Step 1: Environment name ──────────────────────────────────────────────
-    const name = await input(rl, '1/6  Environment name');
+    const name = await input(rl, '1/7  Environment name');
     if (!name || name === ESC) return;
     if (/\s/.test(name)) { errorMsg('Environment name cannot contain spaces.'); return; }
     if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
 
     // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
     process.stdout.write(chalk.reset('\n  Paste the base64-encoded kubeconfig or enter a file path.\n  The file will be saved as kubeconfigs/kubeconfig-' + name + '.yaml\n\n'));
-    const kubeconfigInput = await input(rl, '2/6  Kubeconfig (base64 or file path)');
+    const kubeconfigInput = await input(rl, '2/7  Kubeconfig (base64 or file path)');
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
     // ── Step 3: Namespace ─────────────────────────────────────────────────────
-    const ns = await input(rl, '3/6  Namespace', 'default');
+    const ns = await input(rl, '3/7  Namespace', 'default');
     if (ns === ESC) return;
 
     // ── Step 4: UI Domain ─────────────────────────────────────────────────────
-    const uiDomain = await input(rl, '4/6  UI Domain (optional)');
+    const uiDomain = await input(rl, '4/7  UI Domain (optional)');
     if (uiDomain === ESC) return;
 
     // ── Step 5: API Domain ────────────────────────────────────────────────────
-    const apiDomain = await input(rl, '5/6  API Domain (optional)');
+    const apiDomain = await input(rl, '5/7  API Domain (optional)');
     if (apiDomain === ESC) return;
 
     // ── Step 6: API Key ───────────────────────────────────────────────────────
-    const apiKey = await input(rl, '6/6  API Key (optional)');
+    const apiKey = await input(rl, '6/7  API Key (optional)');
     if (apiKey === ESC) return;
+
+    // ── Step 7: Checkpoints Directory (top-level, only prompt if not already set) ──
+    let checkpointsDirValue = appConfig.checkpointsDir || '';
+    if (!checkpointsDirValue) {
+      const ckDir = await input(rl, '7/7  Checkpoints Directory (e.g. gs://bucket/path)');
+      if (ckDir === ESC) return;
+      checkpointsDirValue = normalizeCheckpointsDir(ckDir);
+    }
 
     // ── Save kubeconfig file ──────────────────────────────────────────────────
     const kubeconfigsDir = path.join(PROJECT_ROOT, 'kubeconfigs');
@@ -929,29 +1216,26 @@ async function addEnvironmentMenu(rl: any) {
     // ── Write app-config.json ─────────────────────────────────────────────────
     appConfig.kubeconfigs = appConfig.kubeconfigs || {};
     appConfig.kubeconfigs[name] = {
-      file:      destRelative,
-      namespace: ns || 'default',
-      uiDomain:  uiDomain  || '',
-      apiDomain: apiDomain || '',
-      apiKey:    apiKey    || '',
+      file:          destRelative,
+      namespace:     ns || 'default',
+      uiDomain:      uiDomain  || '',
+      apiDomain:     apiDomain || '',
+      apiKey:        apiKey    || '',
+      enableUpdates: true,
     };
     appConfig.currentKubeconfig = name;
+    if (checkpointsDirValue) appConfig.checkpointsDir = checkpointsDirValue;
 
     writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
     successMsg(`Environment "${name}" added and set as active.`);
     infoRow('Kubeconfig', destRelative);
     if (uiDomain)  infoRow('UI Domain',  uiDomain);
     if (apiDomain) infoRow('API Domain', apiDomain);
+    if (checkpointsDirValue) infoRow('Checkpoints Dir', checkpointsDirValue);
     process.stdout.write('\n');
 
-    // ── Auto-generate checkpoint mapping ──────────────────────────────────────
-    try {
-      const overrides: Record<string, string> = appConfig.checkpoint_overrides || {};
-      await generateCheckpointMapping(destPath, ns || 'default', overrides);
-    } catch (e: any) {
-      spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
-      process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n  Run Validate to diagnose cluster connectivity.\n\n`));
-    }
+    // ── Auto-generate checkpoint mapping + PEF configs ────────────────────────
+    await runDataFileStepTracker(destPath, ns || 'default', appConfig.checkpoint_overrides || {});
 
     // ── Stay in sub-menu for the new environment ───────────────────────────────
     process.stdout.write('\n');
@@ -986,7 +1270,21 @@ async function addEnvironmentMenu(rl: any) {
         if (apiD === ESC) continue;
         const aKey      = await input(rl, 'API Key',          ec.apiKey    || '');
         if (aKey === ESC) continue;
-        freshConfig.kubeconfigs[name] = { ...ec, file: file || ec.file, namespace: editNs || ec.namespace, uiDomain: uiD, apiDomain: apiD, apiKey: aKey };
+        const curCkDir  = freshConfig.checkpointsDir || '';
+        const newCkDir  = await input(rl, 'Checkpoints Directory', curCkDir);
+        if (newCkDir === ESC) continue;
+        const enableUpdStr = await input(rl, 'Enable Updates (y/n)', ec.enableUpdates === false ? 'n' : 'y');
+        if (enableUpdStr === ESC) continue;
+        freshConfig.kubeconfigs[name] = {
+          ...ec,
+          file:          file    || ec.file,
+          namespace:     editNs  || ec.namespace,
+          uiDomain:      uiD,
+          apiDomain:     apiD,
+          apiKey:        aKey,
+          enableUpdates: enableUpdStr.toLowerCase() !== 'n',
+        };
+        if (newCkDir !== undefined) freshConfig.checkpointsDir = normalizeCheckpointsDir(newCkDir);
         writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
         successMsg(`Environment "${name}" updated.`);
       } else if (action === 'delete') {
@@ -1033,12 +1331,7 @@ async function addEnvironmentMenu(rl: any) {
       const kPath  = path.join(PROJECT_ROOT, kFile);
       const ns     = ec.namespace || 'default';
       const overrides: Record<string, string> = freshConfig.checkpoint_overrides || {};
-      try {
-        await generateCheckpointMapping(kPath, ns, overrides);
-      } catch (e: any) {
-        spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
-        process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n  Run Validate to diagnose cluster connectivity.\n\n`));
-      }
+      await runDataFileStepTracker(kPath, ns, overrides);
       break; // leave sub-menu after activate
 
     } else if (action === 'validate') {
@@ -1064,15 +1357,22 @@ async function addEnvironmentMenu(rl: any) {
       if (apiDomain === ESC) continue;
       const apiKey    = await input(rl, 'API Key',          ec.apiKey    || '');
       if (apiKey === ESC) continue;
+      const curCkDir2  = freshConfig.checkpointsDir || '';
+      const newCkDir2  = await input(rl, 'Checkpoints Directory', curCkDir2);
+      if (newCkDir2 === ESC) continue;
+      const enableUpdStr2 = await input(rl, 'Enable Updates (y/n)', ec.enableUpdates === false ? 'n' : 'y');
+      if (enableUpdStr2 === ESC) continue;
 
       freshConfig.kubeconfigs[envName] = {
         ...ec,
-        file:      file      || ec.file,
-        namespace: ns        || ec.namespace,
-        uiDomain:  uiDomain,
-        apiDomain: apiDomain,
-        apiKey:    apiKey,
+        file:          file      || ec.file,
+        namespace:     ns        || ec.namespace,
+        uiDomain:      uiDomain,
+        apiDomain:     apiDomain,
+        apiKey:        apiKey,
+        enableUpdates: enableUpdStr2.toLowerCase() !== 'n',
       };
+      if (newCkDir2 !== undefined) freshConfig.checkpointsDir = normalizeCheckpointsDir(newCkDir2);
       writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`Environment "${envName}" updated.`);
       // stay in sub-menu after edit
@@ -1099,18 +1399,6 @@ async function startCli() {
   // terminal:false disables readline's built-in echo/line-editing so it doesn't
   // interfere with our raw-mode input() / select() handlers
   const rl = readlinePromises.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
-
-  // ── Instance lock — only one CLI allowed at a time ───────────────────────────
-  try {
-    const result = execSync('pgrep -f "tsx bin/cli.ts"', { encoding: 'utf-8' }).trim();
-    const pids = result.split('\n').map(Number).filter(p => p && p !== process.pid);
-    if (pids.length > 0) {
-      process.stdout.write(chalk.red(`\n  ✖  SambaWiz CLI is already running (PID ${pids[0]}).\n`));
-      process.stdout.write(chalk.reset('     Only one instance is allowed at a time.\n'));
-      process.stdout.write(chalk.reset('     Close the other session first, then try again.\n\n'));
-      rl.close(); process.exit(1);
-    }
-  } catch { /* pgrep exits non-zero when no match — that's fine, means no other instance */ }
 
   const version = getAppVersion();
 
@@ -1196,6 +1484,15 @@ async function startCli() {
   }
 
   let { appConfig: liveAppConfig, envConfig, namespace, currentEnv } = loaded;
+
+  // ── Startup: step tracker ────────────────────────────────────────────────────
+  if (envConfig) {
+    const kPath = path.join(PROJECT_ROOT, envConfig.file);
+    if (existsSync(kPath)) {
+      const overrides: Record<string, string> = liveAppConfig.checkpoint_overrides || {};
+      await runDataFileStepTracker(kPath, namespace, overrides, `${currentEnv} / ${namespace}`);
+    }
+  }
 
   let exitLoop = false;
   while (!exitLoop) {
@@ -1447,6 +1744,17 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       spinner.fail(`UI Domain unreachable: ${e.message.split('\n')[0]}`);
       allPassed = false;
     }
+  }
+
+  // 7. Checkpoints Directory
+  process.stdout.write('\n');
+  const appConf = requireJson(CONFIG_PATH);
+  const ckDir   = appConf.checkpointsDir || '';
+  if (!ckDir) {
+    checkRow(chalk.red('✖'), 'Checkpoints Dir', 'not configured (required for Bundle Builder)');
+    allPassed = false;
+  } else {
+    infoRow('Checkpoints Dir', ckDir);
   }
 
   process.stdout.write('\n');
@@ -1742,8 +2050,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 
       if (allPefsAreSD) {
         process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} uses ONLY speculative decoding PEFs.\n`));
-        process.stdout.write(chalk.reset('     A draft model is REQUIRED — this model cannot run without one.\n'));
-        process.stdout.write(chalk.reset('     Recommended: Meta-Llama-3.1-8B-Instruct\n\n'));
+        process.stdout.write(chalk.reset('     A draft model is REQUIRED — this model cannot run without one.\n\n'));
       } else {
         process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} supports speculative decoding.\n`));
         process.stdout.write(chalk.reset('     A smaller draft model can significantly improve throughput.\n'));
@@ -1795,7 +2102,8 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
   }
 
   if (allSelections.length === 0) return;
-  if (!appConfig.checkpointsDir) { errorMsg('checkpointsDir not set in app-config.json'); return; }
+  if (!appConfig.checkpointsDir) { errorMsg('checkpointsDir not set in app-config.json — set it via Manage Environments → Edit'); return; }
+  appConfig.checkpointsDir = normalizeCheckpointsDir(appConfig.checkpointsDir);
 
   // Warn if any SD PEFs selected without a matching draft model
   const sdWithoutDraft = allSelections.filter(s =>

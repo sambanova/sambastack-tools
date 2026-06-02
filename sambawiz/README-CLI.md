@@ -12,7 +12,7 @@
 ### Interactive terminal interface for SambaStack bundle management — no browser needed
 
 ![CLI](https://img.shields.io/badge/interface-CLI-6C3FC4?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.4.0-412AA0?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.5.3-412AA0?style=for-the-badge)
 ![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
@@ -46,6 +46,7 @@
   - [Bundle Deployment](#bundle-deployment)
   - [Check Deployment Progress](#check-deployment-progress)
   - [Playground — Chat Console](#playground--chat-console)
+  - [Install / Upgrade SambaStack](#install--upgrade-sambastack)
 - [Configuration Reference](#configuration-reference)
 - [npm Scripts](#npm-scripts)
 - [Troubleshooting](#troubleshooting)
@@ -63,7 +64,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
  ___) | (_| | | | | | | |_) | (_| |\ V  V / | |/ /
 |____/ \__,_|_| |_| |_|_.__/ \__,_| \_/\_/  |_/___|
 
-  SambaWiz CLI  v1.4.0
+  SambaWiz CLI  v1.5.3
   SambaStack Bundle Management
 ```
 
@@ -105,7 +106,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 | Node.js | 18+ |
 | `kubectl` | Installed and on `PATH` |
 | `helm` | Installed and on `PATH` |
-| Kubernetes cluster | SambaStack installed, Helm chart ≥ `0.5.6` |
+| Kubernetes cluster | SambaStack installed, Helm chart ≥ `1.1.1` |
 | `app-config.json` | Configured with at least one valid environment |
 
 ---
@@ -134,8 +135,6 @@ Edit `app-config.json` with your `checkpointsDir` at minimum:
   "kubeconfigs": {}
 }
 ```
-
-> `app-config.json` is gitignored. Never commit it — it contains cluster credentials.
 
 ### Step 3 — Launch the CLI
 
@@ -171,6 +170,9 @@ Shown after launch. The active environment name appears in brackets.
 
      🤖  Playground (Chat Console)
        Chat with deployed models
+
+     🔧  Install / Upgrade SambaStack
+       Apply installer ConfigMap and stream logs
 
      ⏹️   Exit
 ```
@@ -221,24 +223,28 @@ Selecting an existing environment opens its sub-menu:
 
 #### ➕ Add New Environment
 
-A 6-step guided flow. Press `Esc` at any step to cancel without saving.
+A 7-step guided flow. Press `Esc` at any step to cancel without saving.
 
 ```
-  1/6  Environment name  Esc cancel: my-env
+  1/7  Environment name  Esc cancel: my-env
 
        Paste the base64-encoded kubeconfig or enter a file path.
        The file will be saved as kubeconfigs/kubeconfig-my-env.yaml
 
-  2/6  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
+  2/7  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
 
-  3/6  Namespace  Esc cancel: default
+  3/7  Namespace  Esc cancel: default
 
-  4/6  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
+  4/7  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
 
-  5/6  API Domain (optional)  Esc cancel: https://api.my-env.example.com/
+  5/7  API Domain (optional)  Esc cancel: https://api.my-env.example.com/
 
-  6/6  API Key (optional)  Esc cancel: your-api-key-here
+  6/7  API Key (optional)  Esc cancel: your-api-key-here
+
+  7/7  Checkpoints Directory (e.g. gs://bucket/path)  Esc cancel: gs://your-bucket/checkpoints/
 ```
+
+> Step 7 only appears if `checkpointsDir` is not already set in `app-config.json`. Subsequent environments skip it.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -248,6 +254,7 @@ A 6-step guided flow. Press `Esc` at any step to cancel without saving.
 | UI Domain | No | SambaStack UI URL |
 | API Domain | No | Required for Playground |
 | API Key | No | Required for Playground |
+| Checkpoints Directory | Yes (once) | GCS path for model checkpoints. Required for Bundle Builder. Trailing `/` added automatically. Only prompted when not already set. |
 
 **Kubeconfig auto-detection:**
 - Contains `/`, `\`, `~`, or ends in `.yaml` → treated as a file path
@@ -260,22 +267,25 @@ On success:
   Kubeconfig        kubeconfigs/kubeconfig-my-env.yaml
   UI Domain         https://ui.my-env.example.com/
   API Domain        https://api.my-env.example.com/
+  Checkpoints Dir   gs://your-bucket/checkpoints/
 
-  ✔  Checkpoint mapping generated
+[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
+[PEF Generator] ✓ Generated pef_configs.json with 139 entries
 ```
 
-`checkpoint_mapping.json` is generated automatically from the cluster so Bundle Builder is ready immediately.
+Both `checkpoint_mapping.json` and `pef_configs.json` are generated automatically so Bundle Builder is ready immediately.
 
 ---
 
 #### ⚡ Activate an Environment
 
-Sets an environment as active and regenerates `checkpoint_mapping.json`.
+Sets an environment as active and regenerates both `checkpoint_mapping.json` and `pef_configs.json`.
 
 ```
   ✅ "my-env" is now the active environment.
 
-  ✔  Checkpoint mapping generated
+[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
+[PEF Generator] ✓ Generated pef_configs.json with 139 entries
 ```
 
 If the kubeconfig file is missing:
@@ -288,7 +298,7 @@ If the kubeconfig file is missing:
 
 #### 🔍 Validate an Environment
 
-Runs a full connectivity and configuration check. If all checks pass, `checkpoint_mapping.json` is also regenerated.
+Runs a full connectivity and configuration check. If all checks pass, `checkpoint_mapping.json` and `pef_configs.json` are regenerated.
 
 ```
   ╭──────────────────────────────────────────────────────────╮
@@ -301,7 +311,7 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 
   ✔  Kubeconfig         kubeconfigs/kubeconfig-my-env.yaml
   ✔  Helm               v4.0.1+g12500dd
-  ✔  SambaStack         0.5.8  (min: 0.5.6)
+  ✔  SambaStack         1.1.2  (min: 1.1.1)
   ✔  Kubernetes         connection OK
   ⚠  Namespace          using default
 
@@ -314,10 +324,13 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
   UI Domain      https://ui.my-env.example.com/
   ✔  UI Domain reachable  (200)
 
+  Checkpoints Dir   gs://your-bucket/checkpoints/
+
   ──────────────────────────────────────────────────────────
   ✅ All checks passed!
 
-  ✔  Checkpoint mapping generated
+[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
+[PEF Generator] ✓ Generated pef_configs.json with 139 entries
 ```
 
 | Icon | Meaning |
@@ -337,13 +350,14 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 | API `/v1/models` | 2xx = lists models; 404 = info (not an error); 401/403 = key invalid |
 | API key | `POST /v1/chat/completions` auth check |
 | UI Domain | Any HTTP response = reachable; connection failure = error |
+| Checkpoints Dir | `checkpointsDir` is set in `app-config.json`; required for Bundle Builder |
 
 If SambaStack chart is below the minimum:
 
 ```
-  ✖  SambaStack 0.4.27  (minimum: 0.5.6)
-     The installed SambaStack Helm chart version (0.4.27) is older than
-     the minimum required version (0.5.6). Please upgrade your SambaStack
+  ✖  SambaStack 1.0.9  (minimum: 1.1.1)
+     The installed SambaStack Helm chart version (1.0.9) is older than
+     the minimum required version (1.1.1). Please upgrade your SambaStack
      installation.
 ```
 
@@ -366,10 +380,20 @@ All fields are pre-populated with current values — use `←` `→` to navigate
 
   › API Key  Esc cancel: your-api-key-here
 
+  › Checkpoints Directory  Esc cancel: gs://your-bucket/checkpoints/
+
+  › Enable Updates (y/n)  Esc cancel: y
+
   ✅ Environment "my-env" updated.
 ```
 
 Sub-menu stays open after saving so you can validate or continue editing.
+
+> When the **namespace** changes for the active environment, `pef_configs.json` is regenerated automatically — PEFs are namespace-scoped.
+
+> **Checkpoints Directory** is a top-level `app-config.json` field shared across all environments. Editing it here updates it globally.
+
+> **Enable Updates** controls whether the SambaStack update banner is shown in the web UI for this environment. Defaults to `y`.
 
 ---
 
@@ -389,7 +413,7 @@ Sub-menu stays open after saving so you can validate or continue editing.
 
 Guides you through selecting models, configuring PEF settings, previewing YAML, and optionally applying the bundle to the cluster.
 
-> Requires `checkpoint_mapping.json`. This is generated automatically when you Add, Activate, or successfully Validate an environment.
+> Requires `checkpoint_mapping.json` and `pef_configs.json`. Both are generated automatically on startup and when you Add, Activate, or successfully Validate an environment.
 
 #### Start — New or load saved
 
@@ -905,6 +929,58 @@ Single-model bundles are selected automatically:
 
 ---
 
+### 🔧 Install / Upgrade SambaStack
+
+Applies a SambaStack installer `ConfigMap` to the cluster and streams the installer pod logs until completion.
+
+**1 — Review and edit the ConfigMap YAML**
+
+The CLI pre-populates the `version` field with the recommended next version (current installed version + 1 patch, clamped to the minimum required version from the `VERSION` file):
+
+```
+  ── Install ConfigMap (edit before applying) ─────────────────
+  apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: sambastack
+    labels:
+      sambastack-installer: "true"
+  data:
+    sambastack.yaml: |
+      version: 1.1.2                     # [CHANGE ME] Helm version to install
+  ────────────────────────────────────────────────────────────
+
+  › Edit in editor before applying? [y/N]
+```
+
+Answering `y` opens `$EDITOR` (fallback: `vi`) with the YAML. The updated file is read back after saving.
+
+**2 — Apply**
+
+```
+  › Apply this YAML to cluster? [Y/n]
+
+  ✔  Applying installation ConfigMap...
+  ✔  Installation ConfigMap applied — streaming logs...
+     Press q or Esc to stop watching logs
+```
+
+**3 — Stream installer logs**
+
+Logs are fetched from `kubectl -n sambastack-installer logs -l sambanova.ai/app=sambastack-installer --tail=20` and refreshed every 3 s:
+
+```
+  [sambastack-installer] Pulling chart version 1.1.2...
+  [sambastack-installer] Upgrading sambastack release...
+  ...
+  [sambastack-installer] configure_default_ingress complete
+  ✅ SambaStack installation complete!
+```
+
+Installation is detected as complete when the log line contains `configure_default_ingress`. Press `q` or `Esc` at any time to stop watching — the installation continues in the background.
+
+---
+
 ## Configuration Reference
 
 ### `app-config.json` top-level fields
@@ -925,6 +1001,7 @@ Single-model bundles are selected automatically:
 | `uiDomain` | string | No | SambaStack UI URL (checked during Validate) |
 | `apiDomain` | string | Playground | API base URL e.g. `https://api.example.com/` |
 | `apiKey` | string | Playground | Bearer token for API requests |
+| `enableUpdates` | boolean | No | Show SambaStack update banner in the web UI. Defaults to `true`. Set to `false` to hide it for this environment. |
 
 ### Example
 
@@ -938,7 +1015,8 @@ Single-model bundles are selected automatically:
       "namespace": "default",
       "uiDomain": "https://ui.my-env.example.com/",
       "apiDomain": "https://api.my-env.example.com/",
-      "apiKey": "your-api-key-here"
+      "apiKey": "your-api-key-here",
+      "enableUpdates": true
     }
   },
   "checkpoint_overrides": {
@@ -988,7 +1066,7 @@ kubectl version --client
 helm version
 ```
 
-Ensure you are on the correct network or VPN.
+Ensure you are on the correct network or VPN. The CLI times out kubectl calls after 15 s and falls back to cached data files if available.
 
 ---
 
@@ -1004,7 +1082,7 @@ helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 
 **No models available in Bundle Builder**
 
-`checkpoint_mapping.json` is missing or empty. Go to **Manage Environments** → select env → **🔍 Validate**. If all checks pass the file is regenerated automatically.
+`checkpoint_mapping.json` or `pef_configs.json` is missing or empty. Both files are regenerated on every startup when the cluster is reachable. To force a refresh: **Manage Environments** → select env → **🔍 Validate**. If all checks pass both files are regenerated automatically.
 
 ---
 
@@ -1038,7 +1116,7 @@ If cache pod logs show `[CRITICAL] Failed to access source storage`:
 
 <div align="center">
 
-*SambaWiz CLI v1.4.0 · Requires SambaStack Helm ≥ 0.5.6*
+*SambaWiz CLI v1.5.3 · Requires SambaStack Helm ≥ 1.1.1*
 
 ← Back to [Web UI docs (README.md)](README.md)
 
