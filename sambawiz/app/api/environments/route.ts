@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { normalizeCheckpointsDir } from '../../utils/checkpoints-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -17,15 +18,6 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-/**
- * Ensures checkpointsDir has a trailing slash
- */
-function normalizeCheckpointsDir(dir: string): string {
-  const trimmed = dir.trim();
-  if (trimmed === '') return '';
-  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
-}
-
 export async function GET() {
   try {
     // Read app-config.json to get current configuration
@@ -37,6 +29,7 @@ export async function GET() {
     let defaultApiDomain = '';
     let defaultUiDomain = '';
     let checkpointsDir = '';
+    let checkpointsDirWarning: string | undefined;
     let kubeconfigs: Record<string, KubeconfigEntry> = {};
 
     if (fs.existsSync(configPath)) {
@@ -49,7 +42,9 @@ export async function GET() {
 
         // Get current environment and its settings
         defaultEnvironment = config.currentKubeconfig || null;
-        checkpointsDir = normalizeCheckpointsDir(config.checkpointsDir || '');
+        const normalizedCheckpointsDir = normalizeCheckpointsDir(config.checkpointsDir || '');
+        checkpointsDir = normalizedCheckpointsDir.value;
+        checkpointsDirWarning = normalizedCheckpointsDir.warning;
         kubeconfigs = config.kubeconfigs || {};
 
         // Get namespace, API key, and domains for current environment
@@ -73,6 +68,7 @@ export async function GET() {
       defaultApiDomain,
       defaultUiDomain,
       checkpointsDir,
+      checkpointsDirWarning,
       kubeconfigs
     });
 

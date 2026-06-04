@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { normalizeCheckpointsDir } from '../../utils/checkpoints-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -14,15 +15,6 @@ interface AppConfig {
   checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
-}
-
-/**
- * Ensures checkpointsDir has a trailing slash
- */
-function normalizeCheckpointsDir(dir: string): string {
-  const trimmed = dir.trim();
-  if (trimmed === '') return '';
-  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 }
 
 export async function GET() {
@@ -44,9 +36,14 @@ export async function GET() {
       const configContent = fs.readFileSync(configPath, 'utf-8');
       const config: AppConfig = JSON.parse(configContent);
 
-      // Normalize checkpointsDir to ensure it has a trailing slash
+      // Normalize checkpointsDir to the bucket root (strips any sub-path, adds
+      // trailing slash). This keeps bundle generation correct even when the
+      // on-disk config holds a deep path; the warning tells the user to fix it.
+      let checkpointsDirWarning: string | undefined;
       if (config.checkpointsDir) {
-        config.checkpointsDir = normalizeCheckpointsDir(config.checkpointsDir);
+        const normalized = normalizeCheckpointsDir(config.checkpointsDir);
+        config.checkpointsDir = normalized.value;
+        checkpointsDirWarning = normalized.warning;
       }
 
       const hasCheckpointsDir = config.checkpointsDir && config.checkpointsDir.trim() !== '';
@@ -56,6 +53,7 @@ export async function GET() {
         exists: true,
         valid: hasCheckpointsDir,
         config,
+        checkpointsDirWarning,
         message: hasCheckpointsDir ? 'Configuration is valid' : 'checkpointsDir is not populated',
       });
     } catch {
@@ -89,9 +87,13 @@ export async function POST(request: Request) {
     const configPath = path.join(process.cwd(), 'app-config.json');
     const kubeconfigsDir = path.join(process.cwd(), 'kubeconfigs');
 
-    // Create minimal app-config.json with normalized checkpointsDir
+    // Normalize to the bucket root. If the user pasted a deep path (a common
+    // mistake), it is collapsed to the bucket root and a warning is returned.
+    const normalized = normalizeCheckpointsDir(checkpointsDir);
+
+    // Create minimal app-config.json with the normalized checkpointsDir
     const config: AppConfig = {
-      checkpointsDir: normalizeCheckpointsDir(checkpointsDir),
+      checkpointsDir: normalized.value,
       currentKubeconfig: '',
       kubeconfigs: {},
     };
@@ -124,6 +126,7 @@ export async function POST(request: Request) {
       success: true,
       message: 'app-config.json created successfully',
       config,
+      checkpointsDirWarning: normalized.warning,
     });
   } catch (error) {
     console.error('Error creating app-config.json:', error);
