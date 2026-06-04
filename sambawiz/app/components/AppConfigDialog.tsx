@@ -97,11 +97,11 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
           id={checkpointsDirId}
           fullWidth
           label="Checkpoints Dir"
-          placeholder="gs://your-bucket-name/"
+          placeholder="gs://your-bucket-name/  or  /mnt/nfs/checkpoints/"
           value={checkpointsDir}
           onChange={(e) => setCheckpointsDir(e.target.value)}
           variant="outlined"
-          helperText="Enter the GCS bucket root only (e.g. gs://your-bucket-name/). Per-model sub-paths are added automatically."
+          helperText="GCS: enter the bucket root only (e.g. gs://your-bucket-name/) — per-model sub-paths are added automatically. NFS/local: the checkpoints directory path."
           sx={{ mb: 2 }}
         />
         {warning && (

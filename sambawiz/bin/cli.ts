@@ -44,10 +44,11 @@ function normalizeApiUrl(apiDomain: string): string {
   return base;
 }
 
-// Normalize checkpointsDir to the GCS bucket root. checkpointsDir must be ONLY
-// the bucket root (e.g. gs://my-bucket/) — per-model checkpoint sub-paths are
-// derived automatically, so a deeper path produces a doubled, broken GCS path.
-// Any sub-path is stripped and the user is warned. Mirrors
+// Normalize checkpointsDir. For GCS it must be ONLY the bucket root
+// (e.g. gs://my-bucket/) — per-model checkpoint sub-paths are derived
+// automatically, so a deeper gs:// path produces a doubled, broken path; any
+// sub-path is stripped and the user is warned. Non-GCS roots (NFS mounts, local
+// dirs, etc.) are supported as-is and only get a trailing slash. Mirrors
 // app/utils/checkpoints-dir.ts (kept inline so the CLI stays self-contained).
 function normalizeCheckpointsDir(dir: string): string {
   const original = (dir ?? '').trim();
@@ -55,17 +56,16 @@ function normalizeCheckpointsDir(dir: string): string {
 
   const match = original.match(/^gs:\/\/([^/]+)(\/?)/i);
   if (!match) {
-    warnMsg(`checkpointsDir "${original}" is not a valid Google Cloud Storage path. ` +
-            `It must be a bucket root of the form "gs://<your-bucket>/".`);
-    return original;
+    // Non-GCS root (NFS, local, ...): no bucket-root invariant — leave as-is.
+    return original.endsWith('/') ? original : `${original}/`;
   }
 
   const bucketRoot = `gs://${match[1]}/`;
   const remainder = original.slice(match[0].length).replace(/\/+$/, '');
   if (remainder.length > 0) {
-    warnMsg(`checkpointsDir "${original}" includes a path below the bucket root. ` +
-            `Checkpoint sub-paths are derived automatically per model, so only the ` +
-            `bucket root is needed — using "${bucketRoot}". ` +
+    warnMsg(`checkpointsDir "${original}" includes a path below the GCS bucket root. ` +
+            `For GCS, checkpoint sub-paths are derived automatically per model, so only ` +
+            `the bucket root is needed — using "${bucketRoot}". ` +
             `Set checkpointsDir to "gs://<your-bucket>/" to avoid this warning.`);
   }
   return bucketRoot;

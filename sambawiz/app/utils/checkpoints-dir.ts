@@ -1,39 +1,42 @@
 /**
  * Normalization for the `checkpointsDir` app-config setting.
  *
- * `checkpointsDir` must be ONLY the Google Cloud Storage bucket root, e.g.
- * `gs://my-bucket/`. Each model's checkpoint sub-path is derived automatically
- * at bundle-generation time: the bucket prefix is stripped from the model's
- * `source` (see generate-checkpoint-mapping) and then re-joined onto
- * `checkpointsDir`. If `checkpointsDir` itself contains a path below the bucket
- * root — e.g. `gs://my-bucket/version/0.1.0/pefs-checkpoints/ckpts/` — that
- * segment is duplicated when re-joined, producing a broken GCS path. This is a
- * common customer misconfiguration.
+ * SambaWiz supports checkpoints on different storage backends, so `checkpointsDir`
+ * may be a Google Cloud Storage bucket (`gs://...`) or an arbitrary filesystem
+ * root such as an NFS mount (`/mnt/nfs/checkpoints/`). Only the GCS case has a
+ * structural constraint:
  *
- * `normalizeCheckpointsDir` collapses any such input back to the bucket root and
- * reports when it had to do so, so callers can warn the user. Note it does NOT
- * hard-code any specific bucket name: a customer may legitimately use their own
- * bucket, but the value should always be just that bucket's root.
+ * For GCS, `checkpointsDir` must be ONLY the bucket root (e.g. `gs://my-bucket/`).
+ * Each model's checkpoint sub-path is derived automatically at bundle-generation
+ * time — the bucket prefix is stripped from the model's `source` (see
+ * generate-checkpoint-mapping) and then re-joined onto `checkpointsDir`. If
+ * `checkpointsDir` itself contains a path below the bucket root — e.g.
+ * `gs://my-bucket/version/0.1.0/pefs-checkpoints/ckpts/` — that segment is
+ * duplicated when re-joined, producing a broken GCS path. `normalizeCheckpointsDir`
+ * collapses such a value back to the bucket root and reports when it had to, so
+ * callers can warn the user. It does NOT hard-code any bucket name.
+ *
+ * For non-GCS roots (NFS, local paths, etc.) there is no equivalent bucket-root
+ * invariant, so the value is passed through unchanged apart from ensuring a single
+ * trailing slash. These are never flagged.
  */
 
 /** Result of normalizing a user-supplied `checkpointsDir`. */
 export interface NormalizedCheckpointsDir {
   /**
-   * The value to use: the bucket root `gs://<bucket>/` (with trailing slash).
-   * Empty string when the input was empty. For input that is not a recognizable
-   * `gs://` path this echoes the trimmed input unchanged.
+   * The value to use. For GCS, the bucket root `gs://<bucket>/`. For other roots,
+   * the input with a trailing slash ensured. Empty string when the input was empty.
    */
   value: string;
   /** The trimmed input exactly as the user supplied it. */
   original: string;
-  /** True when a path below the bucket root was present and removed. */
+  /** True when a path below a GCS bucket root was present and removed. */
   stripped: boolean;
-  /** True when the input is a syntactically valid `gs://<bucket>/...` path. */
+  /** True when the value is usable as a checkpoints root (GCS or any other path). */
   valid: boolean;
   /**
-   * A user-facing warning describing the problem and the correct syntax, set
-   * when stripping occurred or the value is not a valid GCS path; otherwise
-   * undefined.
+   * A user-facing warning describing a GCS misconfiguration and the correct
+   * syntax, set only when a GCS sub-path was stripped; otherwise undefined.
    */
   warning?: string;
 }
@@ -42,11 +45,19 @@ export interface NormalizedCheckpointsDir {
 // on the scheme; the bucket is everything up to the next slash.
 const GCS_PREFIX = /^gs:\/\/([^/]+)(\/?)/i;
 
+/** Ensure a single trailing slash (and no-op on empty input). */
+function withTrailingSlash(value: string): string {
+  if (value === '') return '';
+  return value.endsWith('/') ? value : `${value}/`;
+}
+
 /**
- * Normalize a `checkpointsDir` to its GCS bucket root.
+ * Normalize a `checkpointsDir`.
+ *
+ * - GCS (`gs://...`): collapse to the bucket root, warning if a sub-path was stripped.
+ * - Anything else (NFS, local, ...): pass through with a trailing slash, no warning.
  *
  * @param input Raw value from config or user input (may be undefined/empty).
- * @returns The normalized value plus metadata describing any correction made.
  */
 export function normalizeCheckpointsDir(input: string | undefined | null): NormalizedCheckpointsDir {
   const original = (input ?? '').trim();
@@ -57,15 +68,9 @@ export function normalizeCheckpointsDir(input: string | undefined | null): Norma
 
   const match = original.match(GCS_PREFIX);
   if (!match) {
-    return {
-      value: original,
-      original,
-      stripped: false,
-      valid: false,
-      warning:
-        `checkpointsDir "${original}" is not a valid Google Cloud Storage path. ` +
-        `It must be a bucket root of the form "gs://<your-bucket>/".`,
-    };
+    // Non-GCS root (NFS mount, local directory, etc.). SambaWiz supports these
+    // as-is — there is no bucket-root invariant to enforce, so don't warn.
+    return { value: withTrailingSlash(original), original, stripped: false, valid: true };
   }
 
   const bucket = match[1];
@@ -82,10 +87,10 @@ export function normalizeCheckpointsDir(input: string | undefined | null): Norma
     stripped,
     valid: true,
     warning: stripped
-      ? `checkpointsDir "${original}" includes a path below the bucket root. ` +
-        `Checkpoint sub-paths are derived automatically per model, so checkpointsDir ` +
-        `must be only the bucket root — it has been corrected to "${bucketRoot}". ` +
-        `Set checkpointsDir to "gs://<your-bucket>/" to avoid this warning.`
+      ? `checkpointsDir "${original}" includes a path below the GCS bucket root. ` +
+        `For GCS, checkpoint sub-paths are derived automatically per model, so ` +
+        `checkpointsDir must be only the bucket root — it has been corrected to ` +
+        `"${bucketRoot}". Set checkpointsDir to "gs://<your-bucket>/" to avoid this warning.`
       : undefined,
   };
 }

@@ -87,8 +87,8 @@ export async function POST(request: Request) {
     const configPath = path.join(process.cwd(), 'app-config.json');
     const kubeconfigsDir = path.join(process.cwd(), 'kubeconfigs');
 
-    // Normalize to the bucket root. If the user pasted a deep path (a common
-    // mistake), it is collapsed to the bucket root and a warning is returned.
+    // Normalize the value. For GCS, a path below the bucket root is collapsed to
+    // the bucket root and a warning is returned; non-GCS roots pass through.
     const normalized = normalizeCheckpointsDir(checkpointsDir);
 
     // Create minimal app-config.json with the normalized checkpointsDir

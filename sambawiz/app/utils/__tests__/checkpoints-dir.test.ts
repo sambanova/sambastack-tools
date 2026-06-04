@@ -75,19 +75,34 @@ describe('normalizeCheckpointsDir', () => {
     });
   });
 
-  describe('invalid (not a gs:// path)', () => {
-    it('flags a non-gs path as invalid and echoes the input', () => {
-      const r = normalizeCheckpointsDir('s3://my-bucket/checkpoints/');
-      expect(r.valid).toBe(false);
+  describe('non-GCS roots (NFS, local, etc.) pass through untouched', () => {
+    it('keeps an NFS-style absolute path, adds a trailing slash, no warning', () => {
+      const r = normalizeCheckpointsDir('/mnt/nfs/checkpoints');
+      expect(r.value).toBe('/mnt/nfs/checkpoints/');
+      expect(r.valid).toBe(true);
       expect(r.stripped).toBe(false);
-      expect(r.value).toBe('s3://my-bucket/checkpoints/');
-      expect(r.warning).toContain('not a valid Google Cloud Storage path');
+      expect(r.warning).toBeUndefined();
     });
 
-    it('flags a bare path as invalid', () => {
-      const r = normalizeCheckpointsDir('/local/path');
-      expect(r.valid).toBe(false);
-      expect(r.warning).toBeDefined();
+    it('does NOT strip a deep NFS path (no bucket-root invariant off GCS)', () => {
+      const r = normalizeCheckpointsDir('/sambastack/shared/ckpts/version/0.1.0/');
+      expect(r.value).toBe('/sambastack/shared/ckpts/version/0.1.0/');
+      expect(r.valid).toBe(true);
+      expect(r.stripped).toBe(false);
+      expect(r.warning).toBeUndefined();
+    });
+
+    it('passes an nfs:// URI through unchanged (with trailing slash), no warning', () => {
+      const r = normalizeCheckpointsDir('nfs://fileserver/exports/checkpoints/');
+      expect(r.value).toBe('nfs://fileserver/exports/checkpoints/');
+      expect(r.valid).toBe(true);
+      expect(r.warning).toBeUndefined();
+    });
+
+    it('does not warn for a non-gs scheme such as s3://', () => {
+      const r = normalizeCheckpointsDir('s3://my-bucket/checkpoints/');
+      expect(r.value).toBe('s3://my-bucket/checkpoints/');
+      expect(r.warning).toBeUndefined();
     });
   });
 });
