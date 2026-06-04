@@ -80,7 +80,7 @@ Edit `app-config.json` with your settings:
 
 ```json
 {
-  "checkpointsDir": "gs://your-bucket-name/path/to/checkpoints/",
+  "checkpointsDir": "gs://your-bucket-name/",
   "currentKubeconfig": "your-environment-name",
   "kubeconfigs": {
     "your-environment-name": {
@@ -96,7 +96,9 @@ Edit `app-config.json` with your settings:
 
 **Important**:
 - `app-config.json` is gitignored for security
-- `checkpointsDir`: GCS/NFS checkpoint directory (where model checkpoints are stored) must be added to `app-config.json`
+- `checkpointsDir`: the root directory where model checkpoints are stored (provided by your SambaNova contact). SambaWiz appends each model's checkpoint sub-path automatically, so set this to the **root only**:
+  - **Google Cloud Storage** — use the **bucket root**, e.g. `gs://your-bucket-name/`. Do **not** include a sub-path such as `gs://your-bucket-name/version/0.1.0/pefs-checkpoints/ckpts/`; that sub-path is derived per-model and appending it here produces a doubled, broken path. (SambaWiz auto-corrects a GCS value to the bucket root and shows a warning if you do this.)
+  - **NFS / local filesystem** — use the directory that contains your checkpoints, e.g. `/mnt/nfs/checkpoints/`. Arbitrary paths are supported and are used as-is.
 - `currentKubeconfig`: Name of the currently selected environment
 - `kubeconfigs`: Object containing all configured environments
   - Each environment has:
@@ -370,7 +372,7 @@ Tests explicitly **do not** cover:
 
 2. **Check `app-config.json` fields**
    - Ensure all required fields are populated:
-     - `checkpointsDir`: Must be set to a valid GCS bucket path that serves as a root folder for the relative paths in the auto-generated `checkpoint_mapping.json`. If this path is invalid, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
+     - `checkpointsDir`: Must be the **root** that the relative paths in the auto-generated `checkpoint_mapping.json` are appended to — for GCS the bucket root (`gs://your-bucket-name/`, not a deeper sub-path), or an NFS/local directory (`/mnt/nfs/checkpoints/`). If this is wrong, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
      - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
      - `kubeconfigs`: Must contain at least one environment with:
        - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
