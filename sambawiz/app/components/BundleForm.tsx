@@ -83,6 +83,7 @@ export default function BundleForm() {
   const [draftModels, setDraftModels] = useState<{ [modelName: string]: string }>({});
   const [copiedToClipboard, setCopiedToClipboard] = useState<boolean>(false);
   const [checkpointsDir, setCheckpointsDir] = useState<string>('');
+  const [checkpointsDirWarning, setCheckpointsDirWarning] = useState<string>('');
   const [validationResult, setValidationResult] = useState<{
     success: boolean;
     message: string;
@@ -121,6 +122,10 @@ export default function BundleForm() {
         if (data.success && data.checkpointsDir) {
           setCheckpointsDir(data.checkpointsDir);
         }
+        // Surface a checkpointsDir misconfiguration (e.g. a path below the
+        // bucket root) so the user can fix app-config.json. The value used for
+        // bundle generation is already auto-corrected server-side.
+        setCheckpointsDirWarning(data.checkpointsDirWarning || '');
       } catch (error) {
         console.error('Failed to fetch checkpoints directory:', error);
       }
@@ -661,6 +666,13 @@ export default function BundleForm() {
     <Box>
       {/* Documentation Panel */}
       <DocumentationPanel docFile="bundle-builder.md" />
+
+      {/* checkpointsDir misconfiguration warning */}
+      {checkpointsDirWarning && (
+        <Alert severity="warning" sx={{ mb: 3 }} onClose={() => setCheckpointsDirWarning('')}>
+          {checkpointsDirWarning}
+        </Alert>
+      )}
 
       {/* Model Selection */}
       <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
