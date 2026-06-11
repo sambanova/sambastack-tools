@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fcf9fe;
+  --foreground: #1f1a24;
+  --panel: #ffffff;
+  --panel-2: #f5eff9;
+  --border: #e5dceb;
+  --muted: #6b6470;
+  --accent: #622b86;
+  --accent-hover: #7d3aa8;
+  --accent-soft: #f1e6f8;
+  --danger: #b91c1c;
+  --success: #15803d;
+  --warning: #b45309;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  font: inherit;
+  /* Don't force `color: inherit` here — that would outrank Tailwind utility
+     classes like `text-white` (which live in @layer utilities and are beaten
+     by unlayered rules regardless of specificity). */
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea,
+select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  width: 100%;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(98, 43, 134, 0.15);
+}
+
+button {
+  cursor: pointer;
+}
+
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+
+table {
+  border-collapse: collapse;
+}

@@ -1,0 +1,26 @@
+result_id,status,provider,model,example_id,output,score,weight,score_reason,input_tokens,output_tokens,latency_ms,ttft_ms,tps,num_llm_calls
+1,completed,SambaNova,MiniMax-M2.7,1,"
+
+n * factorial(n - 1)",1,1,"The model's completion exactly matches the reference expression, providing the correct recursive factorial calculation.",91,78,598.656177520752,334.9745273590088,292.0188035563641,1
+2,completed,SambaNova,MiniMax-M2.7,2,"
+
+reverse",1,1,"The model correctly provides the missing method name 'reverse', matching the reference exactly.",89,91,747.4188804626465,521.1184024810791,397.7013252589359,1
+3,completed,SambaNova,MiniMax-M2.7,3,"
+
+x % 2 == 0",1,1,"The model's completion exactly matches the reference condition, correctly filtering even numbers.",88,93,650.6392955780029,334.9745273590088,291.4484265034434,1
+4,completed,SambaNova,MiniMax-M2.7,4,"
+
+math.pi * r ** 2",1,1,"Both expressions compute π·r²; '** 2' is equivalent to multiplying r by itself, so they are functionally identical.",89,138,704.2694091796875,334.9745273590088,370.9772508207252,1
+5,completed,SambaNova,MiniMax-M2.7,5,"
+
+COUNT(*)",1,1,"The model completion exactly matches the reference aggregate expression, providing the correct COUNT(*) function.",82,88,346.6498851776123,120.21064758300781,384.20903075003554,1
+6,completed,SambaNova,gemma-4-31B-it,1,n * factorial(n - 1),1,1,"The model's completion exactly matches the reference expression, providing the correct recursive factorial calculation.",98,9,1621.3703155517578,1564.241647720337,140.03477244746782,1
+7,completed,SambaNova,gemma-4-31B-it,2,reverse,1,1,"The model's completion matches the reference exactly, providing the correct missing method name.",98,1,1617.9242134094238,1564.241647720337,0,1
+8,completed,SambaNova,gemma-4-31B-it,3,x % 2 == 0,1,1,"The model's completion exactly matches the reference condition, correctly filtering even numbers.",93,7,859.7517013549805,808.762788772583,117.67264089627471,1
+9,completed,SambaNova,gemma-4-31B-it,4,math.pi * r**2,1,1,Both expressions compute π·r²; using r**2 is mathematically equivalent to r * r.,98,7,1621.450662612915,1564.241647720337,104.87857571514303,1
+10,completed,SambaNova,gemma-4-31B-it,5,COUNT(*),1,1,"The model completion exactly matches the reference aggregate expression, providing the correct COUNT(*) function.",87,2,890.5792236328125,839.357852935791,19.52310112736108,1
+11,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,1,n * factorial(n-1),1,1,"The model's expression matches the reference logic; only whitespace differences, which are irrelevant.",110,7,121.1400032043457,98.5419750213623,265.5098910142114,1
+12,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,2,reverse,1,1,"The model's completion matches the reference exactly, providing the correct missing method name.",106,1,113.60979080200195,101.31168365478516,0,1
+13,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,3,x % 2 == 0,1,1,"The model's completion exactly matches the reference condition, correctly filtering even numbers.",107,7,121.11115455627441,97.87344932556152,258.20105472677653,1
+14,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,4,math.pi * r ** 2,1,1,"Both expressions compute π·r²; using r**2 is mathematically equivalent to r*r, so the model's completion is functionally identical.",108,7,118.00265312194824,94.99382972717285,260.76952728327774,1
+15,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,5,COUNT(*),1,1,"The model completion exactly matches the reference aggregate expression, providing the correct COUNT(*) function.",101,2,123.54707717895508,101.04775428771973,44.44578198349034,1

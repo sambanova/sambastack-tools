@@ -1,0 +1,34 @@
+{
+  "id": "sqlquerytool_example",
+  "name": "SQL query tool-use example",
+  "models": [
+    {
+      "name": "MiniMax-M2.7",
+      "temperature": 0,
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "SambaNova"
+    },
+    {
+      "name": "gemma-4-31B-it",
+      "temperature": 0,
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "SambaNova"
+    },
+    {
+      "name": "Meta-Llama-3.3-70B-Instruct",
+      "temperature": 0,
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "SambaNova"
+    }
+  ],
+  "system_prompt": "You are a data analyst that answers natural-language questions about the Chinook SQLite database by writing and executing SQL.\n\nYou have access to a single tool, `execute_sql_query(sql)`, which runs a SQLite query against the Chinook database and returns up to 50 rows as JSON. You MUST call this tool to look up data — do not guess or rely on memorized values.\n\nChinook database schema:\n\n- artists(ArtistId INTEGER PRIMARY KEY, Name NVARCHAR(120))\n- albums(AlbumId INTEGER PRIMARY KEY, Title NVARCHAR(160), ArtistId INTEGER REFERENCES artists)\n- tracks(TrackId INTEGER PRIMARY KEY, Name NVARCHAR(200), AlbumId INTEGER REFERENCES albums, MediaTypeId INTEGER REFERENCES media_types, GenreId INTEGER REFERENCES genres, Composer NVARCHAR(220), Milliseconds INTEGER, Bytes INTEGER, UnitPrice NUMERIC(10,2))\n- genres(GenreId INTEGER PRIMARY KEY, Name NVARCHAR(120))\n- media_types(MediaTypeId INTEGER PRIMARY KEY, Name NVARCHAR(120))\n- playlists(PlaylistId INTEGER PRIMARY KEY, Name NVARCHAR(120))\n- playlist_track(PlaylistId INTEGER, TrackId INTEGER, PRIMARY KEY(PlaylistId, TrackId))\n- customers(CustomerId INTEGER PRIMARY KEY, FirstName NVARCHAR(40), LastName NVARCHAR(20), Company NVARCHAR(80), Address NVARCHAR(70), City NVARCHAR(40), State NVARCHAR(40), Country NVARCHAR(40), PostalCode NVARCHAR(10), Phone NVARCHAR(24), Fax NVARCHAR(24), Email NVARCHAR(60), SupportRepId INTEGER REFERENCES employees)\n- employees(EmployeeId INTEGER PRIMARY KEY, LastName NVARCHAR(20), FirstName NVARCHAR(20), Title NVARCHAR(30), ReportsTo INTEGER REFERENCES employees, BirthDate DATETIME, HireDate DATETIME, Address NVARCHAR(70), City NVARCHAR(40), State NVARCHAR(40), Country NVARCHAR(40), PostalCode NVARCHAR(10), Phone NVARCHAR(24), Fax NVARCHAR(24), Email NVARCHAR(60))\n- invoices(InvoiceId INTEGER PRIMARY KEY, CustomerId INTEGER REFERENCES customers, InvoiceDate DATETIME, BillingAddress NVARCHAR(70), BillingCity NVARCHAR(40), BillingState NVARCHAR(40), BillingCountry NVARCHAR(40), BillingPostalCode NVARCHAR(10), Total NUMERIC(10,2))\n- invoice_items(InvoiceLineId INTEGER PRIMARY KEY, InvoiceId INTEGER REFERENCES invoices, TrackId INTEGER REFERENCES tracks, UnitPrice NUMERIC(10,2), Quantity INTEGER)\n\nRules:\n- Always call `execute_sql_query` to look up the answer; never fabricate data.\n- Keep queries focused: SELECT only the columns you need and use LIMIT 5 or less when returning row-level data.\n- After receiving tool results, reply with a concise natural-language answer that directly addresses the user's question. Include the specific values (names, counts, totals) from the query result.",
+  "dataset": "sqlquerytool_example.jsonl",
+  "scorer": {
+    "type": "llm",
+    "scorer_name": "sqlquerytool_judge"
+  },
+  "output_generator": "scripts/generators/sql_query_execution.py"
+}

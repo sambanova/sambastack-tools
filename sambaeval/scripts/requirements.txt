@@ -1,0 +1,9 @@
+openai>=1.0.0
+# Used by the SciCode example generator (scripts/generators/scicode_generator.py)
+# to read test_data.h5 reference values and compare scientific outputs.
+numpy>=2.4.6
+scipy>=1.17.1
+sympy>=1.14.0
+h5py>=3.16.0
+# Sandboxed execution of model-generated code (Podman by default, Docker opt-in).
+llm-sandbox[podman]>=0.3.39

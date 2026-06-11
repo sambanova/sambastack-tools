@@ -25,6 +25,12 @@ The `sambastack-tools` repository contains open-source tools designed to acceler
 <tbody>
 
 <tr>
+<td width="20%"><a href="sambaeval/README.md">SambaEval</a></td>
+<td width="60%">A local workbench for evaluating LLMs against CSV datasets across multiple models and providers. Supports heuristic and LLM-as-judge scoring, per-row token usage and latency metrics, and pluggable Python output generators for tool use or agentic workflows.</td>
+<td width="20%">Web Application</td>
+</tr>
+
+<tr>
 <td width="20%"><a href="sambawiz/README.md">SambaWiz</a></td>
 <td width="60%">A GUI wizard that accelerates the creation and deployment of model bundles on SambaStack. Provides an intuitive interface for selecting models, configuring PEF settings, generating Kubernetes manifests, and deploying bundles to your cluster.</td>
 <td width="20%">Web Application</td>
