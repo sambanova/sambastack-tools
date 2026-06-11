@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sambaeval"
+version = "0.1.0"
+description = "SambaEval evaluation engine — library + CLI (Python core)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "httpx>=0.27",
+    # Output-generator deps (previously scripts/requirements.txt). Generators
+    # now run in-process, so they share this environment.
+    "openai>=1.0.0",
+    "numpy>=2.4.6",
+    "scipy>=1.17.1",
+    "sympy>=1.14.0",
+    "h5py>=3.16.0",
+    "llm-sandbox[podman]>=0.3.39",
+]
+
+[project.optional-dependencies]
+# Phase 1 (FastAPI backend). Installed when we get there.
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.scripts]
+sambaeval = "sambaeval.cli:main"
+sambaeval-server = "sambaeval.api:serve"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sambaeval*"]

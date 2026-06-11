@@ -1,0 +1,91 @@
+result_id,status,provider,model,example_id,output,score,weight,score_reason,input_tokens,output_tokens,latency_ms,ttft_ms,tps,num_llm_calls
+1,completed,SambaNova,MiniMax-M2.7,10,"FAIL
+6/11 sub-steps passed; failed steps: 10.4, 10.6, 10.7, 10.8, 10.11",0.55,1,,42614,217398,540871.7198371887,254.0886402130127,436.98240001374063,15
+2,completed,SambaNova,MiniMax-M2.7,1,"PASS
+1/1 sub-steps passed",1,1,,925,3036,6873.655319213867,117.87748336791992,449.24508676060725,1
+3,completed,SambaNova,MiniMax-M2.7,3,"PASS
+1/1 sub-steps passed",1,1,,741,3070,7321.962594985962,404.341459274292,443.64962171121675,1
+4,completed,SambaNova,MiniMax-M2.7,4,"FAIL
+0/1 sub-steps passed; failed steps: 4.1",0,1,,2130,96174,238715.398311615,117.94114112854004,400.84007932529363,3
+5,completed,SambaNova,MiniMax-M2.7,6,"PASS
+1/1 sub-steps passed",1,1,,704,2064,4910.567283630371,210.5722427368164,438.9366333475505,1
+6,completed,SambaNova,MiniMax-M2.7,7,"PASS
+1/1 sub-steps passed",1,1,,725,4308,9824.535369873047,118.51072311401367,443.7450095944443,1
+7,completed,SambaNova,MiniMax-M2.7,19,"PASS
+2/2 sub-steps passed",1,1,,1167,4014,9321.995973587036,120.74065208435059,441.8614655574179,2
+8,completed,SambaNova,MiniMax-M2.7,78,"FAIL
+2/3 sub-steps passed; failed steps: 78.3",0.67,1,,12007,93417,233552.9227256775,255.36346435546875,400.56716114067183,5
+9,completed,SambaNova,MiniMax-M2.7,29,"PASS
+3/3 sub-steps passed",1,1,,2547,5473,13021.83985710144,215.6503200531006,439.63203335125024,3
+10,completed,SambaNova,MiniMax-M2.7,38,"PASS
+3/3 sub-steps passed",1,1,,8623,69873,173492.112159729,159.24978256225586,438.8389102844586,5
+11,completed,SambaNova,MiniMax-M2.7,44,"FAIL
+2/3 sub-steps passed; failed steps: 44.3",0.67,1,,3875,10169,23389.416933059692,157.71937370300293,444.7353176554692,3
+12,completed,SambaNova,MiniMax-M2.7,47,"FAIL
+3/4 sub-steps passed; failed steps: 47.4",0.75,1,,6908,44010,107786.00430488586,215.75212478637695,443.4769656600828,5
+13,completed,SambaNova,MiniMax-M2.7,49,"FAIL
+0/4 sub-steps passed; failed steps: 49.1, 49.2, 49.3, 49.4",0,1,,7467,12538,28960.09135246277,187.27505207061768,444.44896509411967,4
+14,completed,SambaNova,MiniMax-M2.7,51,"FAIL
+1/4 sub-steps passed; failed steps: 51.2, 51.3, 51.4",0.25,1,,6682,14995,34827.956199645996,192.27194786071777,443.65965312183977,4
+15,completed,SambaNova,MiniMax-M2.7,70,"FAIL
+5/8 sub-steps passed; failed steps: 70.6, 70.7, 70.8",0.62,1,,35190,110256,275696.8038082123,400.55394172668457,435.23186858662126,10
+16,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,10,"FAIL
+0/11 sub-steps passed; failed steps: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 10.10, 10.11",0,1,,26960,4229,12964.890718460083,326.2956142425537,442.1356746598742,11
+17,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,1,"PASS
+1/1 sub-steps passed",1,1,,1061,216,785.7911586761475,197.13973999023438,365.24162377788747,1
+18,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,3,"PASS
+1/1 sub-steps passed",1,1,,777,391,1041.8157577514648,146.06475830078125,435.3888527494429,1
+19,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,4,"PASS
+1/1 sub-steps passed",1,1,,754,162,564.8763179779053,148.67377281188965,386.8308876770084,1
+20,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,6,"FAIL
+0/1 sub-steps passed; failed steps: 6.1",0,1,,725,271,869.4181442260742,142.58408546447754,371.4740617136664,1
+21,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,7,"PASS
+1/1 sub-steps passed",1,1,,746,283,945.0585842132568,149.81579780578613,354.6086865797829,1
+22,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,19,"PASS
+2/2 sub-steps passed",1,1,,1176,353,1063.4102821350098,125.72348117828369,433.1425585505614,2
+23,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,78,"FAIL
+0/3 sub-steps passed; failed steps: 78.1, 78.2, 78.3",0,1,,6332,1366,3762.594699859619,235.5966567993164,470.26251075558525,3
+24,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,29,"PASS
+3/3 sub-steps passed",1,1,,2591,366,1321.2857246398926,145.57552337646484,429.7297647145551,3
+25,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,38,"FAIL
+2/3 sub-steps passed; failed steps: 38.3",0.67,1,,5021,1153,3157.8872203826904,225.9535789489746,468.3865841065184,3
+26,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,44,"FAIL
+2/3 sub-steps passed; failed steps: 44.3",0.67,1,,3736,1179,3390.575170516968,195.42598724365234,461.5078027419765,3
+27,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,47,"FAIL
+3/4 sub-steps passed; failed steps: 47.4",0.75,1,,4653,849,2599.1296768188477,176.63586139678955,477.8186732499727,4
+28,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,49,"FAIL
+2/4 sub-steps passed; failed steps: 49.1, 49.4",0.5,1,,6634,1314,3599.2887020111084,236.4063262939453,492.7454327713418,4
+29,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,51,"FAIL
+0/4 sub-steps passed; failed steps: 51.1, 51.2, 51.3, 51.4",0,1,,7295,1827,4848.67262840271,242.875337600708,477.22764470095,4
+30,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,70,"FAIL
+3/8 sub-steps passed; failed steps: 70.4, 70.5, 70.6, 70.7 (screen: syntax error: invalid syntax), 70.8",0.38,1,,34592,7002,19025.379180908203,573.7512111663818,511.3612479724839,8
+31,completed,SambaNova,gemma-4-31B-it,10,"FAIL
+2/11 sub-steps passed; failed steps: 10.1, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 10.9, 10.11",0.18,1,,35944,5038,34358.41631889343,821.7067718505859,199.476959374143,11
+32,completed,SambaNova,gemma-4-31B-it,1,"PASS
+1/1 sub-steps passed",1,1,,1014,322,2437.6277923583984,810.7080459594727,197.30536844888096,1
+33,completed,SambaNova,gemma-4-31B-it,3,"PASS
+1/1 sub-steps passed",1,1,,794,407,2882.169008255005,857.1240901947021,200.4893799535512,1
+34,completed,SambaNova,gemma-4-31B-it,4,"PASS
+1/1 sub-steps passed",1,1,,748,339,2481.9538593292236,808.5334300994873,201.98151886766377,1
+35,completed,SambaNova,gemma-4-31B-it,6,"PASS
+1/1 sub-steps passed",1,1,,743,433,2987.4727725982666,814.6719932556152,198.82172544631322,1
+36,completed,SambaNova,gemma-4-31B-it,7,"PASS
+1/1 sub-steps passed",1,1,,760,445,3038.6385917663574,815.488338470459,199.7165955570274,1
+37,completed,SambaNova,gemma-4-31B-it,19,"PASS
+2/2 sub-steps passed",1,1,,1203,470,3993.2615756988525,810.3412389755249,197.74699470907694,2
+38,completed,SambaNova,gemma-4-31B-it,78,"FAIL
+2/3 sub-steps passed; failed steps: 78.3",0.67,1,,7192,2132,13164.11828994751,817.2426223754883,199.22570007112142,3
+39,completed,SambaNova,gemma-4-31B-it,29,"PASS
+3/3 sub-steps passed",1,1,,2576,506,5056.371212005615,817.3186779022217,198.15494481175824,3
+40,completed,SambaNova,gemma-4-31B-it,38,"PASS
+3/3 sub-steps passed",1,1,,4802,940,7125.442266464233,811.9227886199951,200.25071951374744,3
+41,completed,SambaNova,gemma-4-31B-it,44,"FAIL
+2/3 sub-steps passed; failed steps: 44.3",0.67,1,,4405,1559,10180.400848388672,813.0900859832764,200.3777393159124,3
+42,completed,SambaNova,gemma-4-31B-it,47,"FAIL
+3/4 sub-steps passed; failed steps: 47.4",0.75,1,,5046,1377,10121.50502204895,813.9504194259644,200.58304282500382,4
+43,completed,SambaNova,gemma-4-31B-it,49,"PASS
+4/4 sub-steps passed",1,1,,7672,1657,11548.346757888794,812.8244876861572,199.0613084056675,4
+44,completed,SambaNova,gemma-4-31B-it,51,"FAIL
+1/4 sub-steps passed; failed steps: 51.2, 51.3, 51.4",0.25,1,,8008,1836,12395.742654800415,819.0394639968872,201.00491540292603,4
+45,completed,SambaNova,gemma-4-31B-it,70,"FAIL
+6/8 sub-steps passed; failed steps: 70.7, 70.8",0.75,1,,33207,4919,31211.802005767822,820.3622102737427,199.90705176686168,8

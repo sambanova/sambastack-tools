@@ -1,0 +1,61 @@
+result_id,status,provider,model,example_id,output,score,score_reason,input_tokens,output_tokens,latency_ms,ttft_ms,tps,num_llm_calls
+1,completed,SambaNova,MiniMax-M2.7,1,"
+
+**Iron Maiden** has the most albums in the database with **21 albums**.",1,"The model answer correctly states the artist (Iron Maiden) and the exact number of albums (21), matching the reference answer.",1757,171,740.6842708587646,169.5343255996704,414.7564235478268,2
+2,completed,SambaNova,MiniMax-M2.7,2,"
+
+There are **3,503 tracks** in the Chinook database.",1,"The model correctly states the total number of tracks as 3,503, matching the reference answer; extra context does not affect correctness.",1682,97,519.7393894195557,125.51820278167725,363.63595871192763,2
+3,completed,SambaNova,MiniMax-M2.7,3,"
+
+Here are the top 5 genres by number of tracks:
+
+| Genre | Track Count |
+|-------|-------------|
+| Rock | 1,297 |
+| Latin | 579 |
+| Metal | 374 |
+| Alternative & Punk | 332 |
+| Jazz | 130 |
+
+Rock dominates the library with 1,297 tracks, more than double the second-place genre (Latin at 579 tracks).",1,"The model's answer exactly matches the reference genres and track counts in the correct descending order, with only minor formatting differences.",1812,313,1292.5984859466553,263.4773254394531,402.95622777205256,2
+4,completed,SambaNova,MiniMax-M2.7,4,"
+
+The top 5 customers who have spent the most money are:
+
+1. **Helena Holý** — $49.62
+2. **Richard Cunningham** — $47.62
+3. **Luis Rojas** — $46.62
+4. **Ladislav Kovács** — $45.62
+5. **Hugh O'Reilly** — $45.62
+
+These amounts represent the sum of all their invoice totals across all their purchases.",1,"The model answer lists exactly the same five customers with identical totals and correct descending order, matching the reference answer.",1850,302,1067.7523612976074,173.62523078918457,419.478870909959,2
+5,completed,SambaNova,MiniMax-M2.7,5,"
+
+There are **24 distinct countries** from which customers have placed orders, based on the billing country recorded on invoices.",1,The model answer correctly states the same count of 24 distinct countries as the reference answer.,1700,142,606.8456172943115,122.66850471496582,387.23104446185096,2
+6,completed,SambaNova,MiniMax-M2.7,6,"
+
+1297",1,The model provided the exact number (1297) matching the reference answer and complied with the request to give only the number.,1774,103,684.6442222595215,206.47764205932617,352.3506513429373,2
+7,completed,SambaNova,gemma-4-31B-it,1,"Iron Maiden has the most albums in the database, with a total of 21 albums.",1,"The model answer correctly states the artist (Iron Maiden) and the exact number of albums (21), matching the reference answer.",1609,89,2125.396728515625,813.8700723648071,166.92176174739345,2
+8,completed,SambaNova,gemma-4-31B-it,2,"There are a total of 3,503 tracks in the database.",1,"The model's answer provides the exact same count (3,503) as the reference, just with formatting differences, which is acceptable.",1544,45,1875.6663799285889,812.8499984741211,174.84011399656052,2
+9,completed,SambaNova,gemma-4-31B-it,3,"The top 5 genres by number of tracks are:
+
+1. **Rock**: 1,297 tracks
+2. **Latin**: 579 tracks
+3. **Metal**: 374 tracks
+4. **Alternative & Punk**: 332 tracks
+5. **Jazz**: 130 tracks",1,"The model's answer exactly matches the reference, providing the same five genres with identical track counts in the correct descending order.",1677,139,2365.339994430542,811.3925457000732,184.51726786499773,2
+10,completed,SambaNova,gemma-4-31B-it,4,"The 5 customers who have spent the most money are:
+
+1. **Helena Holíd**: $49.62
+2. **Richard Cunningham**: $47.62
+3. **Luis Rojas**: $46.62
+4. **Ladislav Kovács**: $45.62
+5. **Hugh O'Reilly**: $45.62",1,The model lists the same five customers with identical totals in the correct descending order; minor spelling variation is acceptable.,1736,153,2409.4107151031494,808.6613416671753,190.2784113228691,2
+11,completed,SambaNova,gemma-4-31B-it,5,Customers have placed orders from 24 distinct countries based on the billing country on invoices.,1,"The model answer correctly states that customers placed orders from 24 distinct countries, matching the reference answer's count.",1561,52,1924.4613647460938,812.7696514129639,167.2584791105076,2
+12,completed,SambaNova,gemma-4-31B-it,6,1297,1,"The model provided the exact number 1297, matching the reference answer.",1645,56,1925.8472919464111,813.3543729782104,163.59050161091147,2
+13,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,1,"The artist with the most albums in the database is Iron Maiden, with 21 albums.",1,The model answer correctly provides the same artist name and album count as the reference answer.,1760,93,522.0835208892822,147.86529541015625,393.1869611843364,2
+14,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,2,There are 3503 tracks in the database in total.,1,The model answer exactly matches the reference answer's key fact (3503 tracks) and adds only harmless wording.,1681,39,403.2261371612549,146.38018608093262,331.96570853661103,2
+15,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,3,"The top 5 genres by number of tracks are: Rock with 1297 tracks, Latin with 579 tracks, Metal with 374 tracks, Alternative & Punk with 332 tracks, and Jazz with 130 tracks.",1,"The model answer exactly matches the reference, listing the same five genres with identical track counts in the correct descending order.",1838,118,576.3638019561768,142.8149938583374,408.30973839077205,2
+16,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,4,"The 5 customers who have spent the most money in total are Helena Holý ($49.62), Richard Cunningham ($47.62), Luis Rojas ($46.62), Ladislav Kovács ($45.62), and Hugh O'Reilly ($45.62).",1,"The model answer exactly matches the reference, listing the same five customers with identical totals in the correct descending order.",1885,132,666.480302810669,168.47312450408936,397.24337815506874,2
+17,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,5,There are 24 distinct countries where customers have placed orders from based on the billing country on invoices.,1,"The model answer correctly states the same count of 24 distinct countries as the reference answer, matching the key fact exactly.",1704,52,426.2115955352783,145.90513706207275,380.9855438968185,2
+18,completed,SambaNova,Meta-Llama-3.3-70B-Instruct,6,There are 1297 tracks in the Rock genre.,1,The model's answer exactly matches the reference answer's key fact (1297 tracks in the Rock genre).,1790,72,470.6883430480957,149.87611770629883,416.82089641725975,2

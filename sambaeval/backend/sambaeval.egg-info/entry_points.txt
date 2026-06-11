@@ -1,0 +1,3 @@
+[console_scripts]
+sambaeval = sambaeval.cli:main
+sambaeval-server = sambaeval.api:serve

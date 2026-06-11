@@ -1,0 +1,12 @@
+[
+  {
+    "name": "SambaNova",
+    "api_url": "https://api.sambanova.ai/v1",
+    "api_key": "Obtain from https://cloud.sambanova.ai/apis"
+  },
+  {
+    "name": "OpenAI-compatible-example",
+    "api_url": "https://your-endpoint.example.com/v1",
+    "api_key": "sk-..."
+  }
+]

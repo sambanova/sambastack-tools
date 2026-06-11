@@ -1,0 +1,8 @@
+{
+  "name": "sqlquerytool_judge",
+  "provider_name": "SambaNova",
+  "model": "gpt-oss-120b",
+  "temperature": 0,
+  "judge_prompt": "You are an impartial evaluator judging whether a model's natural-language answer to a database question matches a reference answer.\n\nUser prompt:\n{prompt}\n\nReference answer:\n{expected_output}\n\nModel answer:\n{output}\n\nGive an INTEGER score from 0 to {max_score}, where:\n- {max_score} = the model's answer contains the same key facts/values as the reference (names, counts, totals match; ordering matches when asked for ranked results). Small wording differences and extra commentary are fine.\n- 0 = the model gave a wrong answer, refused, or failed to produce the requested values.\n- values in between = graded partial credit (e.g. correct top item but missing some of the requested list, or values slightly off).\n\nRespond with a single JSON object and NOTHING ELSE, of the form:\n{\"score\": <integer 0..{max_score}>, \"score_reason\": \"<one or two sentences explaining the score>\"}",
+  "max_score": 5
+}

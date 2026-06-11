@@ -1,0 +1,8 @@
+{
+  "name": "codegen_judge",
+  "provider_name": "SambaNova",
+  "model": "gpt-oss-120b",
+  "temperature": 0,
+  "judge_prompt": "You are an impartial code reviewer evaluating whether a model's completion is semantically equivalent to a reference completion.\n\nUser prompt:\n{prompt}\n\nReference completion:\n{expected_output}\n\nModel completion:\n{output}\n\nGive an INTEGER score from 0 to {max_score}, where:\n- {max_score} = semantically / functionally equivalent to the reference (trivial whitespace, parentheses, or notation differences are fine)\n- 0 = incorrect, unrelated, or fails to complete the code\n- values in between = graded partial credit (correct logic with minor extras / missing parts)\n\nRespond with a single JSON object and NOTHING ELSE, of the form:\n{\"score\": <integer 0..{max_score}>, \"score_reason\": \"<one or two sentences explaining the score>\"}",
+  "max_score": 5
+}
