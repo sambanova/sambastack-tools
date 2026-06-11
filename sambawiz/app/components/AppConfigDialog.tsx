@@ -25,6 +25,7 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
   const [checkpointsDir, setCheckpointsDir] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   const handleCreate = async () => {
     if (!checkpointsDir || checkpointsDir.trim() === '') {
@@ -34,6 +35,7 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
 
     setCreating(true);
     setError(null);
+    setWarning(null);
 
     try {
       const response = await fetch('/api/check-app-config', {
@@ -49,6 +51,13 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
       const data = await response.json();
 
       if (data.success) {
+        // If checkpointsDir was auto-corrected, keep the dialog open so the user
+        // reads the warning; the "Continue" button then applies the new config.
+        if (data.checkpointsDirWarning) {
+          setWarning(data.checkpointsDirWarning);
+          setCreating(false);
+          return;
+        }
         onConfigCreated();
         onClose();
       } else {
@@ -60,6 +69,11 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
     } finally {
       setCreating(false);
     }
+  };
+
+  const handleContinue = () => {
+    onConfigCreated();
+    onClose();
   };
 
   const handleClose = () => {
@@ -83,13 +97,18 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
           id={checkpointsDirId}
           fullWidth
           label="Checkpoints Dir"
-          placeholder="gs://your-bucket-name/path/to/checkpoints"
+          placeholder="gs://your-bucket-name/  or  /mnt/nfs/checkpoints/"
           value={checkpointsDir}
           onChange={(e) => setCheckpointsDir(e.target.value)}
           variant="outlined"
-          helperText="Enter the GCS checkpoint directory path"
+          helperText="GCS: enter the bucket root only (e.g. gs://your-bucket-name/) — per-model sub-paths are added automatically. NFS/local: the checkpoints directory path."
           sx={{ mb: 2 }}
         />
+        {warning && (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            {warning}
+          </Alert>
+        )}
         {error && (
           <Alert severity="error" sx={{ mt: 2 }}>
             {error}
@@ -101,7 +120,7 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
           Cancel
         </Button>
         <Button
-          onClick={handleCreate}
+          onClick={warning ? handleContinue : handleCreate}
           variant="contained"
           disabled={creating || !checkpointsDir.trim()}
           sx={{
@@ -116,6 +135,8 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
               <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
               Creating...
             </>
+          ) : warning ? (
+            'Continue'
           ) : (
             'Create App Config'
           )}
