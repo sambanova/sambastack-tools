@@ -1,17 +1,27 @@
 "use client";
 import { apiUrl } from "@/app/lib/api";
 
-import { use, useCallback, useEffect, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import ResultsTable from "@/app/components/ResultsTable";
+import ResultsTable, { ModelSummaryTable } from "@/app/components/ResultsTable";
+import ModelNameCombobox from "@/app/components/ModelNameCombobox";
+import ErrorsTable from "@/app/components/ErrorsTable";
 import type {
   Experiment,
   LlmJudgeScorerDef,
   ModelConfig,
+  PriceMap,
   Provider,
   ResultRow,
+  RunErrors,
   RunMeta,
 } from "@/app/lib/types";
+import { computeCost, priceKey } from "@/app/lib/types";
+import {
+  type KwargRow,
+  recordToRows,
+  rowsToRecord,
+} from "@/app/lib/kwargs";
 import InfoTooltip from "@/app/components/InfoTooltip";
 
 const OUTPUT_GENERATOR_TOOLTIP =
@@ -19,43 +29,10 @@ const OUTPUT_GENERATOR_TOOLTIP =
 
 const DEFAULT_MODEL: ModelConfig = {
   name: "",
-  temperature: 0.0,
   seed: 42,
   system_prompt: "global",
   provider_name: "",
 };
-
-type KwargRow = { key: string; valueStr: string };
-
-function parseKwargValue(s: string): unknown {
-  // Try JSON first so numbers, booleans, arrays, and explicitly-quoted strings
-  // round-trip as their actual types. Fall back to the raw text so a user typing
-  // `stop_word` (unquoted) still produces *something* — though the help text
-  // tells them to quote string values explicitly.
-  try {
-    return JSON.parse(s);
-  } catch {
-    return s;
-  }
-}
-
-function rowsToRecord(rows: KwargRow[]): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const r of rows) {
-    const key = r.key.trim();
-    if (key === "") continue;
-    out[key] = parseKwargValue(r.valueStr);
-  }
-  return out;
-}
-
-function recordToRows(rec: Record<string, unknown> | undefined): KwargRow[] {
-  if (!rec) return [];
-  return Object.entries(rec).map(([k, v]) => ({
-    key: k,
-    valueStr: JSON.stringify(v),
-  }));
-}
 
 interface Progress {
   total: number;
@@ -65,7 +42,7 @@ interface Progress {
   runId?: string;
 }
 
-type RunMode = "new" | "resume";
+type RunMode = "new" | "resume" | "retry";
 
 function formatRunId(runId: string): string {
   // Run IDs are ISO timestamps with `:` and `.` replaced by `-`. Make them
@@ -106,6 +83,80 @@ function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+// Format a USD cost. Sub-dollar costs get more precision so fractions of a
+// cent are still visible; "—" for unknown.
+function formatCost(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  const digits = v !== 0 && Math.abs(v) < 1 ? 4 : 2;
+  return `$${v.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+// Key for matching a model against default-price tables. Lowercased with all
+// non-alphanumerics stripped, so the various spellings of the same model line up
+// (e.g. "claude-opus-4-6" vs "claude-opus-4.6", "GPT-4o" vs "gpt-4o").
+function defaultsKey(provider: string, model: string): string {
+  return `${provider.toLowerCase()}|${model.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+}
+
+type DefaultPriceMap = Record<string, { input?: number; output?: number }>;
+
+// Effective per-model price as a number, or undefined. The explicit price wins;
+// otherwise the default (file or live /models) is used — so a suggested default
+// counts as the applied price even when the user never typed it.
+function effectivePrice(
+  explicit: number | undefined,
+  fallback: number | undefined,
+): number | undefined {
+  if (typeof explicit === "number" && Number.isFinite(explicit)) return explicit;
+  return typeof fallback === "number" && Number.isFinite(fallback)
+    ? fallback
+    : undefined;
+}
+
+// Build the `${provider}|${model}` price map used for cost columns, folding the
+// editable prices together with their defaults. A model contributes an entry if
+// either side resolves; a missing side counts as $0.
+function buildEffectivePriceMap(
+  models: ModelConfig[],
+  defaults: DefaultPriceMap,
+): PriceMap {
+  const out: PriceMap = {};
+  for (const m of models) {
+    const def = defaults[defaultsKey(m.provider_name, m.name)] ?? {};
+    const input = effectivePrice(m.input_price, def.input);
+    const output = effectivePrice(m.output_price, def.output);
+    if (input == null && output == null) continue;
+    out[priceKey(m.provider_name, m.name)] = {
+      input: input ?? 0,
+      output: output ?? 0,
+    };
+  }
+  return out;
+}
+
+// Total USD cost of a run from its per-(provider, model) token usage and the
+// applied prices. Null when the run reports no usage or no matching prices.
+function runCost(meta: RunMeta, prices: PriceMap): number | null {
+  if (!meta.token_usage || meta.token_usage.length === 0) return null;
+  let total = 0;
+  let known = false;
+  for (const u of meta.token_usage) {
+    const c = computeCost(
+      u.input_tokens,
+      u.output_tokens,
+      prices[priceKey(u.provider, u.model)],
+    );
+    if (c !== null) {
+      total += c;
+      known = true;
+    }
+  }
+  return known ? total : null;
+}
+
 export default function ExperimentPage({
   params,
 }: {
@@ -123,17 +174,52 @@ export default function ExperimentPage({
   const [cancelling, setCancelling] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [results, setResults] = useState<ResultRow[] | null>(null);
+  // The errors.json for the currently-viewed run, fetched whenever viewingRunId
+  // changes. Empty object => no errors (the Errors section stays hidden).
+  const [errors, setErrors] = useState<RunErrors>({});
   const [viewingRunId, setViewingRunId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunMeta[]>([]);
   const [pendingResume, setPendingResume] = useState<RunMeta | null>(null);
+  // Non-null while we're monitoring a server-side run we did NOT start in this
+  // tab (e.g. after a page refresh): there's no SSE stream to read, so progress
+  // is tracked by polling the runs list instead.
+  const [adoptedRunId, setAdoptedRunId] = useState<string | null>(null);
+  // "Retry Failed" dialog: null = closed; a string = open with that run_id
+  // selected in the dropdown. `retryUseLive` toggles between reproducing the
+  // run's original config (false) and applying the experiment's current edited
+  // settings to the failed rows (true).
+  const [retryRunId, setRetryRunId] = useState<string | null>(null);
+  const [retryUseLive, setRetryUseLive] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // Pause dialog state. "waiting" = pause requested, draining in-flight
+  // threads; "done" = drain finished, run is paused and resumable. null = no
+  // pause in progress.
+  const [pauseState, setPauseState] = useState<"waiting" | "done" | null>(null);
+  const [terminating, setTerminating] = useState(false);
   // Per-model UI state for the additional-kwargs editor. The rows are the
   // source of truth while editing (preserves insertion order and lets users
   // rename keys mid-typing); they're folded into `model.additional_kwargs`
   // on save.
   const [kwargRowsByModel, setKwargRowsByModel] = useState<KwargRow[][]>([]);
   const [kwargsOpen, setKwargsOpen] = useState<boolean[]>([]);
+  // Costs UI state. `pricingByProvider` holds default $/1M prices fetched from
+  // each provider's /models endpoint, keyed by model id. `appliedPrices` is the
+  // snapshot the cost columns are computed from — it tracks the editable model
+  // prices until the user edits one (`pricesDirty`), after which only the
+  // "Update Costs" button re-applies them. `pricingOpen` toggles the section.
+  const [pricingByProvider, setPricingByProvider] = useState<
+    Record<string, Record<string, { input?: number; output?: number }>>
+  >({});
+  // Default prices from data/pricing_defaults.json (provider -> model ->
+  // {input, output}), generated by scripts/update_pricing.py. The primary
+  // source of price defaults; live /models pricing fills anything not listed.
+  const [fileDefaults, setFileDefaults] = useState<
+    Record<string, Record<string, { input?: number; output?: number }>>
+  >({});
+  const [appliedPrices, setAppliedPrices] = useState<PriceMap>({});
+  const [pricesDirty, setPricesDirty] = useState(false);
+  const [pricingOpen, setPricingOpen] = useState(false);
   // Cache of available model names per provider, fetched from the provider's
   // /models endpoint. Populates the model-name dropdown; users can still type
   // a name that isn't listed.
@@ -144,6 +230,12 @@ export default function ExperimentPage({
   const [modelsLoading, setModelsLoading] = useState<Record<string, boolean>>(
     {},
   );
+  // Error message per provider when the /models fetch fails (bad key, wrong
+  // api_url, provider unreachable, …). Surfaced inline under the model field
+  // so a misconfigured provider doesn't just show an empty dropdown.
+  const [modelsErrorByProvider, setModelsErrorByProvider] = useState<
+    Record<string, string>
+  >({});
   // Tracks which providers we've already started fetching, so repeated calls
   // (e.g. multiple model rows on the same provider) don't refetch.
   const requestedProviders = useRef<Set<string>>(new Set());
@@ -165,34 +257,52 @@ export default function ExperimentPage({
           ...cur,
           [providerName]: Array.isArray(d.models) ? d.models : [],
         }));
+        if (d.pricing && typeof d.pricing === "object") {
+          setPricingByProvider((cur) => ({ ...cur, [providerName]: d.pricing }));
+        }
+        setModelsErrorByProvider((cur) => {
+          const next = { ...cur };
+          if (d.error) next[providerName] = String(d.error);
+          else delete next[providerName];
+          return next;
+        });
       })
-      .catch(() => {
+      .catch((err) => {
         setModelsByProvider((cur) => ({ ...cur, [providerName]: [] }));
+        setModelsErrorByProvider((cur) => ({
+          ...cur,
+          [providerName]: err?.message
+            ? `Could not reach the model list: ${err.message}`
+            : "Could not reach the model list.",
+        }));
       })
       .finally(() => {
         setModelsLoading((cur) => ({ ...cur, [providerName]: false }));
       });
   }, []);
 
-  const fetchRuns = useCallback(async () => {
+  const fetchRuns = useCallback(async (): Promise<RunMeta[]> => {
     try {
       const r = await fetch(apiUrl(`/api/experiments/${id}/runs`)).then((r) =>
         r.json(),
       );
-      setRuns(r.runs ?? []);
+      const list: RunMeta[] = r.runs ?? [];
+      setRuns(list);
+      return list;
     } catch {
-      // ignore
+      return [];
     }
   }, [id]);
 
   useEffect(() => {
     (async () => {
-      const [eRes, pRes, sRes, dRes, rRes] = await Promise.all([
+      const [eRes, pRes, sRes, dRes, rRes, prRes] = await Promise.all([
         fetch(apiUrl(`/api/experiments/${id}`)).then((r) => r.json()),
         fetch(apiUrl("/api/providers")).then((r) => r.json()),
         fetch(apiUrl("/api/scorers")).then((r) => r.json()),
         fetch(apiUrl("/api/datasets")).then((r) => r.json()),
         fetch(apiUrl(`/api/experiments/${id}/results`)).then((r) => r.json()),
+        fetch(apiUrl("/api/pricing-defaults")).then((r) => r.json()),
       ]);
       if (eRes.experiment) {
         const e = eRes.experiment as Experiment;
@@ -200,16 +310,124 @@ export default function ExperimentPage({
         setKwargRowsByModel(
           e.models.map((m) => recordToRows(m.additional_kwargs)),
         );
-        setKwargsOpen(e.models.map(() => false));
+        // Expand the kwargs editor for any model that already has kwargs so
+        // they're visible on load (e.g. a temperature carried in from the
+        // experiment JSON), rather than hidden behind a collapsed section.
+        setKwargsOpen(
+          e.models.map(
+            (m) => Object.keys(m.additional_kwargs ?? {}).length > 0,
+          ),
+        );
       }
       setAllProviders(pRes.providers ?? []);
       setScorers(sRes.scorers ?? []);
       setDatasets(dRes.datasets ?? []);
+      if (prRes.pricing && typeof prRes.pricing === "object") {
+        setFileDefaults(prRes.pricing);
+      }
       if (rRes.results) setResults(rRes.results);
       if (rRes.runId) setViewingRunId(rRes.runId);
-      await fetchRuns();
+      const list = await fetchRuns();
+      // A run still marked "running" is executing server-side (this tab didn't
+      // start it, or we just refreshed). Reflect it as active and monitor it by
+      // polling — there's no SSE stream to reconnect to.
+      const live = list.find((r) => r.status === "running");
+      if (live) {
+        setActiveRunId(live.run_id);
+        setProgress({
+          total: live.total,
+          completed: live.completed,
+          errors: live.errors,
+          runId: live.run_id,
+        });
+        setRunning(true);
+        setAdoptedRunId(live.run_id);
+      }
     })();
   }, [id, fetchRuns]);
+
+  // Tear down monitoring of an adopted run once it reaches a terminal state,
+  // loading its final results. A paused run flips the pause dialog to its
+  // success state; any other terminal status just dismisses it.
+  const finishMonitoring = useCallback(
+    async (run: RunMeta | null) => {
+      setAdoptedRunId(null);
+      setRunning(false);
+      setActiveRunId(null);
+      setCancelling(false);
+      setTerminating(false);
+      setPauseState(run?.status === "paused" ? "done" : null);
+      if (run) {
+        setViewingRunId(run.run_id);
+        try {
+          const r = await fetch(
+            apiUrl(
+              `/api/experiments/${id}/results?run_id=${encodeURIComponent(run.run_id)}`,
+            ),
+          ).then((res) => res.json());
+          setResults(r.results ?? null);
+        } catch {
+          // best-effort: the run list already reflects the final status.
+        }
+      }
+    },
+    [id],
+  );
+
+  // While monitoring an adopted run (no SSE stream), poll the runs list for
+  // progress until the run finishes.
+  useEffect(() => {
+    if (!adoptedRunId) return;
+    let stopped = false;
+    const tick = async () => {
+      const list = await fetchRuns();
+      if (stopped) return;
+      const run = list.find((r) => r.run_id === adoptedRunId);
+      if (!run) {
+        finishMonitoring(null);
+        return;
+      }
+      setProgress({
+        total: run.total,
+        completed: run.completed,
+        errors: run.errors,
+        runId: run.run_id,
+      });
+      if (run.status !== "running") finishMonitoring(run);
+    };
+    const interval = setInterval(tick, 1500);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [adoptedRunId, fetchRuns, finishMonitoring]);
+
+  // Load the errors.json for whichever run is currently displayed. Keyed on
+  // viewingRunId so it follows the run selector, a fresh run finishing, and an
+  // adopted run completing — all of which set viewingRunId. Clears to {} when
+  // no run is selected so a stale run's errors never linger.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!viewingRunId) {
+        if (!cancelled) setErrors({});
+        return;
+      }
+      try {
+        const r = await fetch(
+          apiUrl(
+            `/api/experiments/${id}/errors?run_id=${encodeURIComponent(viewingRunId)}`,
+          ),
+        ).then((res) => res.json());
+        if (!cancelled) setErrors(r.errors ?? {});
+      } catch {
+        if (!cancelled) setErrors({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, viewingRunId]);
 
   // Look up the selected dataset's example count so the "Run on first N
   // examples" field can default to (and cap at) the full dataset size.
@@ -249,6 +467,54 @@ export default function ExperimentPage({
       ensureModelsForProvider(name);
     }
   }, [referencedProviders, ensureModelsForProvider]);
+
+  // Default prices keyed by `defaultsKey(provider, model)`. data/
+  // pricing_defaults.json is the primary source; live /models pricing fills in
+  // anything the file doesn't list (e.g. SambaNova, which self-reports).
+  const defaultPrices = useMemo(() => {
+    const out: Record<string, { input?: number; output?: number }> = {};
+    const add = (
+      provider: string,
+      model: string,
+      entry: { input?: number; output?: number },
+      override: boolean,
+    ) => {
+      const k = defaultsKey(provider, model);
+      const cur = out[k] ?? {};
+      out[k] = {
+        input: override
+          ? (entry.input ?? cur.input)
+          : (cur.input ?? entry.input),
+        output: override
+          ? (entry.output ?? cur.output)
+          : (cur.output ?? entry.output),
+      };
+    };
+    // Live /models pricing first (lower precedence)…
+    for (const [provider, models] of Object.entries(pricingByProvider)) {
+      for (const [model, entry] of Object.entries(models)) {
+        add(provider, model, entry, false);
+      }
+    }
+    // …then file defaults, which win on conflict.
+    for (const [provider, models] of Object.entries(fileDefaults)) {
+      for (const [model, entry] of Object.entries(models)) {
+        add(provider, model, entry, true);
+      }
+    }
+    return out;
+  }, [pricingByProvider, fileDefaults]);
+
+  // The live price map folds each model's explicit price with its default, so
+  // suggested defaults are applied to costs immediately — no typing required.
+  // While the user is mid-edit (`pricesDirty`) the cost columns hold the frozen
+  // `appliedPrices` snapshot instead, so typing doesn't move costs until
+  // "Update Costs" is clicked.
+  const livePrices = useMemo(
+    () => buildEffectivePriceMap(exp?.models ?? [], defaultPrices),
+    [exp?.models, defaultPrices],
+  );
+  const displayPrices = pricesDirty ? appliedPrices : livePrices;
 
   if (!exp) {
     return <div className="text-[var(--muted)]">Loading…</div>;
@@ -366,12 +632,13 @@ export default function ExperimentPage({
       return { ...prev, scorer: { type: "llm", scorer_name } };
     });
 
-  const save = async () => {
+  const save = async (modelsOverride?: ModelConfig[]) => {
     setSaving(true);
     setSaved(false);
+    const baseModels = modelsOverride ?? exp.models;
     const payload: Experiment = {
       ...exp,
-      models: exp.models.map((m, i) => {
+      models: baseModels.map((m, i) => {
         const ak = rowsToRecord(kwargRowsByModel[i] ?? []);
         const next: ModelConfig = { ...m };
         if (Object.keys(ak).length > 0) {
@@ -401,19 +668,69 @@ export default function ExperimentPage({
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const streamRun = async (mode: RunMode, explicitRunId?: string) => {
+  // Edit a model's $/1M price. Blank clears the field (reverts to the provider
+  // default on next load); marks prices dirty so the cost columns hold until
+  // "Update Costs".
+  const setModelPrice = (
+    i: number,
+    field: "input_price" | "output_price",
+    raw: string,
+  ) => {
+    // On the first edit, freeze the currently-displayed costs by snapshotting
+    // the live prices, so further typing doesn't move them until "Update Costs".
+    if (!pricesDirty) {
+      setAppliedPrices(buildEffectivePriceMap(exp.models, defaultPrices));
+      setPricesDirty(true);
+    }
+    const v = raw.trim();
+    if (v === "") {
+      updateModel(i, { [field]: undefined });
+      return;
+    }
+    const n = Number(v);
+    updateModel(i, {
+      [field]: Number.isFinite(n) && n >= 0 ? n : undefined,
+    });
+  };
+
+  // Re-derive every cost column from the current prices (clearing the frozen
+  // snapshot) and persist them onto the experiment — no re-run required. Any
+  // field the user left blank is materialized from its default first, so the
+  // suggested defaults become the experiment's stored prices.
+  const updateCosts = async () => {
+    const materialized = exp.models.map((m) => {
+      const def = defaultPrices[defaultsKey(m.provider_name, m.name)] ?? {};
+      const next: ModelConfig = { ...m };
+      const input = effectivePrice(m.input_price, def.input);
+      const output = effectivePrice(m.output_price, def.output);
+      if (input != null) next.input_price = input;
+      if (output != null) next.output_price = output;
+      return next;
+    });
+    setPricesDirty(false);
+    await save(materialized);
+  };
+
+  const streamRun = async (
+    mode: RunMode,
+    explicitRunId?: string,
+    opts?: { useLiveConfig?: boolean },
+  ) => {
     setRunning(true);
     setRunError(null);
     setProgress(null);
     setResults(null);
     setViewingRunId(null);
     setActiveRunId(null);
+    setPauseState(null);
+    setTerminating(false);
 
     const qs = new URLSearchParams({
       concurrency: String(exp.concurrency ?? 4),
       mode,
     });
     if (explicitRunId) qs.set("run_id", explicitRunId);
+    if (opts?.useLiveConfig) qs.set("config", "live");
 
     const abort = new AbortController();
     runAbortRef.current = abort;
@@ -451,6 +768,10 @@ export default function ExperimentPage({
           } else if (event === "done") {
             setResults(parsed.results as ResultRow[]);
             if (parsed.runId) setViewingRunId(parsed.runId);
+            // A pause request that landed flips the dialog to its success
+            // state; any other terminal status (completed before the pause
+            // took effect, aborted, …) just dismisses it.
+            setPauseState(parsed.meta?.status === "paused" ? "done" : null);
           } else if (event === "error") {
             setRunError(parsed.message ?? "Unknown error");
           }
@@ -509,6 +830,8 @@ export default function ExperimentPage({
     setResults(null);
     setViewingRunId(null);
     setActiveRunId(null);
+    setPauseState(null);
+    setTerminating(false);
     try {
       const reader = probe.body.getReader();
       const decoder = new TextDecoder();
@@ -535,6 +858,10 @@ export default function ExperimentPage({
           } else if (event === "done") {
             setResults(parsed.results as ResultRow[]);
             if (parsed.runId) setViewingRunId(parsed.runId);
+            // A pause request that landed flips the dialog to its success
+            // state; any other terminal status (completed before the pause
+            // took effect, aborted, …) just dismisses it.
+            setPauseState(parsed.meta?.status === "paused" ? "done" : null);
           } else if (event === "error") {
             setRunError(parsed.message ?? "Unknown error");
           }
@@ -565,6 +892,33 @@ export default function ExperimentPage({
     await streamRun("new");
   };
 
+  // Runs that finished with at least one failed row — the candidates for
+  // "Retry Failed". Already newest-first (the API sorts runs descending). A
+  // still-running run is excluded: its failures aren't final and retrying it
+  // would collide with the in-flight execution.
+  const retryableRuns = runs.filter(
+    (r) => r.errors > 0 && r.status !== "running",
+  );
+
+  const openRetryDialog = () => {
+    if (retryableRuns.length === 0) return;
+    setRetryUseLive(false);
+    setRetryRunId(retryableRuns[0].run_id);
+  };
+
+  const chooseRetry = async () => {
+    const target = retryRunId;
+    const useLiveConfig = retryUseLive;
+    setRetryRunId(null);
+    if (!target) return;
+    // Applying current settings means the on-disk experiment must reflect the
+    // in-progress edits first; the snapshot path needs no save.
+    if (useLiveConfig) await save();
+    // Re-runs only the failed rows of the chosen run, in place — against either
+    // the run's original config snapshot or the experiment's current settings.
+    await streamRun("retry", target, { useLiveConfig });
+  };
+
   const cancel = async () => {
     if (!activeRunId || cancelling) return;
     setCancelling(true);
@@ -585,6 +939,41 @@ export default function ExperimentPage({
       runAbortRef.current?.abort();
     }
   };
+
+  const pauseRun = async () => {
+    if (!activeRunId || pauseState) return;
+    // Show the dialog immediately; the stream stays open and the "done" event
+    // (with status "paused") flips it to its success state once the in-flight
+    // threads have drained.
+    setPauseState("waiting");
+    try {
+      await fetch(
+        apiUrl(`/api/experiments/${id}/run/pause?run_id=${encodeURIComponent(activeRunId)}`),
+        { method: "POST" },
+      );
+    } catch {
+      // best-effort: the drain still completes and emits a done event.
+    }
+  };
+
+  const terminateThreads = async () => {
+    if (!activeRunId || terminating) return;
+    setTerminating(true);
+    try {
+      // Force the worker pool down so the pause doesn't block on in-flight
+      // threads. Abandoned tasks write nothing and re-run on resume.
+      await fetch(
+        apiUrl(`/api/experiments/${id}/run/terminate?run_id=${encodeURIComponent(activeRunId)}`),
+        { method: "POST" },
+      );
+    } catch {
+      // best-effort
+    } finally {
+      setTerminating(false);
+    }
+  };
+
+  const closePauseDialog = () => setPauseState(null);
 
   const viewRun = async (runId: string) => {
     if (running) return;
@@ -614,17 +1003,28 @@ export default function ExperimentPage({
       setRunError(d.error ?? `Failed to delete run (${res.status})`);
       return;
     }
-    // If the deleted run was the one being displayed, clear the results view.
+    const remaining = await fetchRuns();
+    // If the deleted run was the one being displayed, fall back to the most
+    // recent remaining run so the dropdown never lands on an empty selection.
     if (viewingRunId === runId) {
-      setResults(null);
-      setViewingRunId(null);
+      const next = remaining[0];
+      if (next) {
+        await viewRun(next.run_id);
+      } else {
+        setResults(null);
+        setViewingRunId(null);
+      }
     }
-    await fetchRuns();
   };
 
   const percent = progress
     ? Math.round((progress.completed / Math.max(1, progress.total)) * 100)
     : 0;
+
+  // The run currently selected in the results dropdown (the one whose results,
+  // stats, and aggregations are shown). `runs` is newest-first, so the default
+  // viewingRunId set on load is the most recent run.
+  const selectedRun = runs.find((r) => r.run_id === viewingRunId) ?? null;
 
   return (
     <div>
@@ -670,6 +1070,118 @@ export default function ExperimentPage({
                 Start new run
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {retryRunId !== null && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-5 max-w-md w-full mx-4">
+            <h3 className="font-medium mb-3">Retry failed rows</h3>
+            <p className="text-sm text-[var(--muted)] mb-4">
+              Pick a past run; only its failed rows are re-run, in place, using
+              the model and dataset config that run originally used. Rows that
+              already succeeded are kept.
+            </p>
+            <label className="text-xs text-[var(--muted)] block mb-1">
+              Run
+            </label>
+            <select
+              value={retryRunId}
+              onChange={(e) => setRetryRunId(e.target.value)}
+              className="mb-4"
+            >
+              {retryableRuns.map((r) => (
+                <option key={r.run_id} value={r.run_id}>
+                  {formatTimestamp(r.started_at)} — {r.errors} failed of{" "}
+                  {r.total}
+                </option>
+              ))}
+            </select>
+            <label className="flex items-start gap-2 text-sm mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={retryUseLive}
+                onChange={(e) => setRetryUseLive(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                Use current experiment settings
+                <span className="block text-xs text-[var(--muted)]">
+                  Apply the experiment&apos;s current model/dataset config to the
+                  failed rows instead of reproducing the run&apos;s original
+                  settings. Saves the experiment first.
+                </span>
+              </span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setRetryRunId(null)}
+                className="text-[var(--muted)] hover:text-white px-3 py-2 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={chooseRetry}
+                className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3 py-2 rounded-md text-sm font-medium"
+              >
+                Retry Failed
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pauseState && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-5 max-w-md w-full mx-4">
+            {pauseState === "waiting" ? (
+              <>
+                <div className="flex items-center gap-3 mb-3">
+                  <span
+                    className="text-2xl animate-spin inline-block"
+                    style={{ animationDuration: "2s" }}
+                    aria-hidden
+                  >
+                    ⏳
+                  </span>
+                  <h3 className="font-medium">Pausing run…</h3>
+                </div>
+                <p className="text-sm text-[var(--muted)] mb-4">
+                  Waiting for running threads to finish executing…
+                </p>
+                <div className="flex justify-end">
+                  <button
+                    onClick={terminateThreads}
+                    disabled={terminating}
+                    className="bg-[var(--danger)] hover:opacity-90 text-white px-3 py-2 rounded-md text-sm font-medium disabled:opacity-50"
+                  >
+                    {terminating ? "Terminating…" : "Terminate Threads"}
+                  </button>
+                </div>
+                <p className="text-xs text-[var(--muted)] mt-3">
+                  Terminating force-stops the running threads so the app
+                  doesn&apos;t wait on them. Those tasks produce no results and
+                  are re-run when you resume.
+                </p>
+              </>
+            ) : (
+              <>
+                <h3 className="font-medium mb-3">Run paused</h3>
+                <p className="text-sm text-[var(--muted)] mb-4">
+                  Experiment has been successfully paused and can be resumed at
+                  any time!
+                </p>
+                <div className="flex justify-end">
+                  <button
+                    onClick={closePauseDialog}
+                    className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3 py-2 rounded-md text-sm font-medium"
+                  >
+                    Close
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -807,21 +1319,28 @@ export default function ExperimentPage({
                   <label className="text-xs text-[var(--muted)] block mb-1">
                     Model name
                   </label>
-                  <input
+                  <ModelNameCombobox
                     value={m.name}
-                    onChange={(e) => updateModel(i, { name: e.target.value })}
+                    options={modelsByProvider[m.provider_name] ?? []}
+                    onChange={(name) => updateModel(i, { name })}
                     placeholder="e.g. Meta-Llama-3.1-8B-Instruct"
-                    list={`model-options-${i}`}
-                    spellCheck={false}
                   />
-                  <datalist id={`model-options-${i}`}>
-                    {(modelsByProvider[m.provider_name] ?? []).map((name) => (
-                      <option key={name} value={name} />
-                    ))}
-                  </datalist>
                   {modelsLoading[m.provider_name] ? (
                     <span className="text-[10px] text-[var(--muted)]">
                       Loading models…
+                    </span>
+                  ) : m.provider_name &&
+                    modelsErrorByProvider[m.provider_name] ? (
+                    <span className="text-[10px] text-[var(--danger)]">
+                      {modelsErrorByProvider[m.provider_name]} — check this
+                      provider&apos;s API key and URL on the{" "}
+                      <Link
+                        href="/providers"
+                        className="underline text-[var(--accent)]"
+                      >
+                        Providers
+                      </Link>{" "}
+                      page. You can still type a model name.
                     </span>
                   ) : m.provider_name &&
                     (modelsByProvider[m.provider_name]?.length ?? 0) === 0 ? (
@@ -844,7 +1363,10 @@ export default function ExperimentPage({
                   <select
                     value={m.provider_name}
                     onChange={(e) => {
-                      updateModel(i, { provider_name: e.target.value });
+                      // Clear the model name too: a leftover value from the
+                      // previous provider filters the <datalist> down to
+                      // nothing, hiding the new provider's models.
+                      updateModel(i, { provider_name: e.target.value, name: "" });
                       ensureModelsForProvider(e.target.value);
                     }}
                   >
@@ -856,20 +1378,7 @@ export default function ExperimentPage({
                     ))}
                   </select>
                 </div>
-                <div className="col-span-1">
-                  <label className="text-xs text-[var(--muted)] block mb-1">
-                    Temp
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={m.temperature}
-                    onChange={(e) =>
-                      updateModel(i, { temperature: Number(e.target.value) })
-                    }
-                  />
-                </div>
-                <div className="col-span-2">
+                <div className="col-span-3">
                   <label className="text-xs text-[var(--muted)] block mb-1">
                     Seed
                   </label>
@@ -978,7 +1487,7 @@ export default function ExperimentPage({
       <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
         <h2 className="font-medium mb-3">Scorer</h2>
         <div className="grid grid-cols-12 gap-3 mb-3">
-          <div className="col-span-4">
+          <div className="col-span-6">
             <label className="text-xs text-[var(--muted)] flex items-center mb-1">
               Type
               <InfoTooltip
@@ -995,7 +1504,7 @@ export default function ExperimentPage({
               }
             >
               <option value="heuristic">
-                Heuristic (exact match / contains:)
+                Heuristic (exact match / contains substring)
               </option>
               <option value="llm">LLM-as-a-Judge</option>
             </select>
@@ -1045,28 +1554,51 @@ export default function ExperimentPage({
       <div className="flex items-center justify-center gap-3 mt-6 mb-6">
         {saved && <span className="text-[var(--success)] text-sm">Saved</span>}
         <button
-          onClick={save}
+          onClick={() => save()}
           disabled={saving || running}
           className="bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-4 py-2 rounded-md disabled:opacity-50"
         >
           {saving ? "Saving..." : "Save"}
         </button>
         {running ? (
-          <button
-            onClick={cancel}
-            disabled={cancelling || !activeRunId}
-            className="bg-[var(--danger)] hover:opacity-90 text-white px-4 py-2 rounded-md font-medium disabled:opacity-50"
-          >
-            {cancelling ? "Cancelling..." : "Cancel Run"}
-          </button>
+          <>
+            <button
+              onClick={pauseRun}
+              disabled={!activeRunId || pauseState !== null || cancelling}
+              className="bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-4 py-2 rounded-md font-medium disabled:opacity-50"
+            >
+              {pauseState ? "Pausing..." : "Pause"}
+            </button>
+            <button
+              onClick={cancel}
+              disabled={cancelling || !activeRunId}
+              className="bg-[var(--danger)] hover:opacity-90 text-white px-4 py-2 rounded-md font-medium disabled:opacity-50"
+            >
+              {cancelling ? "Cancelling..." : "Cancel Run"}
+            </button>
+          </>
         ) : (
-          <button
-            onClick={runAuto}
-            disabled={running}
-            className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-md font-medium disabled:opacity-50"
-          >
-            Run Experiment
-          </button>
+          <>
+            <button
+              onClick={runAuto}
+              disabled={running}
+              className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-md font-medium disabled:opacity-50"
+            >
+              Run Experiment
+            </button>
+            <button
+              onClick={openRetryDialog}
+              disabled={running || retryableRuns.length === 0}
+              title={
+                retryableRuns.length === 0
+                  ? "No past run has failed rows to retry"
+                  : "Re-run only the failed rows of a past run"
+              }
+              className="bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-4 py-2 rounded-md font-medium disabled:opacity-50"
+            >
+              Retry Failed
+            </button>
+          </>
         )}
       </div>
 
@@ -1114,21 +1646,260 @@ export default function ExperimentPage({
         </section>
       )}
 
+      {/* Errors for the currently-viewed run. Hidden entirely when the run has
+          no recorded errors. */}
+      {Object.values(errors).some((m) => Object.keys(m).length > 0) && (
+        <section className="mb-6">
+          <h2 className="font-medium mb-4">Errors</h2>
+          <ErrorsTable errors={errors} />
+        </section>
+      )}
+
       {runs.length > 0 && (
         <section className="mb-6">
           <h2 className="font-medium mb-4">Results</h2>
 
+          {exp.models.length > 0 && (
+            <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg mb-6">
+              <button
+                type="button"
+                onClick={() => setPricingOpen((o) => !o)}
+                className="w-full flex items-center justify-between px-4 py-3 text-left"
+              >
+                <span className="text-sm font-semibold">
+                  {pricingOpen ? "▾" : "▸"} Token Pricing &amp; Costs
+                </span>
+                {pricesDirty && (
+                  <span className="text-xs text-[var(--warning)]">
+                    Unapplied price changes
+                  </span>
+                )}
+              </button>
+              {pricingOpen && (
+                <div className="px-4 pb-4">
+                  <p className="text-xs text-[var(--muted)] mb-3">
+                    Prices are in USD per 1,000,000 tokens and are used only to
+                    compute the costs below — they are never sent to the
+                    provider. Defaults come from{" "}
+                    <code>data/pricing_defaults.json</code> (refresh it with{" "}
+                    <code>python scripts/update_pricing.py</code>, which pulls
+                    current OpenAI &amp; Anthropic prices); providers not in that
+                    file fall back to their live <code>/models</code> pricing
+                    (e.g. SambaNova). Fields are pre-filled with these defaults
+                    and applied as-is; type to override (or clear a field to
+                    revert to the default), then click{" "}
+                    <span className="text-white">Update Costs</span> to re-derive
+                    every cost from the stored token counts and save — no re-run
+                    needed.
+                  </p>
+                  <div className="overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-[var(--panel-2)]">
+                        <tr className="text-[var(--muted)]">
+                          <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                            provider
+                          </th>
+                          <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                            model
+                          </th>
+                          <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                            input $/1M
+                          </th>
+                          <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                            output $/1M
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {exp.models.map((m, i) => {
+                          const def =
+                            defaultPrices[defaultsKey(m.provider_name, m.name)];
+                          return (
+                            <tr
+                              key={i}
+                              className="border-b border-[var(--border)]"
+                            >
+                              <td className="px-3 py-2 font-mono">
+                                {m.provider_name || "—"}
+                              </td>
+                              <td className="px-3 py-2 font-mono">
+                                {m.name || "—"}
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  value={m.input_price ?? def?.input ?? ""}
+                                  placeholder="0"
+                                  onChange={(e) =>
+                                    setModelPrice(
+                                      i,
+                                      "input_price",
+                                      e.target.value,
+                                    )
+                                  }
+                                  style={{ width: "8rem" }}
+                                  className="text-right"
+                                />
+                              </td>
+                              <td className="px-3 py-2 text-right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  value={m.output_price ?? def?.output ?? ""}
+                                  placeholder="0"
+                                  onChange={(e) =>
+                                    setModelPrice(
+                                      i,
+                                      "output_price",
+                                      e.target.value,
+                                    )
+                                  }
+                                  style={{ width: "8rem" }}
+                                  className="text-right"
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex items-center justify-end gap-3 mt-3">
+                    {saved && (
+                      <span className="text-[var(--success)] text-sm">
+                        Saved
+                      </span>
+                    )}
+                    <button
+                      onClick={updateCosts}
+                      disabled={saving || running}
+                      className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
+                    >
+                      {saving ? "Updating…" : "Update Costs"}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Run selector — defaults to the most recent run on load. Picking a
+              run loads its results and re-points every table below at it. */}
+          <div className="flex items-center gap-3 mb-4">
+            <label className="text-sm text-[var(--muted)]">Run</label>
+            <select
+              value={viewingRunId ?? ""}
+              onChange={(e) => viewRun(e.target.value)}
+              disabled={running}
+              style={{ width: "auto", minWidth: "20rem" }}
+            >
+              {runs.map((r) => (
+                <option key={r.run_id} value={r.run_id}>
+                  {formatTimestamp(r.started_at)} — {r.status} ({r.completed}/
+                  {r.total}
+                  {r.errors > 0 ? `, ${r.errors} errors` : ""})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedRun && (
+            <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg overflow-auto mb-6">
+              <table className="w-full text-sm">
+                <thead className="bg-[var(--panel-2)]">
+                  <tr className="text-[var(--muted)]">
+                    <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                      started
+                    </th>
+                    <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                      status
+                    </th>
+                    <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                      progress
+                    </th>
+                    <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                      errors
+                    </th>
+                    <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                      total runtime
+                    </th>
+                    <th className="text-right px-3 py-2 border-b border-[var(--border)]">
+                      cost
+                    </th>
+                    <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                      run id
+                    </th>
+                    <th className="text-right px-3 py-2 border-b border-[var(--border)]"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    const r = selectedRun;
+                    const statusColor =
+                      r.status === "completed"
+                        ? "text-[var(--success)]"
+                        : r.status === "aborted"
+                          ? "text-[var(--danger)]"
+                          : r.status === "interrupted" || r.status === "paused"
+                            ? "text-[var(--warning)]"
+                            : "text-[var(--accent)]";
+                    return (
+                      <tr className="border-b border-[var(--border)]">
+                        <td className="px-3 py-2">
+                          {formatTimestamp(r.started_at)}
+                        </td>
+                        <td className={`px-3 py-2 font-mono ${statusColor}`}>
+                          {r.status}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {r.completed}/{r.total}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {r.errors}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatDuration(r.started_at, r.finished_at)}
+                        </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatCost(runCost(r, displayPrices))}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">
+                          {formatRunId(r.run_id)}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            onClick={() => deleteRunResults(r.run_id)}
+                            disabled={running}
+                            title="Permanently delete this run's results"
+                            className="text-sm text-[var(--muted)] hover:text-[var(--danger)] disabled:opacity-50"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {results && results.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold mb-3">
+                Aggregated Results by Model
+              </h3>
+              <ModelSummaryTable rows={results} prices={displayPrices} />
+            </div>
+          )}
+
           {results && results.length > 0 && (
             <div className="mb-6">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold">
-                  By Model
-                  {viewingRunId && (
-                    <span className="ml-2 text-[var(--muted)] font-mono font-normal">
-                      · {formatRunId(viewingRunId)}
-                    </span>
-                  )}
-                </h3>
+                <h3 className="text-sm font-semibold">Individual Results</h3>
                 <a
                   href={
                     viewingRunId
@@ -1143,96 +1914,6 @@ export default function ExperimentPage({
               <ResultsTable rows={results} />
             </div>
           )}
-
-          <h3 className="text-sm font-semibold mb-3">By Run</h3>
-          <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--panel-2)]">
-                <tr className="text-[var(--muted)]">
-                  <th className="text-left px-3 py-2 border-b border-[var(--border)]">
-                    started
-                  </th>
-                  <th className="text-left px-3 py-2 border-b border-[var(--border)]">
-                    status
-                  </th>
-                  <th className="text-right px-3 py-2 border-b border-[var(--border)]">
-                    progress
-                  </th>
-                  <th className="text-right px-3 py-2 border-b border-[var(--border)]">
-                    errors
-                  </th>
-                  <th className="text-right px-3 py-2 border-b border-[var(--border)]">
-                    total runtime
-                  </th>
-                  <th className="text-left px-3 py-2 border-b border-[var(--border)]">
-                    run id
-                  </th>
-                  <th className="text-right px-3 py-2 border-b border-[var(--border)]"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {runs.map((r) => {
-                  const isViewing = r.run_id === viewingRunId;
-                  const statusColor =
-                    r.status === "completed"
-                      ? "text-[var(--success)]"
-                      : r.status === "aborted"
-                        ? "text-[var(--danger)]"
-                        : r.status === "interrupted"
-                          ? "text-[var(--warning)]"
-                          : "text-[var(--accent)]";
-                  return (
-                    <tr
-                      key={r.run_id}
-                      className="border-b border-[var(--border)] hover:bg-[var(--panel-2)]"
-                    >
-                      <td className="px-3 py-2">
-                        {formatTimestamp(r.started_at)}
-                      </td>
-                      <td className={`px-3 py-2 font-mono ${statusColor}`}>
-                        {r.status}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {r.completed}/{r.total}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {r.errors}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {formatDuration(r.started_at, r.finished_at)}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">
-                        {formatRunId(r.run_id)}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {isViewing ? (
-                          <span className="text-xs text-[var(--muted)]">
-                            viewing
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => viewRun(r.run_id)}
-                            disabled={running}
-                            className="text-sm text-[var(--accent)] hover:text-[var(--accent-hover)] disabled:opacity-50"
-                          >
-                            View
-                          </button>
-                        )}
-                        <button
-                          onClick={() => deleteRunResults(r.run_id)}
-                          disabled={running}
-                          title="Permanently delete this run's results"
-                          className="text-sm text-[var(--muted)] hover:text-[var(--danger)] disabled:opacity-50 ml-3"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
         </section>
       )}
     </div>

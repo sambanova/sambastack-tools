@@ -303,9 +303,9 @@ def get_scorer(name: str) -> Optional[LlmJudgeScorerDef]:
         name=parsed.get("name") or name,
         provider_name=parsed.get("provider_name") or "",
         model=parsed.get("model") or "",
-        temperature=parsed.get("temperature") if isinstance(parsed.get("temperature"), (int, float)) else 0,
         judge_prompt=parsed.get("judge_prompt") or "",
         max_score=int(max_score),
+        additional_kwargs=parsed.get("additional_kwargs") if isinstance(parsed.get("additional_kwargs"), dict) else None,
     )
 
 
@@ -371,6 +371,42 @@ def find_resumable_run(experiment_id: str) -> Optional[RunMeta]:
 def find_latest_run(experiment_id: str) -> Optional[RunMeta]:
     runs = list_runs(experiment_id)
     return runs[0] if runs else None
+
+
+def find_retryable_run(experiment_id: str) -> Optional[RunMeta]:
+    """Latest run that still has failed (error) rows worth retrying.
+
+    Unlike ``find_resumable_run`` (which only matches an unfinished run), this
+    matches any run — including ``completed`` ones — as long as it recorded at
+    least one error. Used by the "Retry Failed" flow to default the dropdown to
+    the most recent run with failures when no run is explicitly chosen.
+    """
+    for run in list_runs(experiment_id):
+        if run.errors > 0:
+            return run
+    return None
+
+
+def read_run_experiment_snapshot(
+    experiment_id: str, run_id: str
+) -> Optional[Experiment]:
+    """The experiment config as captured when ``run_id`` was created.
+
+    Retrying a past run should re-run it with the same models/dataset/scorer it
+    originally used, not whatever the experiment looks like now. Returns None if
+    the snapshot is missing or unreadable, so callers can fall back to the live
+    experiment.
+    """
+    try:
+        raw = paths.run_experiment_snapshot_path(experiment_id, run_id).read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return None
+    try:
+        return Experiment.model_validate(json.loads(raw))
+    except Exception:
+        return None
 
 
 def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
@@ -444,6 +480,115 @@ def upsert_run_result_row(experiment_id: str, run_id: str, row: ResultRow) -> No
         meta = _read_run_meta_unlocked(experiment_id, run_id)
         if meta:
             _write_run_meta_unlocked(experiment_id, _recount_meta(meta, nxt))
+
+
+# --------------------------------------------------------------------------- #
+# Per-run error log (errors.json)
+# --------------------------------------------------------------------------- #
+# Schema: { "<example_id>": { "<provider>/<model>": {"phase": ..., "message": ...} } }
+#   * example_id is stringified (JSON object keys must be strings);
+#   * the inner key is the "provider/model" pair so the same model name served by
+#     two providers doesn't collide;
+#   * "phase" is "generation" or "scoring" — which stage raised the error.
+# The file is created lazily on the first error and the per-run lock serializes
+# writes, mirroring results.csv / run.json.
+def _read_errors_unlocked(experiment_id: str, run_id: str) -> dict:
+    try:
+        raw = paths.run_errors_path(experiment_id, run_id).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def record_run_error(
+    experiment_id: str,
+    run_id: str,
+    *,
+    example_id: int,
+    provider: str,
+    model: str,
+    error: Optional[dict],
+) -> None:
+    """Set or clear the error entry for one (example, provider/model) pair.
+
+    ``error`` is ``{"phase": ..., "message": ...}`` to record a failure, or
+    ``None`` to clear a previously recorded one (e.g. the task succeeded on a
+    resume/retry). Clearing when nothing is recorded is a no-op and never
+    creates an empty file.
+    """
+    ex_key = str(example_id)
+    model_key = f"{provider}/{model}"
+    with with_run_lock(experiment_id, run_id):
+        data = _read_errors_unlocked(experiment_id, run_id)
+        if error is None:
+            if ex_key not in data or model_key not in data[ex_key]:
+                return
+            del data[ex_key][model_key]
+            if not data[ex_key]:
+                del data[ex_key]
+        else:
+            data.setdefault(ex_key, {})[model_key] = error
+        path = paths.run_errors_path(experiment_id, run_id)
+        if not data:
+            # Last error cleared — drop the file rather than leave an empty {}.
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, json.dumps(data, indent=2))
+
+
+def read_run_errors(experiment_id: str, run_id: str) -> dict:
+    with with_run_lock(experiment_id, run_id):
+        return _read_errors_unlocked(experiment_id, run_id)
+
+
+# Marker formats the executor embeds in a result row's ``output`` (see
+# executor.run_task): a generation failure replaces the output with
+# ``ERROR: <msg>``; a scoring failure appends ``\n\n[JUDGE ERROR: <msg>]``.
+_JUDGE_ERROR_RE = re.compile(r"\[JUDGE ERROR: (?P<msg>.*)\]\s*\Z", re.DOTALL)
+
+
+def _error_from_output(output: str) -> dict:
+    """Recover ``{phase, message}`` from a status=="error" row's output column.
+
+    Inverse of how ``executor.run_task`` embeds the error, used to reconstruct
+    the log for runs with no errors.json.
+    """
+    m = _JUDGE_ERROR_RE.search(output)
+    if m:
+        return {"phase": "scoring", "message": m.group("msg")}
+    if output.startswith("ERROR: "):
+        return {"phase": "generation", "message": output[len("ERROR: ") :]}
+    return {"phase": "unknown", "message": output}
+
+
+def _derive_errors_from_results(experiment_id: str, run_id: str) -> dict:
+    out: dict = {}
+    for r in read_run_results(experiment_id, run_id) or []:
+        if r.status != "error":
+            continue
+        out.setdefault(str(r.example_id), {})[f"{r.provider}/{r.model}"] = (
+            _error_from_output(r.output)
+        )
+    return out
+
+
+def get_run_errors(experiment_id: str, run_id: str) -> dict:
+    """A run's error log for display.
+
+    Prefers the canonical errors.json; when it's absent (e.g. the run predates
+    the log, or was executed by an older server process that never wrote it),
+    falls back to reconstructing the log from the error rows in results.csv so
+    every run that recorded failures still surfaces them in the UI.
+    """
+    logged = read_run_errors(experiment_id, run_id)
+    if logged:
+        return logged
+    return _derive_errors_from_results(experiment_id, run_id)
 
 
 def read_run_results(experiment_id: str, run_id: str) -> Optional[list[ResultRow]]:
@@ -582,6 +727,23 @@ def save_providers(providers: list[Provider]) -> None:
     )
 
 
+def read_pricing_defaults() -> dict:
+    """Default token prices ($/1M) keyed by provider -> model -> {input, output}.
+
+    Generated by scripts/update_pricing.py; returns {} when the file is missing
+    or malformed so the UI just falls back to live /models pricing.
+    """
+    try:
+        raw = paths.pricing_defaults_file().read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # --------------------------------------------------------------------------- #
 # Scorers CRUD
 # --------------------------------------------------------------------------- #
@@ -593,9 +755,9 @@ def _scorer_from_raw(raw: dict, fallback_name: str) -> LlmJudgeScorerDef:
         name=raw.get("name") or fallback_name,
         provider_name=raw.get("provider_name") or "",
         model=raw.get("model") or "",
-        temperature=raw.get("temperature") if isinstance(raw.get("temperature"), (int, float)) else 0,
         judge_prompt=raw.get("judge_prompt") or "",
         max_score=int(max_score),
+        additional_kwargs=raw.get("additional_kwargs") if isinstance(raw.get("additional_kwargs"), dict) else None,
     )
 
 

@@ -4,27 +4,52 @@
   "models": [
     {
       "name": "MiniMax-M2.7",
-      "temperature": 0.0,
       "seed": 42,
       "system_prompt": "global",
       "provider_name": "SambaNova",
-      "additional_kwargs": null
-    },
-    {
-      "name": "Meta-Llama-3.3-70B-Instruct",
-      "temperature": 0.0,
-      "seed": 42,
-      "system_prompt": "global",
-      "provider_name": "SambaNova",
-      "additional_kwargs": null
+      "additional_kwargs": {
+        "temperature": 0
+      },
+      "input_price": null,
+      "output_price": null
     },
     {
       "name": "gemma-4-31B-it",
-      "temperature": 0.0,
       "seed": 42,
       "system_prompt": "global",
       "provider_name": "SambaNova",
-      "additional_kwargs": null
+      "additional_kwargs": {
+        "temperature": 0
+      },
+      "input_price": null,
+      "output_price": null
+    },
+    {
+      "name": "gpt-oss-120b",
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "SambaNova",
+      "additional_kwargs": null,
+      "input_price": null,
+      "output_price": null
+    },
+    {
+      "name": "claude-opus-4-8",
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "Anthropic",
+      "additional_kwargs": null,
+      "input_price": null,
+      "output_price": null
+    },
+    {
+      "name": "gpt-5.5",
+      "seed": 42,
+      "system_prompt": "global",
+      "provider_name": "OpenAI",
+      "additional_kwargs": null,
+      "input_price": null,
+      "output_price": null
     }
   ],
   "system_prompt": "You are an expert scientific research programmer. You will be given a multi-step coding problem and asked to implement the next step as a single Python function that matches the provided header exactly. Reply with one ```python``` code block containing only that function — no explanations, no example usage, and no test code.",
@@ -34,5 +59,5 @@
   },
   "output_generator": "scripts/generators/scicode_generator.py",
   "concurrency": null,
-  "example_count": 15
+  "example_count": null
 }

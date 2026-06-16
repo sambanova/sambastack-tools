@@ -10,7 +10,7 @@ supports incremental CSV upserts, resume carry-over, and abort.
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -18,7 +18,7 @@ from . import storage
 from .datasets import load_dataset
 from .generators import load_generator_class, resolve_generator_path, run_generator
 from .models import DatasetRow, Experiment, ModelConfig, ResultRow, RunMeta
-from .run_registry import register_run, unregister_run
+from .run_registry import RunControl, register_run, unregister_run
 from .scoring import heuristic_score, llm_judge_score, messages_to_transcript
 
 
@@ -57,7 +57,7 @@ def run_experiment(
     mode: str = "new",
     run_id: Optional[str] = None,
     on_progress: Optional[Callable[[ExecutorProgress], None]] = None,
-    cancel_event: Optional[threading.Event] = None,
+    control: Optional[RunControl] = None,
 ) -> RunResult:
     concurrency = max(1, concurrency)
     full_dataset = load_dataset(experiment.dataset)
@@ -72,23 +72,37 @@ def run_experiment(
     total_tasks = len(experiment.models) * len(dataset)
 
     prior_rows: list[ResultRow] = []
-    if mode == "resume":
+    # "resume" continues an unfinished run; "retry" re-runs the failed rows of
+    # any past run (including a completed one). Both carry over the rows that
+    # already succeeded and re-dispatch everything else — for a finished run
+    # that "everything else" is exactly the error rows.
+    if mode in ("resume", "retry"):
         if not run_id:
-            resumable = storage.find_resumable_run(experiment.id)
-            if not resumable:
-                raise RuntimeError("No resumable run found")
-            run_id = resumable.run_id
+            target = (
+                storage.find_retryable_run(experiment.id)
+                if mode == "retry"
+                else storage.find_resumable_run(experiment.id)
+            )
+            if not target:
+                raise RuntimeError(
+                    "No run with failed rows found to retry"
+                    if mode == "retry"
+                    else "No resumable run found"
+                )
+            run_id = target.run_id
         existing = storage.read_run_results(experiment.id, run_id)
         if existing is None:
-            raise RuntimeError(f"Run {run_id} has no results to resume from")
+            raise RuntimeError(f"Run {run_id} has no results to {mode} from")
         prior_rows = existing
         storage.mark_run_resumed(experiment.id, run_id, total_tasks)
     else:
         meta = storage.create_run(experiment, total_tasks)
         run_id = meta.run_id
 
-    cancel = cancel_event or threading.Event()
-    register_run(experiment.id, run_id, cancel)
+    control = control or RunControl()
+    terminate = control.terminate
+    pause = control.pause
+    register_run(experiment.id, run_id, control)
 
     prior_by_key = {
         _row_key(r.provider, r.model, r.example_id): r for r in prior_rows
@@ -132,9 +146,21 @@ def run_experiment(
 
     report()
 
-    def run_task(task: _Task) -> Optional[ResultRow]:
-        """Pure worker: generate + score, return a ResultRow. None if cancelled."""
-        if cancel.is_set():
+    def run_task(task: _Task) -> Optional[tuple[ResultRow, Optional[dict]]]:
+        """Pure worker: generate + score, return (ResultRow, error) — None if skipped.
+
+        The second tuple element is the structured error detail
+        (``{"phase", "message"}``) for the errors.json log when the task failed,
+        or ``None`` when it succeeded (which also clears any stale entry on a
+        resume/retry).
+
+        Checked once *before* any work begins: if a pause or terminate has been
+        requested, this not-yet-started task is skipped (returns None, writes
+        nothing, and re-runs on resume). A task already past this point runs to
+        completion on a pause — its tokens are not wasted; only a terminate
+        abandons in-flight work.
+        """
+        if terminate.is_set() or pause.is_set():
             return None
         model = task.model
         row = task.row
@@ -143,6 +169,7 @@ def run_experiment(
         score_reason: Optional[str] = None
         status = "completed"
         metrics: Optional[dict] = None
+        error_info: Optional[dict] = None
 
         try:
             provider = provider_by_name.get(model.provider_name)
@@ -158,11 +185,15 @@ def run_experiment(
                 row=row,
             )
         except Exception as err:  # noqa: BLE001 — surface as an ERROR row
-            if cancel.is_set():
+            # A terminate tears the pool down mid-call, so swallow the spurious
+            # error and drop the task. A pause lets the call finish, so a real
+            # failure here is recorded as a genuine ERROR row.
+            if terminate.is_set():
                 return None
             output = f"ERROR: {err}"
             score = 0.0
             status = "error"
+            error_info = {"phase": "generation", "message": str(err)}
 
         if status == "completed":
             try:
@@ -199,14 +230,15 @@ def run_experiment(
                 else:
                     score = heuristic_score(row.expected_output, output, row.weight)
             except Exception as err:  # noqa: BLE001
-                if cancel.is_set():
+                if terminate.is_set():
                     return None
                 output = f"{output}\n\n[JUDGE ERROR: {err}]"
                 score = 0.0
                 status = "error"
+                error_info = {"phase": "scoring", "message": str(err)}
 
         rounded = round(score * 100) / 100
-        return ResultRow(
+        result_row = ResultRow(
             result_id=task.result_id,
             status=status,
             provider=model.provider_name,
@@ -223,37 +255,63 @@ def run_experiment(
             tps=(metrics or {}).get("tps"),
             num_llm_calls=(metrics or {}).get("num_llm_calls"),
         )
+        return result_row, error_info
 
+    max_workers = min(concurrency, len(tasks) or 1)
+    pool = ThreadPoolExecutor(max_workers=max_workers)
     try:
-        max_workers = min(concurrency, len(tasks) or 1)
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(run_task, t): t for t in tasks}
-            for fut in as_completed(futures):
-                if cancel.is_set():
-                    break
+        futures = {pool.submit(run_task, t): t for t in tasks}
+        pending = set(futures)
+        # Poll instead of blocking in as_completed: a terminate fired while
+        # every worker is parked in a slow LLM call must still break us out
+        # promptly (within one poll) rather than waiting for those calls. A
+        # pause sets no terminate, so it simply drains — queued tasks
+        # short-circuit to None and the in-flight ones land their results.
+        while pending and not terminate.is_set():
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for fut in done:
                 task = futures[fut]
                 label = (
                     f"{task.model.provider_name}/{task.model.name} "
                     f"#{task.row.example_id}"
                 )
-                row = fut.result()
-                if row is None:  # cancelled mid-flight
+                outcome = fut.result()
+                if outcome is None:  # skipped (paused) or abandoned (terminated)
                     continue
+                row, error_info = outcome
                 # Parent owns the write.
                 storage.upsert_run_result_row(experiment.id, run_id, row)
+                # Record the error (or clear a stale one if this resume succeeded).
+                storage.record_run_error(
+                    experiment.id,
+                    run_id,
+                    example_id=row.example_id,
+                    provider=row.provider,
+                    model=row.model,
+                    error=error_info,
+                )
                 final_rows[row.result_id] = row
                 completed += 1
                 if row.status == "error":
                     errors += 1
                 report(label)
-            if cancel.is_set():
-                pool.shutdown(wait=False, cancel_futures=True)
     finally:
         unregister_run(experiment.id, run_id)
+        # On a terminate, do NOT wait for the in-flight tasks — abandon them so
+        # the caller isn't blocked on slow LLM calls (their tokens are wasted
+        # and they re-run on resume). A pause / normal finish has already
+        # drained, so the join is a no-op there.
+        pool.shutdown(wait=not terminate.is_set(), cancel_futures=True)
 
-    storage.complete_run(
-        experiment.id, run_id, "aborted" if cancel.is_set() else "completed"
-    )
+    # A pause is resumable, so it wins over a terminate fired during the drain
+    # ("Terminate Threads" only hurries a pause along — it doesn't abort it).
+    if pause.is_set():
+        final_status = "paused"
+    elif terminate.is_set():
+        final_status = "aborted"
+    else:
+        final_status = "completed"
+    storage.complete_run(experiment.id, run_id, final_status)
 
     meta = storage.read_run_meta(experiment.id, run_id)
     if meta is None:

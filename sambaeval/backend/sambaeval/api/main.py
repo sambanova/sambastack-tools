@@ -22,6 +22,7 @@ from .. import paths, run_registry, storage
 from ..datasets import load_dataset
 from ..executor import ExecutorProgress, run_experiment
 from ..models import Experiment, LlmJudgeScorerDef, Provider
+from ..run_registry import RunControl
 
 app = FastAPI(title="SambaEval API")
 
@@ -118,12 +119,36 @@ async def run(exp_id: str, request: Request):
         concurrency = 4
     concurrency = max(1, min(32, concurrency))
     requested_mode = qp.get("mode")
-    mode = requested_mode if requested_mode in ("new", "resume") else "auto"
+    mode = requested_mode if requested_mode in ("new", "resume", "retry") else "auto"
     run_id: Optional[str] = qp.get("run_id") or None
 
     experiment = storage.get_experiment(exp_id)
     if experiment is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
+
+    if mode == "retry":
+        # Retrying re-runs only the failed rows of a past run, carrying over the
+        # rows that already succeeded. By default it reproduces the original
+        # conditions via the config snapshot captured when the run started;
+        # `config=live` instead applies the experiment's *current* settings
+        # (e.g. an edited model param) to those failed rows.
+        use_live_config = qp.get("config") == "live"
+        if not run_id:
+            target = storage.find_retryable_run(exp_id)
+            if target is None:
+                return JSONResponse(
+                    {"error": "no_retryable_run"}, status_code=404
+                )
+            run_id = target.run_id
+        meta = storage.read_run_meta(exp_id, run_id)
+        if meta is None:
+            return JSONResponse({"error": "run_not_found"}, status_code=404)
+        if run_registry.is_run_active(exp_id, run_id):
+            return JSONResponse({"error": "run_is_active"}, status_code=409)
+        if not use_live_config:
+            snapshot = storage.read_run_experiment_snapshot(exp_id, run_id)
+            if snapshot is not None:
+                experiment = snapshot
 
     if mode == "auto":
         resumable = storage.find_resumable_run(exp_id)
@@ -134,7 +159,7 @@ async def run(exp_id: str, request: Request):
             )
         mode = "new"
 
-    cancel_event = threading.Event()
+    control = RunControl()
     q: "queue.Queue" = queue.Queue()
 
     def on_progress(p: ExecutorProgress) -> None:
@@ -157,7 +182,7 @@ async def run(exp_id: str, request: Request):
                 mode=mode,
                 run_id=run_id,
                 on_progress=on_progress,
-                cancel_event=cancel_event,
+                control=control,
             )
             q.put((
                 "done",
@@ -176,19 +201,20 @@ async def run(exp_id: str, request: Request):
 
     async def event_stream():
         loop = asyncio.get_event_loop()
-        try:
-            while True:
-                if await request.is_disconnected():
-                    cancel_event.set()
-                item = await loop.run_in_executor(None, _q_get, q)
-                if item is _EMPTY:
-                    continue
-                if item is _SENTINEL:
-                    break
-                event, data = item
-                yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
-        finally:
-            cancel_event.set()
+        while True:
+            if await request.is_disconnected():
+                # The client went away (tab closed / page refreshed). Stop
+                # streaming, but DO NOT stop the run — let it keep executing
+                # server-side so a reloaded page can reconnect to it (by polling
+                # the runs list). Only an explicit Cancel/Terminate stops a run.
+                break
+            item = await loop.run_in_executor(None, _q_get, q)
+            if item is _EMPTY:
+                continue
+            if item is _SENTINEL:
+                break
+            event, data = item
+            yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -197,24 +223,88 @@ async def run(exp_id: str, request: Request):
     )
 
 
+def _resolve_active_run_id(exp_id: str, request: Request) -> Optional[str]:
+    run_id = request.query_params.get("run_id")
+    if run_id:
+        return run_id
+    active = storage.find_resumable_run(exp_id)
+    return active.run_id if active is not None else None
+
+
 @app.post("/api/experiments/{exp_id}/run/cancel")
 def cancel(exp_id: str, request: Request):
-    run_id = request.query_params.get("run_id")
-    if not run_id:
-        active = storage.find_resumable_run(exp_id)
-        if active is None:
-            return JSONResponse({"error": "no_active_run"}, status_code=404)
-        run_id = active.run_id
+    run_id = _resolve_active_run_id(exp_id, request)
+    if run_id is None:
+        return JSONResponse({"error": "no_active_run"}, status_code=404)
     cancelled = run_registry.cancel_run(exp_id, run_id)
+    if not cancelled:
+        # Not in the in-process registry: the run lost its worker (server
+        # restart / crash) but its run.json may still say "running". Finalize it
+        # directly so an orphaned run can always be stopped from the UI.
+        meta = storage.read_run_meta(exp_id, run_id)
+        if meta is not None and meta.status in ("running", "paused"):
+            storage.complete_run(exp_id, run_id, "aborted")
+            cancelled = True
     return {"cancelled": cancelled, "runId": run_id}
+
+
+@app.post("/api/experiments/{exp_id}/run/pause")
+def pause(exp_id: str, request: Request):
+    """Gracefully pause a run: stop dispatching new tasks and let the in-flight
+    ones finish. The run is marked ``paused`` and can be resumed later."""
+    run_id = _resolve_active_run_id(exp_id, request)
+    if run_id is None:
+        return JSONResponse({"error": "no_active_run"}, status_code=404)
+    paused = run_registry.pause_run(exp_id, run_id)
+    return {"paused": paused, "runId": run_id}
+
+
+@app.post("/api/experiments/{exp_id}/run/terminate")
+def terminate(exp_id: str, request: Request):
+    """Force the worker pool down so a pause doesn't block on in-flight tasks.
+    The abandoned tasks write no results and re-run when the run is resumed."""
+    run_id = _resolve_active_run_id(exp_id, request)
+    if run_id is None:
+        return JSONResponse({"error": "no_active_run"}, status_code=404)
+    terminated = run_registry.cancel_run(exp_id, run_id)
+    return {"terminated": terminated, "runId": run_id}
 
 
 # --------------------------------------------------------------------------- #
 # Runs + results
 # --------------------------------------------------------------------------- #
+def _run_token_usage(exp_id: str, run_id: str) -> list[dict]:
+    """Per-(provider, model) token totals for one run, used by the Results UI to
+    derive a per-run cost from the editable prices. Returns [] when the run has
+    no results yet."""
+    rows = storage.read_run_results(exp_id, run_id) or []
+    agg: dict[tuple[str, str], dict[str, float]] = {}
+    for r in rows:
+        key = (r.provider, r.model)
+        bucket = agg.setdefault(key, {"input_tokens": 0.0, "output_tokens": 0.0})
+        if r.input_tokens is not None:
+            bucket["input_tokens"] += r.input_tokens
+        if r.output_tokens is not None:
+            bucket["output_tokens"] += r.output_tokens
+    return [
+        {
+            "provider": provider,
+            "model": model,
+            "input_tokens": v["input_tokens"],
+            "output_tokens": v["output_tokens"],
+        }
+        for (provider, model), v in agg.items()
+    ]
+
+
 @app.get("/api/experiments/{exp_id}/runs")
 def list_runs(exp_id: str) -> dict:
-    return {"runs": [m.model_dump() for m in storage.list_runs(exp_id)]}
+    out = []
+    for m in storage.list_runs(exp_id):
+        entry = m.model_dump()
+        entry["token_usage"] = _run_token_usage(exp_id, m.run_id)
+        out.append(entry)
+    return {"runs": out}
 
 
 @app.delete("/api/experiments/{exp_id}/runs")
@@ -268,6 +358,21 @@ def results(exp_id: str, request: Request):
     return {"results": [r.model_dump() for r in latest["rows"]], "runId": latest["run_id"]}
 
 
+@app.get("/api/experiments/{exp_id}/errors")
+def run_errors(exp_id: str, request: Request) -> dict:
+    """The errors.json log for one run (defaults to the latest run).
+
+    Shape: ``{ "<example_id>": { "<provider>/<model>": {"phase", "message"} } }``.
+    Empty when the run recorded no errors (or has no log file)."""
+    run_id = request.query_params.get("run_id")
+    if not run_id:
+        latest = storage.find_latest_run(exp_id)
+        run_id = latest.run_id if latest else None
+    if not run_id:
+        return {"errors": {}, "runId": None}
+    return {"errors": storage.get_run_errors(exp_id, run_id), "runId": run_id}
+
+
 # --------------------------------------------------------------------------- #
 # Providers
 # --------------------------------------------------------------------------- #
@@ -284,6 +389,16 @@ async def put_providers(request: Request) -> dict:
     return {"providers": [p.model_dump() for p in providers]}
 
 
+@app.get("/api/pricing-defaults")
+def pricing_defaults() -> dict:
+    """Default token prices ($/1M) keyed by provider -> model -> {input, output}.
+
+    Populated by scripts/update_pricing.py from the token-costs crawled snapshots
+    of the OpenAI/Anthropic pricing pages. The Results cost UI reads its defaults
+    from here (falling back to live /models pricing for anything not listed)."""
+    return {"pricing": storage.read_pricing_defaults()}
+
+
 @app.get("/api/providers/models")
 def provider_models(request: Request):
     provider_name = request.query_params.get("provider")
@@ -296,7 +411,17 @@ def provider_models(request: Request):
 
     url = provider.api_url.rstrip("/") + "/models"
     headers: dict[str, str] = {}
-    if provider.name.lower() != "sambanova" and provider.api_key:
+    is_anthropic = (
+        "anthropic" in provider.api_url.lower()
+        or provider.name.lower() == "anthropic"
+    )
+    if is_anthropic and provider.api_key:
+        # Anthropic's /models endpoint uses x-api-key + a version header,
+        # not the OpenAI-style Authorization: Bearer (which 401s here even
+        # though it works on the OpenAI-compat /chat/completions layer).
+        headers["x-api-key"] = provider.api_key
+        headers["anthropic-version"] = "2023-06-01"
+    elif provider.name.lower() != "sambanova" and provider.api_key:
         headers["Authorization"] = f"Bearer {provider.api_key}"
     try:
         res = httpx.get(url, headers=headers, timeout=30.0)
@@ -306,12 +431,32 @@ def provider_models(request: Request):
                 status_code=502,
             )
         data = res.json()
-        models = sorted(
-            m["id"]
+        entries = [
+            m
             for m in (data.get("data") or [])
             if isinstance(m.get("id"), str) and m["id"]
-        )
-        return {"models": models}
+        ]
+        models = sorted(m["id"] for m in entries)
+        # Surface per-token pricing when the provider reports it (SambaNova's
+        # /models returns {"pricing": {"prompt": "<$/token>", "completion":
+        # "<$/token>"}}). Convert to USD per 1,000,000 tokens — the unit the
+        # Results cost UI edits in. Providers that omit pricing (OpenAI,
+        # Anthropic, …) simply contribute nothing here.
+        pricing: dict[str, dict[str, float]] = {}
+        for m in entries:
+            p = m.get("pricing")
+            if not isinstance(p, dict):
+                continue
+            entry: dict[str, float] = {}
+            for ui_key, src_key in (("input", "prompt"), ("output", "completion")):
+                try:
+                    per_token = float(p[src_key])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                entry[ui_key] = per_token * 1_000_000
+            if entry:
+                pricing[m["id"]] = entry
+        return {"models": models, "pricing": pricing}
     except Exception as err:  # noqa: BLE001
         return JSONResponse({"error": str(err), "models": []}, status_code=502)
 

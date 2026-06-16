@@ -24,6 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 # Phase 1 (FastAPI backend). Installed when we get there.
 server = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Test suite (pytest). Installed in CI and for local `pytest backend/tests`.
+test = ["pytest>=8"]
 
 [project.scripts]
 sambaeval = "sambaeval.cli:main"
@@ -32,3 +34,6 @@ sambaeval-server = "sambaeval.api:serve"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sambaeval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

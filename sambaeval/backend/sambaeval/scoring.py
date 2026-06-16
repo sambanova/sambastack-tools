@@ -164,9 +164,11 @@ def llm_judge_score(
         provider=provider,
         model=ModelConfig(
             name=scorer.model,
-            temperature=scorer.temperature,
             system_prompt="",
             provider_name=provider.name,
+            # The scorer's extra request kwargs (temperature, top_p, …) flow
+            # straight through to the judge call, same as an eval model's.
+            additional_kwargs=scorer.additional_kwargs,
         ),
         system_prompt="",
         user_prompt=rendered,
