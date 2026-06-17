@@ -42,7 +42,7 @@ interface Progress {
   runId?: string;
 }
 
-type RunMode = "new" | "resume" | "retry";
+type RunMode = "new" | "resume" | "retry" | "merged";
 
 function formatRunId(runId: string): string {
   // Run IDs are ISO timestamps with `:` and `.` replaced by `-`. Make them
@@ -192,6 +192,28 @@ export default function ExperimentPage({
   const [retryRunId, setRetryRunId] = useState<string | null>(null);
   const [retryUseLive, setRetryUseLive] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  // Merge Results dialog state. `mergeOpen` toggles the modal; `mergeFrom` /
+  // `mergeInto` are the selected run_ids; `mergeOverwrite` toggles overwriting
+  // destination rows on conflict; `mergeConflicts` holds the {from,into}
+  // result_id pairs returned when a non-overwrite merge is blocked.
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeFrom, setMergeFrom] = useState<string | null>(null);
+  const [mergeInto, setMergeInto] = useState<string | null>(null);
+  const [mergeOverwrite, setMergeOverwrite] = useState(false);
+  const [mergeConflicts, setMergeConflicts] = useState<
+    { from: number; into: number }[] | null
+  >(null);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  const [merging, setMerging] = useState(false);
+  // Run mode in the Run section box. "new" starts a fresh run; "merged"
+  // generates the current experiment's results into an existing target run
+  // (`mergeTargetRunId`), with `runConflictPolicy` deciding what happens to
+  // rows that share a (provider, model, example id) with the target.
+  const [runMode, setRunMode] = useState<"new" | "merged">("new");
+  const [mergeTargetRunId, setMergeTargetRunId] = useState<string | null>(null);
+  const [runConflictPolicy, setRunConflictPolicy] = useState<
+    "skip" | "overwrite"
+  >("skip");
   // Pause dialog state. "waiting" = pause requested, draining in-flight
   // threads; "done" = drain finished, run is paused and resumable. null = no
   // pause in progress.
@@ -714,7 +736,7 @@ export default function ExperimentPage({
   const streamRun = async (
     mode: RunMode,
     explicitRunId?: string,
-    opts?: { useLiveConfig?: boolean },
+    opts?: { useLiveConfig?: boolean; mergeConflict?: "skip" | "overwrite" },
   ) => {
     setRunning(true);
     setRunError(null);
@@ -731,6 +753,7 @@ export default function ExperimentPage({
     });
     if (explicitRunId) qs.set("run_id", explicitRunId);
     if (opts?.useLiveConfig) qs.set("config", "live");
+    if (opts?.mergeConflict) qs.set("merge_conflict", opts.mergeConflict);
 
     const abort = new AbortController();
     runAbortRef.current = abort;
@@ -880,6 +903,25 @@ export default function ExperimentPage({
     }
   };
 
+  // The Run section's primary action. "New Run" keeps the existing auto/resume
+  // flow; "Merged Run" generates the current experiment's results into the
+  // chosen target run, checking each (provider, model, example id) for a
+  // conflict before running a prompt.
+  const runExperiment = async () => {
+    if (runMode === "merged") {
+      if (!mergeTargetRunId) {
+        setRunError("Choose an existing run to merge into.");
+        return;
+      }
+      await save();
+      await streamRun("merged", mergeTargetRunId, {
+        mergeConflict: runConflictPolicy,
+      });
+      return;
+    }
+    await runAuto();
+  };
+
   const chooseResume = async () => {
     const pending = pendingResume;
     setPendingResume(null);
@@ -1017,6 +1059,51 @@ export default function ExperimentPage({
     }
   };
 
+  // Open the Merge Results dialog, defaulting From/Into to the two most recent
+  // runs (newest-first ordering) so the common case needs no selection.
+  const openMerge = () => {
+    if (running) return;
+    setMergeConflicts(null);
+    setMergeError(null);
+    setMergeOverwrite(false);
+    setMergeFrom(runs[0]?.run_id ?? null);
+    setMergeInto(runs[1]?.run_id ?? runs[0]?.run_id ?? null);
+    setMergeOpen(true);
+  };
+
+  const doMerge = async () => {
+    if (!mergeFrom || !mergeInto || merging) return;
+    setMerging(true);
+    setMergeError(null);
+    setMergeConflicts(null);
+    try {
+      const res = await fetch(apiUrl(`/api/experiments/${id}/runs/merge`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_run_id: mergeFrom,
+          into_run_id: mergeInto,
+          overwrite: mergeOverwrite,
+        }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 409 && d.status === "conflict") {
+        setMergeConflicts(d.conflicts ?? []);
+        return;
+      }
+      if (!res.ok) {
+        setMergeError(d.error ?? `Failed to merge results (${res.status})`);
+        return;
+      }
+      // Success: refresh runs and view the (modified) destination run.
+      setMergeOpen(false);
+      await fetchRuns();
+      await viewRun(mergeInto);
+    } finally {
+      setMerging(false);
+    }
+  };
+
   const percent = progress
     ? Math.round((progress.completed / Math.max(1, progress.total)) * 100)
     : 0;
@@ -1025,6 +1112,11 @@ export default function ExperimentPage({
   // stats, and aggregations are shown). `runs` is newest-first, so the default
   // viewingRunId set on load is the most recent run.
   const selectedRun = runs.find((r) => r.run_id === viewingRunId) ?? null;
+
+  // Runs eligible as a "Merged Run" target: those over the same dataset as the
+  // experiment's current settings (dataset_key equals the filename, which is
+  // what `exp.dataset` holds for file-backed datasets).
+  const sameDatasetRuns = runs.filter((r) => r.dataset_key === exp.dataset);
 
   return (
     <div>
@@ -1073,6 +1165,163 @@ export default function ExperimentPage({
           </div>
         </div>
       )}
+
+      {mergeOpen &&
+        (() => {
+          const fromRun = runs.find((r) => r.run_id === mergeFrom) ?? null;
+          // Restrict "Into" to runs over the same dataset as the chosen "From"
+          // (and never the same run) — the dynamic same-dataset filter.
+          const intoOptions = runs.filter(
+            (r) =>
+              r.run_id !== mergeFrom &&
+              (!fromRun || r.dataset_key === fromRun.dataset_key),
+          );
+          const runLabel = (r: RunMeta) =>
+            `${formatTimestamp(r.started_at)} — ${r.status} (${r.completed}/${r.total}${r.errors > 0 ? `, ${r.errors} errors` : ""})`;
+          const canMerge =
+            !!mergeFrom &&
+            !!mergeInto &&
+            mergeFrom !== mergeInto &&
+            !merging;
+          return (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-5 max-w-2xl w-full mx-4 max-h-[85vh] overflow-auto">
+                <h3 className="font-medium mb-3">Merge Results</h3>
+                <p className="text-sm text-[var(--muted)] mb-4">
+                  Results from one experiment run can be merged into those of
+                  another experiment run as long as they use the same dataset.
+                  That can be used if different runs contain different models or
+                  examples from the same dataset. Note that the result_ids in
+                  the &apos;From&apos; results will be modified but the
+                  &apos;Into&apos; will not be modified.
+                </p>
+
+                <label className="text-xs text-[var(--muted)] block mb-1">
+                  From
+                </label>
+                <select
+                  value={mergeFrom ?? ""}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setMergeFrom(next);
+                    setMergeConflicts(null);
+                    setMergeError(null);
+                    // Keep Into valid: if it no longer shares the dataset (or
+                    // equals the new From), reset it to the first valid option.
+                    const nextFrom = runs.find((r) => r.run_id === next);
+                    const valid = runs.filter(
+                      (r) =>
+                        r.run_id !== next &&
+                        (!nextFrom || r.dataset_key === nextFrom.dataset_key),
+                    );
+                    if (!valid.some((r) => r.run_id === mergeInto)) {
+                      setMergeInto(valid[0]?.run_id ?? null);
+                    }
+                  }}
+                  className="mb-4"
+                >
+                  {runs.map((r) => (
+                    <option key={r.run_id} value={r.run_id}>
+                      {runLabel(r)}
+                    </option>
+                  ))}
+                </select>
+
+                <label className="text-xs text-[var(--muted)] block mb-1">
+                  Into
+                </label>
+                <select
+                  value={mergeInto ?? ""}
+                  onChange={(e) => {
+                    setMergeInto(e.target.value);
+                    setMergeConflicts(null);
+                    setMergeError(null);
+                  }}
+                  disabled={intoOptions.length === 0}
+                  className="mb-4"
+                >
+                  {intoOptions.length === 0 ? (
+                    <option value="">No other run with the same dataset</option>
+                  ) : (
+                    intoOptions.map((r) => (
+                      <option key={r.run_id} value={r.run_id}>
+                        {runLabel(r)}
+                      </option>
+                    ))
+                  )}
+                </select>
+
+                <label className="flex items-start gap-2 text-sm mb-4 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={mergeOverwrite}
+                    onChange={(e) => {
+                      setMergeOverwrite(e.target.checked);
+                      setMergeConflicts(null);
+                      setMergeError(null);
+                    }}
+                    className="mt-0.5"
+                  />
+                  <span>Overwrite destination run results when conflicts arise</span>
+                </label>
+
+                {mergeConflicts && (
+                  <div className="mb-4 border border-[var(--danger)] rounded-md p-3">
+                    <p className="text-sm text-[var(--danger)] mb-2">
+                      The following rows refer to the same provider, model, and
+                      example id
+                    </p>
+                    <div className="overflow-auto max-h-60">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[var(--panel-2)]">
+                          <tr className="text-[var(--muted)]">
+                            <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                              From
+                            </th>
+                            <th className="text-left px-3 py-2 border-b border-[var(--border)]">
+                              Into
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {mergeConflicts.map((c, i) => (
+                            <tr
+                              key={i}
+                              className="border-b border-[var(--border)]"
+                            >
+                              <td className="px-3 py-2 font-mono">{c.from}</td>
+                              <td className="px-3 py-2 font-mono">{c.into}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {mergeError && (
+                  <p className="text-sm text-[var(--danger)] mb-4">{mergeError}</p>
+                )}
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => setMergeOpen(false)}
+                    className="text-[var(--muted)] hover:text-white px-3 py-2 text-sm"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={doMerge}
+                    disabled={!canMerge}
+                    className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-3 py-2 rounded-md text-sm font-medium disabled:opacity-50"
+                  >
+                    {merging ? "Merging…" : "Merge"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
       {retryRunId !== null && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -1189,7 +1438,7 @@ export default function ExperimentPage({
       <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
         <h2 className="font-medium mb-3">General</h2>
         <div className="grid grid-cols-12 gap-3 mb-3">
-          <div className="col-span-5">
+          <div className="col-span-6">
             <label className="text-xs text-[var(--muted)] block mb-1">
               Name
             </label>
@@ -1198,7 +1447,7 @@ export default function ExperimentPage({
               onChange={(e) => update({ name: e.target.value })}
             />
           </div>
-          <div className="col-span-4">
+          <div className="col-span-6">
             <label className="text-xs text-[var(--muted)] block mb-1">
               Dataset
             </label>
@@ -1213,25 +1462,6 @@ export default function ExperimentPage({
                 </option>
               ))}
             </select>
-          </div>
-          <div className="col-span-3">
-            <label className="text-xs text-[var(--muted)] block mb-1">
-              Run concurrency
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={32}
-              value={exp.concurrency ?? 4}
-              onChange={(e) =>
-                update({
-                  concurrency: Math.max(
-                    1,
-                    Math.min(32, Number(e.target.value) || 1),
-                  ),
-                })
-              }
-            />
           </div>
         </div>
         {exp.dataset && (
@@ -1551,6 +1781,120 @@ export default function ExperimentPage({
         )}
       </section>
 
+      <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
+        <h2 className="font-medium mb-3">Run</h2>
+        <div className="grid grid-cols-12 gap-3 mb-3">
+          <div className="col-span-3">
+            <label className="text-xs text-[var(--muted)] block mb-1">
+              Run concurrency
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={32}
+              value={exp.concurrency ?? 4}
+              disabled={running}
+              onChange={(e) =>
+                update({
+                  concurrency: Math.max(
+                    1,
+                    Math.min(32, Number(e.target.value) || 1),
+                  ),
+                })
+              }
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-5 mb-3">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              name="runMode"
+              checked={runMode === "new"}
+              disabled={running}
+              onChange={() => setRunMode("new")}
+            />
+            New Run
+          </label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="radio"
+              name="runMode"
+              checked={runMode === "merged"}
+              disabled={running}
+              onChange={() => {
+                setRunMode("merged");
+                setRunError(null);
+                // Default the target to the most recent same-dataset run.
+                if (
+                  !mergeTargetRunId ||
+                  !sameDatasetRuns.some((r) => r.run_id === mergeTargetRunId)
+                ) {
+                  setMergeTargetRunId(sameDatasetRuns[0]?.run_id ?? null);
+                }
+              }}
+            />
+            Merged Run
+          </label>
+        </div>
+
+        {runMode === "merged" &&
+          (sameDatasetRuns.length === 0 ? (
+            <p className="text-sm text-[var(--muted)]">
+              No existing run uses this experiment&apos;s current dataset, so
+              there is nothing to merge into.
+            </p>
+          ) : (
+            <div className="max-w-xl">
+              <label className="text-xs text-[var(--muted)] block mb-1">
+                Choose Existing Run
+              </label>
+              <select
+                value={mergeTargetRunId ?? ""}
+                disabled={running}
+                onChange={(e) => setMergeTargetRunId(e.target.value)}
+                className="mb-4"
+              >
+                {sameDatasetRuns.map((r) => (
+                  <option key={r.run_id} value={r.run_id}>
+                    {formatTimestamp(r.started_at)} — {r.status} ({r.completed}/
+                    {r.total}
+                    {r.errors > 0 ? `, ${r.errors} errors` : ""})
+                  </option>
+                ))}
+              </select>
+
+              <p className="text-sm mb-2">
+                When conflicts arise with results in the target run that have
+                the same provider, model, and example id,
+              </p>
+              <div className="flex items-center gap-5">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="runConflictPolicy"
+                    checked={runConflictPolicy === "skip"}
+                    disabled={running}
+                    onChange={() => setRunConflictPolicy("skip")}
+                  />
+                  Skip them
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="runConflictPolicy"
+                    checked={runConflictPolicy === "overwrite"}
+                    disabled={running}
+                    onChange={() => setRunConflictPolicy("overwrite")}
+                  />
+                  Overwrite them
+                </label>
+              </div>
+            </div>
+          ))}
+      </section>
+
       <div className="flex items-center justify-center gap-3 mt-6 mb-6">
         {saved && <span className="text-[var(--success)] text-sm">Saved</span>}
         <button
@@ -1580,8 +1924,13 @@ export default function ExperimentPage({
         ) : (
           <>
             <button
-              onClick={runAuto}
-              disabled={running}
+              onClick={runExperiment}
+              disabled={running || (runMode === "merged" && !mergeTargetRunId)}
+              title={
+                runMode === "merged" && !mergeTargetRunId
+                  ? "Choose an existing run over this dataset to merge into"
+                  : undefined
+              }
               className="bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-md font-medium disabled:opacity-50"
             >
               Run Experiment
@@ -1804,6 +2153,16 @@ export default function ExperimentPage({
                 </option>
               ))}
             </select>
+            {runs.length > 1 && (
+              <button
+                onClick={openMerge}
+                disabled={running}
+                title="Merge one run's results into another run that used the same dataset"
+                className="bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-3 py-2 rounded-md text-sm disabled:opacity-50"
+              >
+                Merge Results
+              </button>
+            )}
           </div>
 
           {selectedRun && (

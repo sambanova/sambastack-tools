@@ -15,6 +15,7 @@ placeholder ``providers.json`` — a missing file raises ``FileNotFoundError``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -407,6 +408,129 @@ def read_run_experiment_snapshot(
         return Experiment.model_validate(json.loads(raw))
     except Exception:
         return None
+
+
+def dataset_key(dataset) -> str:
+    """A stable identifier for an ``experiment.dataset`` value.
+
+    Returns the filename for file-backed datasets, or a short content hash for
+    inline datasets (so two datasets with identical inline rows compare equal).
+    """
+    if isinstance(dataset, str):
+        return dataset
+    digest = hashlib.sha256(
+        json.dumps(dataset, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return f"inline:{digest[:16]}"
+
+
+def run_dataset_key(experiment_id: str, run_id: str) -> Optional[str]:
+    """The :func:`dataset_key` of the dataset a run used, for "same dataset"
+    checks. None when the run's experiment snapshot is missing/unreadable.
+    """
+    snap = read_run_experiment_snapshot(experiment_id, run_id)
+    if snap is None:
+        return None
+    return dataset_key(snap.dataset)
+
+
+def merge_run_results(
+    experiment_id: str,
+    from_run_id: str,
+    into_run_id: str,
+    overwrite: bool,
+) -> dict:
+    """Merge the ``from`` run's rows into the ``into`` run, modifying it in place.
+
+    The ``into`` run's existing rows keep their ``result_id``s; the ``from``
+    rows are appended with fresh ``result_id``s that continue past ``into``'s
+    maximum so they never collide. A conflict is a ``(provider, model,
+    example_id)`` tuple present in both runs:
+
+      * ``overwrite=False`` and any conflict exists → nothing is written;
+        returns ``{"status": "conflict", "conflicts": [{"from", "into"}, …]}``.
+      * ``overwrite=True`` → the conflicting ``into`` rows are dropped and the
+        ``from`` versions win.
+
+    Raises ValueError / FileNotFoundError for invalid selections (same run,
+    different datasets, missing results, active run).
+    """
+    if from_run_id == into_run_id:
+        raise ValueError("Cannot merge a run into itself.")
+    if is_run_active(experiment_id, from_run_id) or is_run_active(
+        experiment_id, into_run_id
+    ):
+        raise ValueError("A selected run is still active. Wait for it to finish.")
+    if run_dataset_key(experiment_id, from_run_id) != run_dataset_key(
+        experiment_id, into_run_id
+    ):
+        raise ValueError("The selected runs use different datasets.")
+
+    from_rows = read_run_results(experiment_id, from_run_id)
+    into_rows = read_run_results(experiment_id, into_run_id)
+    if from_rows is None:
+        raise FileNotFoundError("The 'From' run has no results.")
+    if into_rows is None:
+        raise FileNotFoundError("The 'Into' run has no results.")
+
+    into_by_key = {
+        _row_key(r.provider, r.model, r.example_id): r for r in into_rows
+    }
+    conflicts = []
+    for fr in from_rows:
+        ir = into_by_key.get(_row_key(fr.provider, fr.model, fr.example_id))
+        if ir is not None:
+            conflicts.append({"from": fr.result_id, "into": ir.result_id})
+
+    if conflicts and not overwrite:
+        return {"status": "conflict", "conflicts": conflicts}
+
+    from_keys = {_row_key(fr.provider, fr.model, fr.example_id) for fr in from_rows}
+    # With overwrite, drop the into rows the from rows replace; otherwise (no
+    # conflicts at this point) keep every into row untouched.
+    kept_into = (
+        [
+            r
+            for r in into_rows
+            if _row_key(r.provider, r.model, r.example_id) not in from_keys
+        ]
+        if overwrite
+        else list(into_rows)
+    )
+
+    next_id = max((r.result_id for r in kept_into), default=-1) + 1
+    appended = []
+    for fr in from_rows:
+        appended.append(fr.model_copy(update={"result_id": next_id}))
+        next_id += 1
+
+    merged = kept_into + appended
+    merged.sort(key=lambda r: r.result_id)
+    save_run_results(experiment_id, into_run_id, merged)
+
+    # Bump the destination's expected-task count by the number of genuinely new
+    # (provider, model, example) rows merged in — appended rows minus the ones
+    # that merely overwrote an existing destination row — so its progress
+    # (completed/total) reflects the larger merged run, not the original size.
+    # save_run_results above already recounted completed/errors but leaves total
+    # untouched.
+    replaced = len(into_rows) - len(kept_into)
+    net_new = len(appended) - replaced
+    if net_new:
+        with with_run_lock(experiment_id, into_run_id):
+            meta = _read_run_meta_unlocked(experiment_id, into_run_id)
+            if meta:
+                _write_run_meta_unlocked(
+                    experiment_id,
+                    meta.model_copy(update={"total": meta.total + net_new}),
+                )
+
+    return {
+        "status": "merged",
+        "added": len(appended),
+        "replaced": replaced,
+        "total": len(merged),
+    }
 
 
 def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:

@@ -139,6 +139,10 @@ export interface RunMeta {
   completed: number;
   errors: number;
   token_usage?: RunTokenUsage[];
+  // Stable identifier for the dataset this run used (filename, or a content
+  // hash for inline datasets). Used to restrict "Merge Results" to runs over
+  // the same dataset. Null when the run's snapshot is missing.
+  dataset_key?: string | null;
 }
 
 // A model's input/output token prices in USD per 1,000,000 tokens, keyed by

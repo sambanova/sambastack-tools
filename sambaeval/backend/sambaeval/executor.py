@@ -56,6 +56,7 @@ def run_experiment(
     concurrency: int = 4,
     mode: str = "new",
     run_id: Optional[str] = None,
+    merge_conflict: str = "skip",
     on_progress: Optional[Callable[[ExecutorProgress], None]] = None,
     control: Optional[RunControl] = None,
 ) -> RunResult:
@@ -95,6 +96,17 @@ def run_experiment(
             raise RuntimeError(f"Run {run_id} has no results to {mode} from")
         prior_rows = existing
         storage.mark_run_resumed(experiment.id, run_id, total_tasks)
+    elif mode == "merged":
+        # Generate the current experiment's results into an existing target run,
+        # in place. The target's run_id is required; its rows become the prior
+        # set we merge against. `total_tasks` (and the resumed marker) are set
+        # below once the merged task list is built.
+        if not run_id:
+            raise RuntimeError("A merged run requires a target run_id")
+        existing = storage.read_run_results(experiment.id, run_id)
+        if existing is None:
+            raise RuntimeError(f"Target run {run_id} has no results to merge into")
+        prior_rows = existing
     else:
         meta = storage.create_run(experiment, total_tasks)
         run_id = meta.run_id
@@ -110,16 +122,49 @@ def run_experiment(
 
     universe: list[ResultRow] = []
     tasks: list[_Task] = []
-    for mi, model in enumerate(experiment.models):
-        for ri, row in enumerate(dataset):
-            result_id = mi * len(dataset) + ri + 1
-            carried = prior_by_key.get(
-                _row_key(model.provider_name, model.name, row.example_id)
-            )
-            if carried and carried.status == "completed":
-                universe.append(carried.model_copy(update={"result_id": result_id}))
-            else:
-                tasks.append(_Task(result_id, mi, model, row))
+    if mode == "merged":
+        # Merge the current experiment's generation into the target run. Each
+        # (provider, model, example_id) the experiment produces is checked
+        # against the target *before* running a prompt:
+        #   * brand-new key   → run it; the row is appended with a result_id past
+        #                       the target's current maximum (no collision);
+        #   * conflict + skip → keep the target's row untouched, run nothing;
+        #   * conflict + overwrite → re-run and replace in place, reusing the
+        #                       target row's result_id so its id stays stable.
+        # Target rows the experiment doesn't touch (models/examples only present
+        # in the target) are preserved verbatim.
+        next_id = max((r.result_id for r in prior_rows), default=0) + 1
+        covered: set[str] = set()
+        for mi, model in enumerate(experiment.models):
+            for row in dataset:
+                key = _row_key(model.provider_name, model.name, row.example_id)
+                covered.add(key)
+                existing_row = prior_by_key.get(key)
+                if existing_row is None:
+                    tasks.append(_Task(next_id, mi, model, row))
+                    next_id += 1
+                elif merge_conflict == "overwrite":
+                    tasks.append(_Task(existing_row.result_id, mi, model, row))
+                else:  # skip
+                    universe.append(existing_row)
+        for r in prior_rows:
+            if _row_key(r.provider, r.model, r.example_id) not in covered:
+                universe.append(r)
+        total_tasks = len(universe) + len(tasks)
+        storage.mark_run_resumed(experiment.id, run_id, total_tasks)
+    else:
+        for mi, model in enumerate(experiment.models):
+            for ri, row in enumerate(dataset):
+                result_id = mi * len(dataset) + ri + 1
+                carried = prior_by_key.get(
+                    _row_key(model.provider_name, model.name, row.example_id)
+                )
+                if carried and carried.status == "completed":
+                    universe.append(
+                        carried.model_copy(update={"result_id": result_id})
+                    )
+                else:
+                    tasks.append(_Task(result_id, mi, model, row))
 
     generator_cls = load_generator_class(
         resolve_generator_path(experiment.output_generator)

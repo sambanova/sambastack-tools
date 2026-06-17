@@ -119,12 +119,36 @@ async def run(exp_id: str, request: Request):
         concurrency = 4
     concurrency = max(1, min(32, concurrency))
     requested_mode = qp.get("mode")
-    mode = requested_mode if requested_mode in ("new", "resume", "retry") else "auto"
+    mode = (
+        requested_mode
+        if requested_mode in ("new", "resume", "retry", "merged")
+        else "auto"
+    )
     run_id: Optional[str] = qp.get("run_id") or None
+    merge_conflict = "overwrite" if qp.get("merge_conflict") == "overwrite" else "skip"
 
     experiment = storage.get_experiment(exp_id)
     if experiment is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
+
+    if mode == "merged":
+        # Generate the current experiment's results into an existing target run.
+        # The two must share a dataset; the target must exist and be idle.
+        if not run_id:
+            return JSONResponse(
+                {"error": "A merged run requires a target run_id"}, status_code=400
+            )
+        meta = storage.read_run_meta(exp_id, run_id)
+        if meta is None:
+            return JSONResponse({"error": "run_not_found"}, status_code=404)
+        if run_registry.is_run_active(exp_id, run_id):
+            return JSONResponse({"error": "run_is_active"}, status_code=409)
+        if storage.run_dataset_key(exp_id, run_id) != storage.dataset_key(
+            experiment.dataset
+        ):
+            return JSONResponse(
+                {"error": "Target run uses a different dataset."}, status_code=400
+            )
 
     if mode == "retry":
         # Retrying re-runs only the failed rows of a past run, carrying over the
@@ -181,6 +205,7 @@ async def run(exp_id: str, request: Request):
                 concurrency=concurrency,
                 mode=mode,
                 run_id=run_id,
+                merge_conflict=merge_conflict,
                 on_progress=on_progress,
                 control=control,
             )
@@ -303,6 +328,9 @@ def list_runs(exp_id: str) -> dict:
     for m in storage.list_runs(exp_id):
         entry = m.model_dump()
         entry["token_usage"] = _run_token_usage(exp_id, m.run_id)
+        # Stable per-run dataset identifier so the Merge Results UI can restrict
+        # merging to runs over the same dataset.
+        entry["dataset_key"] = storage.run_dataset_key(exp_id, m.run_id)
         out.append(entry)
     return {"runs": out}
 
@@ -320,6 +348,37 @@ def delete_run(exp_id: str, request: Request):
     if result == "not_found":
         return JSONResponse({"error": "Run not found"}, status_code=404)
     return {"deleted": True, "runId": run_id}
+
+
+@app.post("/api/experiments/{exp_id}/runs/merge")
+async def merge_runs(exp_id: str, request: Request):
+    """Merge one run's results into another (in place).
+
+    Body: ``{"from_run_id": str, "into_run_id": str, "overwrite": bool}``.
+    Returns 200 ``{"status": "merged", ...}`` on success, or 409
+    ``{"status": "conflict", "conflicts": [{"from", "into"}, ...]}`` when
+    overwrite is off and the runs share a (provider, model, example_id) tuple.
+    """
+    body = await request.json()
+    from_run_id = body.get("from_run_id")
+    into_run_id = body.get("into_run_id")
+    overwrite = bool(body.get("overwrite", False))
+    if not from_run_id or not into_run_id:
+        return JSONResponse(
+            {"error": "Both 'from_run_id' and 'into_run_id' are required."},
+            status_code=400,
+        )
+    try:
+        result = storage.merge_run_results(
+            exp_id, from_run_id, into_run_id, overwrite
+        )
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if result.get("status") == "conflict":
+        return JSONResponse(result, status_code=409)
+    return result
 
 
 @app.get("/api/experiments/{exp_id}/results")
