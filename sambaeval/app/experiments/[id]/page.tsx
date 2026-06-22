@@ -2270,7 +2270,7 @@ export default function ExperimentPage({
                   Export CSV ↓
                 </a>
               </div>
-              <ResultsTable rows={results} />
+              <ResultsTable rows={results} scorerType={exp?.scorer?.type} />
             </div>
           )}
         </section>

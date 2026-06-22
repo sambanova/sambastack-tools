@@ -73,6 +73,10 @@ def run_experiment(
     total_tasks = len(experiment.models) * len(dataset)
 
     prior_rows: list[ResultRow] = []
+    # A merged run's rows span more than the current experiment's grid, so its
+    # universe is rebuilt differently (see below). mode=="merged" creates one;
+    # resuming/retrying a run that was previously merged into is also "merged".
+    run_is_merged = False
     # "resume" continues an unfinished run; "retry" re-runs the failed rows of
     # any past run (including a completed one). Both carry over the rows that
     # already succeeded and re-dispatch everything else — for a finished run
@@ -95,18 +99,20 @@ def run_experiment(
         if existing is None:
             raise RuntimeError(f"Run {run_id} has no results to {mode} from")
         prior_rows = existing
-        storage.mark_run_resumed(experiment.id, run_id, total_tasks)
+        prior_meta = storage.read_run_meta(experiment.id, run_id)
+        run_is_merged = bool(prior_meta and prior_meta.merged)
     elif mode == "merged":
         # Generate the current experiment's results into an existing target run,
         # in place. The target's run_id is required; its rows become the prior
-        # set we merge against. `total_tasks` (and the resumed marker) are set
-        # below once the merged task list is built.
+        # set we merge against. The total and resumed/merged markers are written
+        # below, once the rebuilt task list is known.
         if not run_id:
             raise RuntimeError("A merged run requires a target run_id")
         existing = storage.read_run_results(experiment.id, run_id)
         if existing is None:
             raise RuntimeError(f"Target run {run_id} has no results to merge into")
         prior_rows = existing
+        run_is_merged = True
     else:
         meta = storage.create_run(experiment, total_tasks)
         run_id = meta.run_id
@@ -122,17 +128,21 @@ def run_experiment(
 
     universe: list[ResultRow] = []
     tasks: list[_Task] = []
-    if mode == "merged":
-        # Merge the current experiment's generation into the target run. Each
-        # (provider, model, example_id) the experiment produces is checked
-        # against the target *before* running a prompt:
-        #   * brand-new key   → run it; the row is appended with a result_id past
-        #                       the target's current maximum (no collision);
-        #   * conflict + skip → keep the target's row untouched, run nothing;
-        #   * conflict + overwrite → re-run and replace in place, reusing the
-        #                       target row's result_id so its id stays stable.
-        # Target rows the experiment doesn't touch (models/examples only present
-        # in the target) are preserved verbatim.
+    if run_is_merged:
+        # A merged run carries rows beyond the current experiment's grid, so we
+        # key off the *existing* rows to keep their result_ids stable, decide per
+        # (provider, model, example_id) whether to (re)run, and preserve every
+        # row the grid doesn't cover. New keys get a result_id past the current
+        # maximum so nothing collides with a preserved row.
+        #   * mode=="merged": new → run; conflict → "overwrite" re-runs in place,
+        #     "skip" keeps the target's row (no prompt).
+        #   * resume / retry: completed → keep; error/missing → re-run (reusing
+        #     the existing id, or a fresh one when the row is absent).
+        def _should_rerun(existing_row: ResultRow) -> bool:
+            if mode == "merged":
+                return merge_conflict == "overwrite"
+            return existing_row.status != "completed"
+
         next_id = max((r.result_id for r in prior_rows), default=0) + 1
         covered: set[str] = set()
         for mi, model in enumerate(experiment.models):
@@ -143,15 +153,13 @@ def run_experiment(
                 if existing_row is None:
                     tasks.append(_Task(next_id, mi, model, row))
                     next_id += 1
-                elif merge_conflict == "overwrite":
+                elif _should_rerun(existing_row):
                     tasks.append(_Task(existing_row.result_id, mi, model, row))
-                else:  # skip
+                else:
                     universe.append(existing_row)
         for r in prior_rows:
             if _row_key(r.provider, r.model, r.example_id) not in covered:
                 universe.append(r)
-        total_tasks = len(universe) + len(tasks)
-        storage.mark_run_resumed(experiment.id, run_id, total_tasks)
     else:
         for mi, model in enumerate(experiment.models):
             for ri, row in enumerate(dataset):
@@ -165,6 +173,18 @@ def run_experiment(
                     )
                 else:
                     tasks.append(_Task(result_id, mi, model, row))
+
+    # An existing run (resume/retry/merged) is re-armed as "running" with a total
+    # refreshed to the rebuilt size; a freshly merged run also persists its
+    # merged marker so a later resume rebuilds it the same safe way.
+    if mode in ("resume", "retry", "merged"):
+        total_tasks = len(universe) + len(tasks)
+        storage.mark_run_resumed(
+            experiment.id,
+            run_id,
+            total_tasks,
+            merged=True if mode == "merged" else None,
+        )
 
     generator_cls = load_generator_class(
         resolve_generator_path(experiment.output_generator)

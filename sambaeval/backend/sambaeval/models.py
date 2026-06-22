@@ -157,3 +157,9 @@ class RunMeta(BaseModel):
     total: int
     completed: int = 0
     errors: int = 0
+    # True once results from the current experiment have been merged into this
+    # run (mode="merged"). Such a run's rows span more than the experiment's
+    # current model×dataset grid, so resuming/retrying it must rebuild from its
+    # own rows and preserve the ones the grid doesn't cover, rather than pruning
+    # them as orphans. Absent in pre-existing run.json files → defaults False.
+    merged: bool = False

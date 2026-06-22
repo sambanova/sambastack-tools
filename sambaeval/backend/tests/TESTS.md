@@ -2,11 +2,12 @@
 
 This document catalogs the automated tests for the SambaEval evaluation engine.
 
-**Total Tests:** 21 automated (pytest)
+**Total Tests:** 32 automated (pytest)
 **Test Status:** ✅ All passing
 **Focus:** Run lifecycle (pause, terminate, cancel, resume), retrying the failed
-rows of a past run, cancelling orphaned runs, and the per-run error log
-(`errors.json`).
+rows of a past run, cancelling orphaned runs, the per-run error log
+(`errors.json`), and merging runs (combining two finished runs, and running a
+new "merged" run into an existing one).
 **Runtime:** Fully offline. No provider, network, or API key is contacted.
 
 ## Table of Contents
@@ -22,6 +23,8 @@ rows of a past run, cancelling orphaned runs, and the per-run error log
 - [Retry Config Tests](#retry-config-tests)
 - [Orphan Cancel Tests](#orphan-cancel-tests)
 - [Error Log Tests](#error-log-tests)
+- [Merge Results Tests](#merge-results-tests)
+- [Merged Run Tests](#merged-run-tests)
 - [Continuous Integration](#continuous-integration)
 
 ---
@@ -256,6 +259,86 @@ and message from each error row's `output` (`ERROR: …` → generation,
 ### 7. `test_logged_errors_take_precedence_over_reconstruction`
 When `errors.json` exists it's returned verbatim, not re-derived from the result
 rows — the canonical log wins over the CSV fallback.
+
+---
+
+## Merge Results Tests
+
+File: `tests/test_merge_results.py`
+
+The Results-section **Merge Results** action folds one finished run's rows into
+another via `storage.merge_run_results`, **without** re-running anything. Rows
+are keyed by `(provider, model, example_id)`; the "From" rows are renumbered
+past the "Into" run's maximum `result_id` while the "Into" rows keep their ids,
+and a conflict is a key present in both runs. These drive the storage helper
+directly with hand-seeded result rows — no executor or provider involved.
+
+### 1. `test_merge_appends_and_renumbers_without_conflicts`
+Merging two conflict-free runs keeps the Into rows' ids, appends the From rows
+with ids continuing past the Into maximum (`0,1 → 2,3`), bumps the Into run's
+`total` by the number of new rows, and leaves the From run untouched.
+
+### 2. `test_merge_conflict_blocks_without_overwrite`
+With one shared `(provider, model, example_id)`, an un-checked overwrite returns
+`{"status": "conflict", "conflicts": [{"from", "into"}]}` and writes nothing —
+the Into run still has exactly its original rows.
+
+### 3. `test_merge_overwrite_replaces_conflicting_rows`
+With overwrite enabled, the From row wins the conflict (its output replaces the
+Into row's), non-conflicting Into rows are kept, the new From row is appended,
+and all `result_id`s stay unique.
+
+### 4. `test_merge_rejects_self_merge`
+Merging a run into itself raises `ValueError`.
+
+### 5. `test_merge_rejects_dataset_mismatch`
+Merging runs over differently-sized datasets (hence different dataset keys)
+raises `ValueError`.
+
+### 6. `test_run_dataset_key_matches_experiment_dataset`
+`storage.run_dataset_key` (derived from a run's snapshot) equals
+`storage.dataset_key` of the live experiment's dataset — the equality the UI
+uses to offer only same-dataset runs.
+
+### 7. `test_dataset_key_filename_vs_inline`
+`dataset_key` is the filename for file-backed datasets and a stable,
+content-addressed `inline:…` hash for inline datasets (equal rows → equal key,
+differing rows → differing key).
+
+---
+
+## Merged Run Tests
+
+File: `tests/test_merged_run.py`
+
+`mode="merged"` generates the current experiment's results into an existing
+target run, in place: new keys are generated, conflicts are resolved **before**
+any prompt runs ("skip" keeps the target row, "overwrite" re-generates it), and
+target rows the experiment doesn't cover are preserved. The run is flagged
+`merged` so a later resume rebuilds it the same safe way. These drive the real
+`run_experiment` executor with the echo generator; seeded rows carry sentinel
+outputs so a test can tell whether a row was preserved or regenerated.
+
+### 1. `test_merged_run_adds_new_model_and_preserves_existing`
+Merging a new model into a target that holds a different model over the same
+dataset keeps the existing model's rows verbatim, generates the new model's rows
+(scored `1.0`), keeps every `result_id` unique, and sets the run's `total`/
+`completed` to the combined size with `merged == True`.
+
+### 2. `test_merged_run_skip_keeps_conflicting_rows`
+When every produced key already exists in the target, **skip** runs no prompts —
+every row keeps its stale sentinel output and the count is unchanged.
+
+### 3. `test_merged_run_overwrite_regenerates_conflicting_rows`
+With **overwrite**, each conflicting row is re-generated (echo → the prompt,
+scored `1.0`) reusing its original `result_id`, so the row is replaced in place.
+
+### 4. `test_resume_merged_run_preserves_uncovered_rows`
+A paused merged run (one model done and preserved, plus a completed and an
+errored row of the merged model) is resumed via the normal resume path. The
+rows the current grid doesn't cover **survive** (the data-loss guard), the
+completed row is carried over, the errored row re-runs to success, no
+`result_id`s collide, and the `merged` flag persists.
 
 ---
 

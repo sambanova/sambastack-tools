@@ -138,6 +138,9 @@ export interface RunMeta {
   total: number;
   completed: number;
   errors: number;
+  // True once another run's results have been merged into this one; such a run
+  // resumes/retries by rebuilding from its own rows (see backend RunMeta).
+  merged?: boolean;
   token_usage?: RunTokenUsage[];
   // Stable identifier for the dataset this run used (filename, or a content
   // hash for inline datasets). Used to restrict "Merge Results" to runs over

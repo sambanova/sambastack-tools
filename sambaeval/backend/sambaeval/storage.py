@@ -557,19 +557,29 @@ def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
 
 
 def mark_run_resumed(
-    experiment_id: str, run_id: str, total_tasks: int
+    experiment_id: str,
+    run_id: str,
+    total_tasks: int,
+    *,
+    merged: Optional[bool] = None,
 ) -> Optional[RunMeta]:
+    """Re-arm an existing run as "running" with a refreshed total.
+
+    ``merged`` defaults to None (leave the run's existing flag untouched); pass
+    True when a merged run executes so a later resume knows to rebuild it safely.
+    """
     with with_run_lock(experiment_id, run_id):
         meta = _read_run_meta_unlocked(experiment_id, run_id)
         if meta is None:
             return None
-        updated = meta.model_copy(
-            update={
-                "status": "running",
-                "resumed_at": [*meta.resumed_at, iso_now()],
-                "total": total_tasks,
-            }
-        )
+        update = {
+            "status": "running",
+            "resumed_at": [*meta.resumed_at, iso_now()],
+            "total": total_tasks,
+        }
+        if merged is not None:
+            update["merged"] = merged
+        updated = meta.model_copy(update=update)
         _write_run_meta_unlocked(experiment_id, updated)
         return updated
 
