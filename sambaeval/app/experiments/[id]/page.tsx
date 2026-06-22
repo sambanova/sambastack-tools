@@ -1878,7 +1878,7 @@ export default function ExperimentPage({
                     disabled={running}
                     onChange={() => setRunConflictPolicy("skip")}
                   />
-                  Skip them
+                  Skip them (saves time and token costs)
                 </label>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                   <input
@@ -1888,7 +1888,7 @@ export default function ExperimentPage({
                     disabled={running}
                     onChange={() => setRunConflictPolicy("overwrite")}
                   />
-                  Overwrite them
+                  Overwrite them (with new experiment settings)
                 </label>
               </div>
             </div>

@@ -2,11 +2,13 @@
   "run_id": "2026-06-16T18-00-16-671Z",
   "status": "completed",
   "started_at": "2026-06-16T18:00:16.673Z",
-  "finished_at": "2026-06-16T18:54:28.409Z",
+  "finished_at": "2026-06-22T17:27:31.031Z",
   "resumed_at": [
-    "2026-06-16T18:54:25.285Z"
+    "2026-06-16T18:54:25.285Z",
+    "2026-06-22T16:57:05.860Z"
   ],
-  "total": 2500,
-  "completed": 2500,
-  "errors": 0
+  "total": 5170,
+  "completed": 5170,
+  "errors": 0,
+  "merged": true
 }

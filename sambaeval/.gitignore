@@ -38,6 +38,9 @@ yarn-error.log*
 __pycache__/
 *.pyc
 
+# local scratch / private working files (notes, scratch diffs, etc.) — never committed.
+/private/
+
 # sambaeval local data
 # providers.json holds API keys and must never be committed.
 /data/providers.json

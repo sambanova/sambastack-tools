@@ -54,6 +54,5 @@
   "scorer": {
     "type": "heuristic"
   },
-  "output_generator": "scripts/generators/spider_generator.py",
-  "example_count": 500
+  "output_generator": "scripts/generators/spider_generator.py"
 }
