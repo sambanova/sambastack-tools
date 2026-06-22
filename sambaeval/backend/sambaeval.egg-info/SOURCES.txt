@@ -20,4 +20,10 @@ sambaeval.egg-info/requires.txt
 sambaeval.egg-info/top_level.txt
 sambaeval/api/__init__.py
 sambaeval/api/main.py
+tests/test_error_log.py
+tests/test_merge_results.py
+tests/test_merged_run.py
+tests/test_orphan_cancel.py
 tests/test_pause_resume.py
+tests/test_retry_config.py
+tests/test_retry_failed.py

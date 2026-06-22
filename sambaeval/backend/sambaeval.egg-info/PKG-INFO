@@ -17,6 +17,7 @@ Requires-Dist: fastapi>=0.110; extra == "server"
 Requires-Dist: uvicorn>=0.29; extra == "server"
 Provides-Extra: test
 Requires-Dist: pytest>=8; extra == "test"
+Requires-Dist: sambaeval[server]; extra == "test"
 
 # SambaEval — Python engine (library + CLI)
 

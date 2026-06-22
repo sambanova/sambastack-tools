@@ -13,3 +13,4 @@ uvicorn>=0.29
 
 [test]
 pytest>=8
+sambaeval[server]

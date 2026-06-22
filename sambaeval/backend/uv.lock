@@ -742,7 +742,9 @@ server = [
     { name = "uvicorn" },
 ]
 test = [
+    { name = "fastapi" },
     { name = "pytest" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -755,6 +757,7 @@ requires-dist = [
     { name = "openai", specifier = ">=1.0.0" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
+    { name = "sambaeval", extras = ["server"], marker = "extra == 'test'" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "sympy", specifier = ">=1.14.0" },
     { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.29" },
