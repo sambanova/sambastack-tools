@@ -16,6 +16,9 @@ next-env.d.ts
 .DS_Store
 *.pem
 
+# Local scratch / work-in-progress notes, never committed
+/private/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
@@ -53,3 +56,11 @@ __pycache__/
 # data/datasets/scicode/ for download links.
 /data/datasets/scicode/problems_*.jsonl
 /data/datasets/scicode/*.txt
+
+# Spider 1.0 raw upstream dataset (~1.7 GB incl. the SQLite database/ and
+# test_database/ dirs). Downloaded separately from the official Spider release
+# and never committed — mirrors the SciCode treatment above. The committed,
+# self-contained fixtures (data/datasets/spider1/spider_examples.jsonl and
+# data/datasets/spider_dev.jsonl) are the canonical artifacts; see the README in
+# data/datasets/spider1/ for the download link.
+/data/datasets/spider1/spider_data/

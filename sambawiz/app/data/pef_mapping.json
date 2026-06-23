@@ -211,19 +211,23 @@
     "qwen-3-32b-ss8192-bs4"
   ],
   "MiniMax-M2.5": [  
-    "minimax-m2p5-ss196608-bs2-dyt-1-cd",
+    "minimax-m2p5-ss196608-bs8-dyt-1-pc-cd",
     "minimax-m2p5-ss32768-bs8-dyt-1-cd"    
   ],
   "MiniMax-M2.7": [  
     "minimax-m2p5-ss196608-bs2-dyt-1-cd",
     "minimax-m2p5-ss32768-bs8-dyt-1-cd"    
   ],
-  "Mistral-Large-3-675B-Instruct-2512": [  
+  "Mistral-Large-3-675B-Instruct-2512": [
+    "mistral-large-3-ss16384-bs1",
+    "mistral-large-3-ss16384-bs2",
+    "mistral-large-3-ss32768-bs1",
+    "mistral-large-3-ss8192-bs4",  
     "mistral-large-3-ss8192-bs1"   
   ],
   "Qwen3-235B-A22B-Instruct-2507": [
-    "qwen-3-235b-ss131072-bs2-dyt-1",
-    "qwen-3-235b-ss32768-bs8-dyt-1"
+    "qwen-3-235b-ss131072-bs2-dyt-1-cd",
+    "qwen-3-235b-ss32768-bs8-dyt-1-cd"
   ],
   "Whisper-Large-v3": [
     "whisper-ss448-bs1",

@@ -44,8 +44,9 @@ with open(pef_mapping_path) as f:
 list_current = set(pef_mapping.keys())
 
 # Step 4: Diff
+set_latest = set(list_latest)
 missing = [name for name in list_latest if name not in list_current]
-extra = [name for name in list_current if name not in list_latest]
+extra = sorted(name for name in list_current if name not in set_latest)
 
 print(f"Models in latest_models.json not in pef_mapping.json ({len(missing)}):")
 for name in missing:

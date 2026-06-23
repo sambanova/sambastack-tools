@@ -78,8 +78,13 @@ export async function GET(request: NextRequest) {
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
     try {
-      // Run kubectl get pods and grep for the deployment name
-      const output = execSync(`kubectl -n ${namespace} get pods | grep ${deploymentName}`, {
+      // Run kubectl get pods and filter for the deployment name in JS.
+      // Piping to `grep` would make the whole command exit non-zero (throw)
+      // when no pods match, making "no pods running" indistinguishable from a
+      // real kubectl/auth failure. Filtering here lets us treat an empty match
+      // as a valid "nothing running yet" result and reserve errors for actual
+      // command failures.
+      const output = execSync(`kubectl -n ${namespace} get pods`, {
         encoding: 'utf-8',
         env,
         timeout: 10000, // 10 second timeout
@@ -93,6 +98,7 @@ export async function GET(request: NextRequest) {
       };
 
       for (const line of lines) {
+        if (!line.includes(deploymentName)) continue;
         const parts = line.trim().split(/\s+/);
         if (parts.length < 3) continue;
 

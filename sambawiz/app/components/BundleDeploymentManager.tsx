@@ -147,6 +147,7 @@ export default function BundleDeploymentManager() {
     cachePod: { ready: number; total: number; status: string } | null;
     defaultPod: { ready: number; total: number; status: string } | null;
   }>({ cachePod: null, defaultPod: null });
+  const [podStatusError, setPodStatusError] = useState<string | null>(null);
   const [allDeploymentStatuses, setAllDeploymentStatuses] = useState<Record<string, {
     cachePod: PodStatusInfo | null;
     defaultPod: PodStatusInfo | null;
@@ -410,6 +411,7 @@ export default function BundleDeploymentManager() {
   useEffect(() => {
     if (!monitoredDeployment) {
       setPodStatus({ cachePod: null, defaultPod: null });
+      setPodStatusError(null);
       return;
     }
 
@@ -424,9 +426,18 @@ export default function BundleDeploymentManager() {
         const data = await response.json();
         if (data.success) {
           setPodStatus(data.podStatus);
+          setPodStatusError(null);
+        } else {
+          // kubectl failed (e.g. cluster unreachable / auth). Drop any stale
+          // status so the UI can't keep reporting pods as ready, and surface
+          // the error in the overall status instead.
+          setPodStatus({ cachePod: null, defaultPod: null });
+          setPodStatusError(data.stderr || data.message || data.error || 'Failed to fetch pod status');
         }
       } catch (err) {
         console.error('Failed to fetch pod status:', err);
+        setPodStatus({ cachePod: null, defaultPod: null });
+        setPodStatusError('Failed to connect to the server');
       }
       if (active.current) {
         timeoutId = setTimeout(run, adaptiveDelay(Date.now() - start));
@@ -1303,26 +1314,56 @@ spec:
           </Box>
 
           {/* Overall Status */}
-          {podStatus.cachePod && podStatus.defaultPod && (
-            <Box sx={{ p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-              {podStatus.cachePod.ready === podStatus.cachePod.total &&
-               podStatus.defaultPod.ready === podStatus.defaultPod.total ? (
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <CheckCircleIcon sx={{ color: 'success.main' }} />
-                  <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>
-                    Deployment Complete! All pods are ready.
-                  </Typography>
+          {(() => {
+            const bothReady =
+              !!podStatus.cachePod &&
+              !!podStatus.defaultPod &&
+              podStatus.cachePod.ready === podStatus.cachePod.total &&
+              podStatus.defaultPod.ready === podStatus.defaultPod.total;
+
+            // A "not found" / command failure from any probe means the expected
+            // pods are not actually running (e.g. nothing could be scheduled
+            // because no hosts were free). Never report success in that case.
+            const isMissing = (msg: string | null) =>
+              !!msg && /not\s*found|no resources|command failed/i.test(msg);
+            const hasError =
+              isMissing(podStatusError) ||
+              isMissing(podLogsError) ||
+              isMissing(defaultPodLogsError);
+
+            if (bothReady && !hasError) {
+              return (
+                <Box sx={{ p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <CheckCircleIcon sx={{ color: 'success.main' }} />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: 'success.main' }}>
+                      Deployment Complete! All pods are ready.
+                    </Typography>
+                  </Box>
                 </Box>
-              ) : (
+              );
+            }
+
+            if (hasError) {
+              return (
+                <Alert severity="error">
+                  Deployment failed: the expected pods are not running. Expand the
+                  pod logs above for details.
+                </Alert>
+              );
+            }
+
+            return (
+              <Box sx={{ p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <CircularProgress size={20} />
                   <Typography variant="body2" sx={{ fontWeight: 500, color: 'text.secondary' }}>
                     Deployment in progress... Waiting for all pods to be ready.
                   </Typography>
                 </Box>
-              )}
-            </Box>
-          )}
+              </Box>
+            );
+          })()}
         </Paper>
       )}
 
