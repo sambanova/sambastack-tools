@@ -16,28 +16,39 @@ Steps 1–4 run on the **artifact staging server** (internet-connected). Steps 5
 
 Use `install_tools.sh` to install these on the staging server.
 
-## Step 1 — Authenticate
+## Step 1 — Authenticate to the source registry
+
+Authenticate `crane` and `helm` to whichever registry hosts your chart and images. The example below uses Google Artifact Registry; substitute credentials for your registry as needed.
 
 ```bash
+# Google Artifact Registry
 gcloud auth print-access-token | \
-  crane auth login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+  crane auth login -u oauth2accesstoken --password-stdin <REGISTRY_HOST>
 
 gcloud auth print-access-token | \
-  helm registry login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+  helm registry login -u oauth2accesstoken --password-stdin <REGISTRY_HOST>
+
+# Generic registry (username/password)
+crane auth login <REGISTRY_HOST> -u <USERNAME> -p <PASSWORD>
+helm registry login <REGISTRY_HOST> -u <USERNAME> -p <PASSWORD>
 ```
 
 ## Step 2 — Pull the Helm chart
 
+Pull the chart from its OCI or HTTPS registry and extract it locally.
+
 ```bash
-VERSION="0.3.558"
+CHART="<chart-name>"
+VERSION="<chart-version>"
 
-helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack \
-  --version ${VERSION}
+# OCI registry
+helm pull oci://<REGISTRY_HOST>/<path>/${CHART} --version ${VERSION}
 
-helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack-base \
-  --version ${VERSION}
+# Classic HTTPS repo
+helm repo add <repo-name> <repo-url>
+helm pull <repo-name>/${CHART} --version ${VERSION}
 
-tar -xzf sambastack-${VERSION}.tgz
+tar -xzf ${CHART}-${VERSION}.tgz
 ```
 
 ## Step 3 — Generate the image inventory
@@ -46,9 +57,9 @@ tar -xzf sambastack-${VERSION}.tgz
 
 ```bash
 bash generate_inventory.sh \
-  -c ./sambastack \
+  -c ./${CHART} \
   -o ./inventory.yaml \
-  -f ./sambastack/values.yaml
+  -f ./${CHART}/values.yaml   # optional: pass your own values file
 ```
 
 | Flag | Description |
@@ -65,9 +76,9 @@ The generated `inventory.yaml` lists all images required by the chart and is con
 
 ```bash
 bash bundle_images.sh \
-  -c ./sambastack \
+  -c ./${CHART} \
   -i ./inventory.yaml \
-  -o stack-${VERSION}.tar.zst
+  -o ${CHART}-${VERSION}.tar.zst
 ```
 
 | Flag | Description |
@@ -78,7 +89,7 @@ bash bundle_images.sh \
 
 The script validates that all images exist in the source registry before pulling.
 
-Transfer `stack-${VERSION}.tar.zst`, `seed_images.sh`, and `inventory.yaml` into the air-gapped environment to a host with network access to Harbor.
+Transfer `${CHART}-${VERSION}.tar.zst`, `seed_images.sh`, `inventory.yaml`, and the chart `.tgz` into the air-gapped environment to a host with network access to Harbor.
 
 ## Step 5 — Seed images into Harbor
 
@@ -88,9 +99,9 @@ Transfer `stack-${VERSION}.tar.zst`, `seed_images.sh`, and `inventory.yaml` into
 {
   "docker": {
     "url": "<HARBOR_IP>",
-    "project": "sambastack",
-    "username": "<HARBOR_ADMIN_USERNAME>",
-    "password": "<HARBOR_ADMIN_PASSWORD>"
+    "project": "<HARBOR_PROJECT>",
+    "username": "<HARBOR_USERNAME>",
+    "password": "<HARBOR_PASSWORD>"
   }
 }
 ```
@@ -108,7 +119,7 @@ bash seed_images.sh \
 ```bash
 bash seed_images.sh \
   -i inventory.yaml \
-  -b stack-${VERSION}.tar.zst \
+  -b ${CHART}-${VERSION}.tar.zst \
   -c creds.json
 ```
 
@@ -120,27 +131,23 @@ bash seed_images.sh \
 | `-d / --dry-run` | Preview without pushing |
 | `-o FILE` | Optional: write Harbor destination image map to YAML |
 
-Images are routed automatically based on origin:
+Images are routed to Harbor paths based on their source registry:
 
 | Source | Harbor destination |
 |---|---|
-| SambaStack app images (`pkg.dev` without `/public/`) | `<harbor>/<project>/sambastack/…` |
-| Public/infra images (keycloak, openebs, redis, …) | `<harbor>/<project>/public/…` |
+| Private images (`pkg.dev` without `/public/`) | `<harbor>/<project>/<image-path>` |
+| Public/infra images (all other registries) | `<harbor>/<project>/public/<image-path>` |
 
 ## Step 6 — Install the Helm chart
 
-With all images available in Harbor, install the chart pointing `imageRegistry` at your Harbor instance.
+With all images in Harbor, install the chart and override the image registry to point at Harbor.
 
 ```bash
-helm upgrade --install sambastack-base sambastack-base-${VERSION}.tgz \
-  --namespace sambastack \
+helm upgrade --install ${CHART} ${CHART}-${VERSION}.tgz \
+  --namespace <NAMESPACE> \
   --create-namespace \
-  -f sambastack.yml
-
-helm upgrade --install sambastack sambastack-${VERSION}.tgz \
-  --namespace sambastack \
-  --create-namespace \
-  -f sambastack.yml
+  --set global.imageRegistry=<HARBOR_IP>/<HARBOR_PROJECT> \
+  -f values.yaml
 ```
 
-The `sambastack.yml` values file must set `global.imageRegistry` (and related fields) to your Harbor address so the cluster pulls from the private registry instead of external sources. See the [SambaStack air-gap install guide](https://sambanova.atlassian.net/wiki/spaces/SOS/pages/2945056815/SambaStack+Customer+Install+Airgapped#Sambastack-Install) for a full example values file.
+The key override is `global.imageRegistry` (or the equivalent field for your chart) so the cluster pulls from Harbor instead of external registries. Consult your chart's `values.yaml` for the exact field name.
