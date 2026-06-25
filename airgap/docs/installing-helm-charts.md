@@ -174,19 +174,19 @@ HARBOR_PASSWORD="<HARBOR_SERVICE_ACCOUNT_SECRET>"
 
 ```bash
 gcloud auth print-access-token | \
-  crane auth login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+  crane auth login -u oauth2accesstoken --password-stdin <REGISTRY_HOSTNAME>
 
 gcloud auth print-access-token | \
-  helm registry login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+  helm registry login -u oauth2accesstoken --password-stdin <REGISTRY_HOSTNAME>
 ```
 
 ### 2. Pull the charts
 
 ```bash
-helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack \
+helm pull oci://<REGISTRY_URL>/sambastack \
   --version ${VERSION}
 
-helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack-base \
+helm pull oci://<REGISTRY_URL>/sambastack-base \
   --version ${VERSION}
 
 tar -xzf sambastack-${VERSION}.tgz
