@@ -151,3 +151,78 @@ helm upgrade --install ${CHART} ${CHART}-${VERSION}.tgz \
 ```
 
 The key override is `global.imageRegistry` (or the equivalent field for your chart) so the cluster pulls from Harbor instead of external registries. Consult your chart's `values.yaml` for the exact field name.
+
+---
+
+## Appendix: SambaStack values example
+
+The following is a minimal `values.yaml` for an air-gapped SambaStack installation. Replace `<HARBOR_IP>` and `<HARBOR_PROJECT>` with your Harbor address and project name.
+
+```yaml
+global:
+  imageRegistry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+  image:
+    registry: <HARBOR_IP>/<HARBOR_PROJECT>/sambastack
+    pullPolicy: IfNotPresent
+
+cloud-ui:
+  ingress:
+    hosts:
+    - host: <UI_FQDN>
+      tlsSecretName: tls-cert-ui
+
+db-admin:
+  admins:
+  - temp-admin@cluster.local
+
+gateway:
+  ingress:
+    hosts:
+    - host: <API_FQDN>
+      tlsSecretName: tls-cert-api
+
+openebs:
+  enabled: true
+  global:
+    imageRegistry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+  localpv-provisioner:
+    analytics:
+      enabled: false
+  preUpgradeHook:
+    image:
+      registry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+      repo: openebs/kubectl
+      tag: "1.25.15"
+
+cloudnative-pg:
+  clusterSpec:
+    affinity:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      enablePodAntiAffinity: true
+      podAntiAffinityType: required
+      topologyKey: kubernetes.io/hostname
+    imageName: <HARBOR_IP>/<HARBOR_PROJECT>/public/cloudnative-pg/postgresql:15
+    storage:
+      storageClass: openebs-hostpath
+  image:
+    repository: <HARBOR_IP>/<HARBOR_PROJECT>/public/cloudnative-pg/cloudnative-pg
+  installer:
+    image:
+      registry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+      repository: bitnami/kubectl
+```
+
+Install CRDs first, then the main chart:
+
+```bash
+helm upgrade --install sambastack-base sambastack-base-${VERSION}.tgz \
+  --namespace sambastack \
+  --create-namespace \
+  -f values.yaml
+
+helm upgrade --install sambastack sambastack-${VERSION}.tgz \
+  --namespace sambastack \
+  --create-namespace \
+  -f values.yaml
+```
