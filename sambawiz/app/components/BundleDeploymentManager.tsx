@@ -148,6 +148,10 @@ export default function BundleDeploymentManager() {
     defaultPod: { ready: number; total: number; status: string } | null;
   }>({ cachePod: null, defaultPod: null });
   const [podStatusError, setPodStatusError] = useState<string | null>(null);
+  // Actual operator-derived pod names for the monitored deployment. The operator
+  // truncates+hashes long names, so these can differ from `inf-<name>-...`.
+  // Resolved server-side and returned by /api/pod-status.
+  const [podNames, setPodNames] = useState<{ cache: string; default: string } | null>(null);
   const [allDeploymentStatuses, setAllDeploymentStatuses] = useState<Record<string, {
     cachePod: PodStatusInfo | null;
     defaultPod: PodStatusInfo | null;
@@ -295,10 +299,10 @@ export default function BundleDeploymentManager() {
 
     const run = async () => {
       if (!active.current) return;
-      const podName = `inf-${monitoredDeployment}-cache-0`;
       const start = Date.now();
       try {
-        const response = await fetch(`/api/pod-logs?podName=${podName}&lines=5`);
+        // Let the server resolve the actual (possibly truncated+hashed) pod name.
+        const response = await fetch(`/api/pod-logs?deploymentName=${monitoredDeployment}&type=cache&lines=5`);
         const data = await response.json();
         if (data.success) {
           setPodLogs(data.logs);
@@ -334,11 +338,10 @@ export default function BundleDeploymentManager() {
 
     const run = async () => {
       if (!active.current) return;
-      const podName = `inf-${monitoredDeployment}-q-default-n-0`;
       const container = 'inf';
       const start = Date.now();
       try {
-        const response = await fetch(`/api/pod-logs?podName=${podName}&lines=5&container=${container}`);
+        const response = await fetch(`/api/pod-logs?deploymentName=${monitoredDeployment}&type=default&lines=5&container=${container}`);
         const data = await response.json();
         if (data.success) {
           const logs = data.logs.trim();
@@ -412,6 +415,7 @@ export default function BundleDeploymentManager() {
     if (!monitoredDeployment) {
       setPodStatus({ cachePod: null, defaultPod: null });
       setPodStatusError(null);
+      setPodNames(null);
       return;
     }
 
@@ -424,6 +428,9 @@ export default function BundleDeploymentManager() {
       try {
         const response = await fetch(`/api/pod-status?deploymentName=${monitoredDeployment}`);
         const data = await response.json();
+        // The route returns the resolved pod names regardless of success, so the
+        // UI can display the real (possibly truncated+hashed) names.
+        if (data.podNames) setPodNames(data.podNames);
         if (data.success) {
           setPodStatus(data.podStatus);
           setPodStatusError(null);
@@ -1074,7 +1081,7 @@ spec:
                 </Typography>
                 {podStatus.cachePod && (
                   <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace' }}>
-                    (inf-{monitoredDeployment}-cache-0)
+                    ({podNames?.cache ?? `inf-${monitoredDeployment}-cache-0`})
                   </Typography>
                 )}
               </Box>
@@ -1147,7 +1154,7 @@ spec:
             <Collapse in={showCacheLogs}>
               <Box sx={{ pl: 2 }}>
                 <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary', fontFamily: 'monospace', fontSize: '0.875rem' }}>
-                  Monitoring: inf-{monitoredDeployment}-cache-0
+                  Monitoring: {podNames?.cache ?? `inf-${monitoredDeployment}-cache-0`}
                 </Typography>
 
                 {podLogsError ? (
@@ -1198,7 +1205,7 @@ spec:
                 </Typography>
                 {podStatus.defaultPod && (
                   <Typography variant="caption" sx={{ color: 'text.secondary', fontFamily: 'monospace' }}>
-                    (inf-{monitoredDeployment}-q-default-n-0)
+                    ({podNames?.default ?? `inf-${monitoredDeployment}-q-default-n-0`})
                   </Typography>
                 )}
               </Box>
@@ -1271,7 +1278,7 @@ spec:
             <Collapse in={showDefaultLogs}>
               <Box sx={{ pl: 2 }}>
                 <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary', fontFamily: 'monospace', fontSize: '0.875rem' }}>
-                  Monitoring: inf-{monitoredDeployment}-q-default-n-0 (container: inf)
+                  Monitoring: {podNames?.default ?? `inf-${monitoredDeployment}-q-default-n-0`} (container: inf)
                 </Typography>
 
                 {defaultPodLogsError ? (
