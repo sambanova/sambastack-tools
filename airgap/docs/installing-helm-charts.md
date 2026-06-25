@@ -154,15 +154,95 @@ The key override is `global.imageRegistry` (or the equivalent field for your cha
 
 ---
 
-## Appendix: SambaStack values example
+## Appendix: SambaStack full example
 
-The following is a minimal `values.yaml` for an air-gapped SambaStack installation. Replace `<HARBOR_IP>` and `<HARBOR_PROJECT>` with your Harbor address and project name.
+End-to-end walkthrough for installing SambaStack in an air-gapped environment.
+
+### Variables
+
+Set these once and reuse them throughout.
+
+```bash
+VERSION="0.3.558"
+HARBOR_IP="<HARBOR_IP>"
+HARBOR_PROJECT="sambastack"
+HARBOR_USER="svc-sambastack"
+HARBOR_PASSWORD="<HARBOR_SERVICE_ACCOUNT_SECRET>"
+```
+
+### 1. Authenticate (artifact staging server)
+
+```bash
+gcloud auth print-access-token | \
+  crane auth login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+
+gcloud auth print-access-token | \
+  helm registry login -u oauth2accesstoken --password-stdin us-docker.pkg.dev
+```
+
+### 2. Pull the charts
+
+```bash
+helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack \
+  --version ${VERSION}
+
+helm pull oci://us-docker.pkg.dev/sambastack-production-ext-95/ext-sambastack-oci-prod/sambastack/sambastack-base \
+  --version ${VERSION}
+
+tar -xzf sambastack-${VERSION}.tgz
+```
+
+### 3. Generate the image inventory
+
+```bash
+bash generate_inventory.sh \
+  -c ./sambastack \
+  -o ./inventory.yaml \
+  -f ./sambastack/values.yaml
+```
+
+### 4. Bundle images
+
+```bash
+bash bundle_images.sh \
+  -c ./sambastack \
+  -i ./inventory.yaml \
+  -o sambastack-${VERSION}.tar.zst
+```
+
+Transfer `sambastack-${VERSION}.tar.zst`, `sambastack-${VERSION}.tgz`, `sambastack-base-${VERSION}.tgz`, `seed_images.sh`, and `inventory.yaml` into the air-gapped environment.
+
+### 5. Seed images into Harbor
+
+Create `creds.json`:
+
+```json
+{
+  "docker": {
+    "url": "<HARBOR_IP>",
+    "project": "sambastack",
+    "username": "admin",
+    "password": "<HARBOR_ADMIN_PASSWORD>"
+  }
+}
+```
+
+```bash
+bash seed_images.sh \
+  -i inventory.yaml \
+  -b sambastack-${VERSION}.tar.zst \
+  -c creds.json
+```
+
+### 6. Create the values file
+
+Save the following as `sambastack-airgap.yaml`, replacing all placeholders:
 
 ```yaml
 global:
-  imageRegistry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+  imageRegistry: <HARBOR_IP>/sambastack/public
   image:
-    registry: <HARBOR_IP>/<HARBOR_PROJECT>/sambastack
+    registry: <HARBOR_IP>/sambastack/sambastack
     pullPolicy: IfNotPresent
 
 cloud-ui:
@@ -184,13 +264,13 @@ gateway:
 openebs:
   enabled: true
   global:
-    imageRegistry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+    imageRegistry: <HARBOR_IP>/sambastack/public
   localpv-provisioner:
     analytics:
       enabled: false
   preUpgradeHook:
     image:
-      registry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+      registry: <HARBOR_IP>/sambastack/public
       repo: openebs/kubectl
       tag: "1.25.15"
 
@@ -202,27 +282,43 @@ cloudnative-pg:
       enablePodAntiAffinity: true
       podAntiAffinityType: required
       topologyKey: kubernetes.io/hostname
-    imageName: <HARBOR_IP>/<HARBOR_PROJECT>/public/cloudnative-pg/postgresql:15
+    imageName: <HARBOR_IP>/sambastack/public/cloudnative-pg/postgresql:15
     storage:
       storageClass: openebs-hostpath
   image:
-    repository: <HARBOR_IP>/<HARBOR_PROJECT>/public/cloudnative-pg/cloudnative-pg
+    repository: <HARBOR_IP>/sambastack/public/cloudnative-pg/cloudnative-pg
   installer:
     image:
-      registry: <HARBOR_IP>/<HARBOR_PROJECT>/public
+      registry: <HARBOR_IP>/sambastack/public
       repository: bitnami/kubectl
 ```
 
-Install CRDs first, then the main chart:
+### 7. Install
 
 ```bash
+# Create namespace and required secrets
+kubectl create namespace sambastack
+
+kubectl create secret tls tls-cert-ui \
+  --cert=ui_tls.crt --key=ui_tls.key -n sambastack
+
+kubectl create secret tls tls-cert-api \
+  --cert=api_tls.crt --key=api_tls.key -n sambastack
+
+kubectl create secret docker-registry regcred \
+  --docker-server=${HARBOR_IP} \
+  --docker-username=${HARBOR_USER} \
+  --docker-password=${HARBOR_PASSWORD} \
+  --namespace=sambastack
+
+# Install CRDs first, then the main chart
 helm upgrade --install sambastack-base sambastack-base-${VERSION}.tgz \
   --namespace sambastack \
   --create-namespace \
-  -f values.yaml
+  -f sambastack-airgap.yaml
 
 helm upgrade --install sambastack sambastack-${VERSION}.tgz \
   --namespace sambastack \
   --create-namespace \
-  -f values.yaml
+  -f sambastack-airgap.yaml
 ```
