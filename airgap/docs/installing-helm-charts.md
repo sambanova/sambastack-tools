@@ -234,63 +234,9 @@ bash seed_images.sh \
   -c creds.json
 ```
 
-### 6. Create the values file
+### 6. Create the air-gap overrides file
 
-Save the following as `sambastack-airgap.yaml`, replacing all placeholders:
-
-```yaml
-global:
-  imageRegistry: <HARBOR_IP>/sambastack/public
-  image:
-    registry: <HARBOR_IP>/sambastack/sambastack
-    pullPolicy: IfNotPresent
-
-cloud-ui:
-  ingress:
-    hosts:
-    - host: <UI_FQDN>
-      tlsSecretName: tls-cert-ui
-
-db-admin:
-  admins:
-  - temp-admin@cluster.local
-
-gateway:
-  ingress:
-    hosts:
-    - host: <API_FQDN>
-      tlsSecretName: tls-cert-api
-
-openebs:
-  enabled: true
-  global:
-    imageRegistry: <HARBOR_IP>/sambastack/public
-  localpv-provisioner:
-    analytics:
-      enabled: false
-  preUpgradeHook:
-    image:
-      registry: <HARBOR_IP>/sambastack/public
-      repo: openebs/kubectl
-      tag: "1.25.15"
-
-cloudnative-pg:
-  clusterSpec:
-    affinity:
-      nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
-      enablePodAntiAffinity: true
-      podAntiAffinityType: required
-      topologyKey: kubernetes.io/hostname
-    imageName: <HARBOR_IP>/sambastack/public/cloudnative-pg/postgresql:15
-    storage:
-      storageClass: openebs-hostpath
-  image:
-    repository: <HARBOR_IP>/sambastack/public/cloudnative-pg/cloudnative-pg
-  installer:
-    image:
-      registry: <HARBOR_IP>/sambastack/public
-      repository: bitnami/kubectl
+The chart ships with a `values-airgap.yaml` that covers most defaults. You only need to create a `overrides.yaml` that patch the fields that are specific to your environment.
 ```
 
 ### 7. Install
@@ -315,10 +261,12 @@ kubectl create secret docker-registry regcred \
 helm upgrade --install sambastack-base sambastack-base-${VERSION}.tgz \
   --namespace sambastack \
   --create-namespace \
-  -f sambastack-airgap.yaml
+  -f sambastack/values-airgap.yaml \
+  -f overrides.yaml
 
 helm upgrade --install sambastack sambastack-${VERSION}.tgz \
   --namespace sambastack \
   --create-namespace \
-  -f sambastack-airgap.yaml
+  -f sambastack/values-airgap.yaml \
+  -f overrides.yaml
 ```
