@@ -38,6 +38,9 @@ yarn-error.log*
 __pycache__/
 *.pyc
 
+# local scratch / private working files (notes, scratch diffs, etc.) — never committed.
+/private/
+
 # sambaeval local data
 # providers.json holds API keys and must never be committed.
 /data/providers.json
@@ -59,8 +62,16 @@ __pycache__/
 
 # Spider 1.0 raw upstream dataset (~1.7 GB incl. the SQLite database/ and
 # test_database/ dirs). Downloaded separately from the official Spider release
-# and never committed — mirrors the SciCode treatment above. The committed,
-# self-contained fixtures (data/datasets/spider1/spider_examples.jsonl and
-# data/datasets/spider_dev.jsonl) are the canonical artifacts; see the README in
-# data/datasets/spider1/ for the download link.
+# and never committed — mirrors the SciCode treatment above. Needed only to
+# regenerate the fixture via convert_spider.py and to execute queries at run
+# time. The committed, self-contained fixtures
+# (data/datasets/spider1/spider_examples.jsonl and data/datasets/spider_dev.jsonl)
+# are the canonical artifacts; see the README in data/datasets/spider1/ for the
+# download link.
 /data/datasets/spider1/spider_data/
+/data/datasets/spider1/spider/
+/data/datasets/spider1/database/
+/data/datasets/spider1/*.sqlite
+/data/datasets/spider1/dev.json
+/data/datasets/spider1/train_spider.json
+/data/datasets/spider1/tables.json

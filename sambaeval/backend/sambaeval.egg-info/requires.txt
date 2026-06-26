@@ -10,3 +10,7 @@ llm-sandbox[podman]>=0.3.39
 [server]
 fastapi>=0.110
 uvicorn>=0.29
+
+[test]
+pytest>=8
+sambaeval[server]

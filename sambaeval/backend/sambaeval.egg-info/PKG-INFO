@@ -15,32 +15,36 @@ Requires-Dist: llm-sandbox[podman]>=0.3.39
 Provides-Extra: server
 Requires-Dist: fastapi>=0.110; extra == "server"
 Requires-Dist: uvicorn>=0.29; extra == "server"
+Provides-Extra: test
+Requires-Dist: pytest>=8; extra == "test"
+Requires-Dist: sambaeval[server]; extra == "test"
 
 # SambaEval — Python engine (library + CLI)
 
-This package runs SambaEval experiments **without the web UI**. It's the same
-evaluation engine the app uses (dataset loading, the concurrent worker pool,
-heuristic + LLM-judge scoring, results/run-metadata writing), available as an
-importable Python library and a `sambaeval` command-line tool.
-
-> **Status:** this is the Python core landed in Phase 0 of the backend
-> migration (see [../MIGRATION_PLAN.md](../MIGRATION_PLAN.md)). The web UI still
-> runs on the existing TypeScript path for now; the two share the same `data/`
-> directory and write byte-compatible results.
+This package is SambaEval's backend — the evaluation engine (dataset loading,
+the concurrent thread pool, heuristic + LLM-judge scoring, output generation,
+results/run-metadata writing). It's available three ways: as an importable
+Python library, a `sambaeval` command-line tool, and an HTTP API
+(`sambaeval-server`) that the web UI talks to.
 
 ## Install
 
-Install editable into the project's Python venv (the same `.venv` the app
-provisions for the output generators):
+Install editable into the project's Python venv. From the `sambaeval/` project
+root (create the venv first with `python -m venv .venv` if you don't have one):
 
 ```bash
-# from the sambaeval/ project root
 .venv/bin/python -m pip install -e backend
 ```
 
 This adds `pydantic` and `httpx` alongside the existing generator dependencies
 (`openai`, `numpy`, `scipy`, `sympy`, `h5py`, `llm-sandbox`). It also installs
-the `sambaeval` console script.
+the `sambaeval` and `sambaeval-server` console scripts.
+
+> **Running the commands:** the console scripts live in `.venv/bin/`, so they
+> are not on your `PATH` unless the venv is active. Either call them by path
+> (`.venv/bin/sambaeval …`) or `source .venv/bin/activate` once and then use
+> `sambaeval …` / `sambaeval-server` bare. The examples below assume the venv is
+> active; prefix `.venv/bin/` otherwise.
 
 ## Run an experiment
 
@@ -83,12 +87,11 @@ but two things necessarily live outside it:
 
 1. **`data/providers.json`** — your OpenAI-compatible endpoints and API keys.
    Unlike the UI (which auto-creates a placeholder), **the CLI errors if this
-   file is missing** rather than silently writing a stub. Copy the template and
-   fill in a real key before running:
+   file is missing** rather than silently writing a stub. Copy the template,
+   then edit `api_key` before running:
 
    ```bash
    cp data/providers.json.example data/providers.json
-   # then edit api_key
    ```
 
 2. **A custom `output_generator`**, if you use one — it's a path to a Python
@@ -142,20 +145,21 @@ scorer (`exact` / `contains:` / `ratio:` — see the main README's
 
 ## Run the API server
 
-The same engine is exposed over HTTP via a FastAPI app that mirrors the app's
-existing `/api/...` routes (experiments, providers, datasets, scorers, runs,
-results, and an SSE run endpoint). This is what the web UI will talk to once the
-TypeScript backend is retired (Phase 2).
+The same engine is exposed over HTTP via a FastAPI app serving the `/api/...`
+routes (experiments, providers, datasets, scorers, runs, results, and an SSE
+run endpoint). This is what the web UI talks to.
+
+Install the server extra (adds `fastapi` + `uvicorn`), then run it (serves on
+<http://127.0.0.1:8000>):
 
 ```bash
-.venv/bin/python -m pip install -e 'backend[server]'   # adds fastapi + uvicorn
-sambaeval-server                                        # serves on http://127.0.0.1:8000
+.venv/bin/python -m pip install -e 'backend[server]'
+sambaeval-server
 ```
 
-Endpoints, request bodies, and JSON response keys match the current Next.js API
-routes exactly, so the frontend can point at this server unchanged. The run
-endpoint (`POST /api/experiments/{id}/run`) streams `progress`/`done`/`error`
-Server-Sent Events; closing the connection cancels the run.
+The run endpoint (`POST /api/experiments/{id}/run`) streams
+`progress`/`done`/`error` Server-Sent Events; closing the connection cancels
+the run.
 
 ## Use as a library
 
@@ -178,11 +182,10 @@ for row in result.results:
 - **Concurrency uses threads** (`ThreadPoolExecutor`). The work is I/O-bound
   (provider HTTP calls; SciCode runs in a Podman container), so the GIL is
   released during the blocking waits and threads give true concurrency while
-  keeping the synchronous generator extension API intact. See the rationale in
-  [../MIGRATION_PLAN.md](../MIGRATION_PLAN.md).
+  keeping the synchronous generator extension API intact.
 - **Data directory**: defaults to `<repo>/sambaeval/data`. Override with the
   `SAMBAEVAL_DATA_DIR` environment variable.
 - Output generators are loaded **in-process** from `scripts/generators/` — no
-  per-task subprocess. A generator script must define exactly one
-  `OutputGenerator` subclass (or reuse the base class, like
-  `default_generator.py`).
+  per-task subprocess. The engine uses the class your script passes to
+  `run_cli(<Class>)`; with no `run_cli` it uses the sole `OutputGenerator`
+  subclass, or the base class (like `default_generator.py`).

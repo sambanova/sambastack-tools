@@ -39,12 +39,22 @@ class ModelConfig(BaseModel):
     model_config = {"extra": "ignore"}
 
     name: str
-    temperature: float = 0.0
+    # Temperature is not a first-class field: the newest frontier models reject
+    # an explicit temperature (or reject 0.0), and there's no universal default.
+    # Set it (and any other sampling param) via additional_kwargs on the models
+    # that support it; otherwise the parameter is simply never sent.
     seed: Optional[int] = None
     # "" or "global" => fall back to the experiment-level system_prompt.
     system_prompt: str = "global"
     provider_name: str
     additional_kwargs: Optional[dict[str, Any]] = None
+    # Token pricing in USD per 1,000,000 tokens, used only to compute run/model
+    # costs in the Results UI (never sent to the provider). Treated as a "result
+    # config": editing it and clicking "Update Costs" re-derives costs from the
+    # stored token counts without re-running the experiment. Defaults are
+    # pre-filled from the provider's /models pricing when available.
+    input_price: Optional[float] = None
+    output_price: Optional[float] = None
 
 
 class LlmJudgeScorerDef(BaseModel):
@@ -53,9 +63,12 @@ class LlmJudgeScorerDef(BaseModel):
     name: str
     provider_name: str
     model: str
-    temperature: float = 0.0
     judge_prompt: str
     max_score: int = 5
+    # Extra request kwargs forwarded to the judge model's chat completions call
+    # (e.g. temperature, top_p, max_tokens). Same mechanism as a model's
+    # additional_kwargs — temperature is configured here, not as its own field.
+    additional_kwargs: Optional[dict[str, Any]] = None
 
 
 class HeuristicScorer(BaseModel):
@@ -130,7 +143,7 @@ class ResultRow(BaseModel):
     num_llm_calls: Optional[int] = None
 
 
-RunStatus = Literal["running", "completed", "aborted", "interrupted"]
+RunStatus = Literal["running", "completed", "aborted", "interrupted", "paused"]
 
 
 class RunMeta(BaseModel):
@@ -144,3 +157,9 @@ class RunMeta(BaseModel):
     total: int
     completed: int = 0
     errors: int = 0
+    # True once results from the current experiment have been merged into this
+    # run (mode="merged"). Such a run's rows span more than the experiment's
+    # current model×dataset grid, so resuming/retrying it must rebuild from its
+    # own rows and preserve the ones the grid doesn't cover, rather than pruning
+    # them as orphans. Absent in pre-existing run.json files → defaults False.
+    merged: bool = False

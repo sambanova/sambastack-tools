@@ -196,12 +196,12 @@ class OutputGenerator:
     def completion_kwargs(self) -> dict:
         """Build the per-call kwargs sent to the chat completions endpoint.
 
-        Pulls temperature, seed (if set), and the contents of
-        `additional_kwargs` off the model dict. Subclasses that drive
-        their own LLM calls should use `**self.completion_kwargs()` so
-        the experiment's seed / extra kwargs are honored consistently.
+        Pulls seed (if set) and the contents of `additional_kwargs` off the
+        model dict. Subclasses that drive their own LLM calls should use
+        `**self.completion_kwargs()` so the experiment's seed / extra kwargs
+        (including any temperature set there) are honored consistently.
         """
-        kwargs: dict = {"temperature": self.model.get("temperature", 0.0)}
+        kwargs: dict = {}
         seed = self.model.get("seed")
         if isinstance(seed, bool):
             pass  # bool is a subclass of int but never a valid seed

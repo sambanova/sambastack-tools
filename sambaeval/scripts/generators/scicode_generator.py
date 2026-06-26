@@ -776,16 +776,19 @@ class SciCodeDebugger(SciCodeGenerator):
     @classmethod
     def for_example(
         cls, example_id, *, provider_name: str = "SambaNova",
-        model_name: str = "MiniMax-M2.7", temperature: float = 0.0,
+        model_name: str = "MiniMax-M2.7", temperature: float | None = None,
         seed: int | None = 42,
     ) -> "SciCodeDebugger":
         """Build a debugger for one problem id, loading the provider from
         data/providers.json. Defaults match the scicode_example experiment."""
         provider = load_provider(provider_name)
         model = {
-            "name": model_name, "temperature": temperature,
-            "seed": seed, "provider_name": provider_name,
+            "name": model_name, "seed": seed, "provider_name": provider_name,
         }
+        # Temperature is forwarded via additional_kwargs (it's no longer a
+        # first-class field); omitted entirely when not requested.
+        if temperature is not None:
+            model["additional_kwargs"] = {"temperature": temperature}
         dbg = cls(provider, model)
         dbg.example_id = str(example_id)
         return dbg

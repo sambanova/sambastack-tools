@@ -5,6 +5,16 @@
     "api_key": "Obtain from https://cloud.sambanova.ai/apis"
   },
   {
+    "name": "Anthropic",
+    "api_url": "https://api.anthropic.com/v1/",
+    "api_key": "sk-..."
+  },
+  {
+    "name": "OpenAI",
+    "api_url": "https://api.openai.com/v1/",
+    "api_key": "sk-..."
+  },
+  {
     "name": "OpenAI-compatible-example",
     "api_url": "https://your-endpoint.example.com/v1",
     "api_key": "sk-..."
