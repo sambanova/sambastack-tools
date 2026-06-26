@@ -1,5 +1,7 @@
 import { createHash } from 'crypto';
 
+import { STATEFULSET_NAME_LIMIT, DEFAULT_POD_SUFFIX } from './pod-name-limits';
+
 /**
  * Kubernetes-compliant name generation for inference deployment pods.
  *
@@ -83,7 +85,7 @@ export function cachePodName(deploymentName: string): string {
  * far sooner than the cache pod.
  */
 export function defaultPodName(deploymentName: string): string {
-  return `${makeKubeName(inferenceDeploymentName(deploymentName), { suffix: '-q-default-n', limit: 52 })}-0`;
+  return `${makeKubeName(inferenceDeploymentName(deploymentName), { suffix: DEFAULT_POD_SUFFIX, limit: STATEFULSET_NAME_LIMIT })}-0`;
 }
 
 export type InferencePodNames = {

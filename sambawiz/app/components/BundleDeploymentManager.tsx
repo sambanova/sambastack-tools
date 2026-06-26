@@ -40,6 +40,7 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import Tooltip from '@mui/material/Tooltip';
 import DocumentationPanel from './DocumentationPanel';
+import { arePodNamesShortened } from '../utils/pod-name-limits';
 
 interface BundleDeployment {
   name: string;
@@ -950,6 +951,14 @@ spec:
                 {deploymentName && deploymentName !== deploymentName.toLowerCase() && (
                   <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: -2, mb: 2 }}>
                     Warning: Deployment name should be in lowercase
+                  </Typography>
+                )}
+                {arePodNamesShortened(deploymentName) && (
+                  <Typography variant="caption" sx={{ color: 'warning.main', display: 'block', mt: -2, mb: 2 }}>
+                    Warning: This name is long enough that the operator will shorten the pod
+                    names (truncate + hash) to satisfy Kubernetes naming limits. The deployment
+                    name itself is unchanged; SambaWiz resolves the real pod names from the
+                    cluster when matching status and logs.
                   </Typography>
                 )}
 
