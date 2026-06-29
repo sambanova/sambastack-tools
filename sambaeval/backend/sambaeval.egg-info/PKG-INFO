@@ -7,6 +7,8 @@ Description-Content-Type: text/markdown
 Requires-Dist: pydantic>=2
 Requires-Dist: httpx>=0.27
 Requires-Dist: openai>=1.0.0
+Requires-Dist: langchain>=1.0
+Requires-Dist: langchain-openai>=1.0
 Requires-Dist: numpy>=2.4.6
 Requires-Dist: scipy>=1.17.1
 Requires-Dist: sympy>=1.14.0
