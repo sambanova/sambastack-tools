@@ -1,5 +1,5 @@
 {
-  "name": "sqlquerytool_judge",
+  "name": "langchainagent_judge",
   "provider_name": "SambaNova",
   "model": "gpt-oss-120b",
   "additional_kwargs": { "temperature": 0 },
