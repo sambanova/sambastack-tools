@@ -4,6 +4,7 @@ import { apiUrl } from "@/app/lib/api";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ResultsTable, { ModelSummaryTable } from "@/app/components/ResultsTable";
+import { ModelTradeoffChart } from "@/app/components/ModelTradeoffChart";
 import ModelNameCombobox from "@/app/components/ModelNameCombobox";
 import ErrorsTable from "@/app/components/ErrorsTable";
 import type {
@@ -2251,6 +2252,9 @@ export default function ExperimentPage({
               <h3 className="text-sm font-semibold mb-3">
                 Aggregated Results by Model
               </h3>
+              <div className="mb-4">
+                <ModelTradeoffChart rows={results} prices={displayPrices} />
+              </div>
               <ModelSummaryTable rows={results} prices={displayPrices} />
             </div>
           )}
