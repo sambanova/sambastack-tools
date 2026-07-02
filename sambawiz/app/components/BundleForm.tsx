@@ -21,6 +21,8 @@ import {
   Chip,
   Divider,
   SelectChangeEvent,
+  Switch,
+  FormControlLabel,
   TextField,
   Button,
   Alert,
@@ -81,6 +83,9 @@ export default function BundleForm() {
   const [generatedYaml, setGeneratedYaml] = useState<string>('');
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [draftModels, setDraftModels] = useState<{ [modelName: string]: string }>({});
+  // Per-model auto_resubmit toggle. Absence means enabled (default on); only an
+  // explicit `false` disables it. See generateBundleYaml for serialization.
+  const [autoResubmit, setAutoResubmit] = useState<{ [modelName: string]: boolean }>({});
   const [copiedToClipboard, setCopiedToClipboard] = useState<boolean>(false);
   const [checkpointsDir, setCheckpointsDir] = useState<string>('');
   const [validationResult, setValidationResult] = useState<{
@@ -140,6 +145,7 @@ export default function BundleForm() {
           setBundleName(data.state.bundleName || 'bundle1');
           setGeneratedYaml(data.state.generatedYaml || '');
           setDraftModels(data.state.draftModels || {});
+          setAutoResubmit(data.state.autoResubmit || {});
 
           // Clear flag after a brief delay to allow state updates to complete
           setTimeout(() => {
@@ -155,12 +161,13 @@ export default function BundleForm() {
     // Listen for load bundle events from the dialog
     const handleLoadBundleState = (event: Event) => {
       const customEvent = event as CustomEvent;
-      const { bundleName, selectedModels, selectedConfigs, draftModels } = customEvent.detail;
+      const { bundleName, selectedModels, selectedConfigs, draftModels, autoResubmit } = customEvent.detail;
 
       setBundleName(bundleName);
       setSelectedModels(selectedModels);
       setSelectedConfigs(selectedConfigs);
       setDraftModels(draftModels);
+      setAutoResubmit(autoResubmit || {});
       setValidationResult(null); // Clear any previous validation results
     };
 
@@ -278,6 +285,24 @@ export default function BundleForm() {
       });
       return updated;
     });
+
+    // Remove auto_resubmit selections for deselected models
+    setAutoResubmit((prev) => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach((modelName) => {
+        if (!models.includes(modelName)) {
+          delete updated[modelName];
+        }
+      });
+      return updated;
+    });
+  };
+
+  const handleAutoResubmitChange = (modelName: string, enabled: boolean) => {
+    setAutoResubmit((prev) => ({
+      ...prev,
+      [modelName]: enabled,
+    }));
   };
 
   const handleDraftModelChange = (targetModel: string, draftModel: string) => {
@@ -455,9 +480,9 @@ export default function BundleForm() {
       setGeneratedYaml('');
       return;
     }
-    const yaml = generateBundleYaml(selectedConfigs, checkpointMapping, pefConfigs, bundleName, checkpointsDir, draftModels);
+    const yaml = generateBundleYaml(selectedConfigs, checkpointMapping, pefConfigs, bundleName, checkpointsDir, draftModels, autoResubmit);
     setGeneratedYaml(yaml);
-  }, [selectedConfigs, bundleName, draftModels, checkpointsDir, checkpointMapping]);
+  }, [selectedConfigs, bundleName, draftModels, autoResubmit, checkpointsDir, checkpointMapping]);
 
   // Handle copy to clipboard
   const handleCopyToClipboard = async () => {
@@ -541,6 +566,7 @@ export default function BundleForm() {
             bundleName,
             generatedYaml,
             draftModels,
+            autoResubmit,
           },
         }),
       });
@@ -693,6 +719,11 @@ export default function BundleForm() {
                         delete next[value];
                         return next;
                       });
+                      setAutoResubmit((prev) => {
+                        const next = { ...prev };
+                        delete next[value];
+                        return next;
+                      });
                     }}
                     onMouseDown={(e) => e.stopPropagation()}
                   />
@@ -769,6 +800,36 @@ export default function BundleForm() {
               )}
               {!modelSupportsSpeculativeDecoding[modelName] && (
                 <Box sx={{ mb: 1.5 }} />
+              )}
+              {checkpointMapping[modelName]?.model_type !== 'embedding' && (
+                <Box sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        size="small"
+                        checked={autoResubmit[modelName] !== false}
+                        onChange={(e) => handleAutoResubmitChange(modelName, e.target.checked)}
+                      />
+                    }
+                    label={
+                      <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                        Auto-resubmit long generations to larger sequence-length experts
+                      </Typography>
+                    }
+                  />
+                  <Tooltip
+                    title={
+                      <>
+                        When enabled, a generation that exceeds the sequence length of the expert serving it continues on the next-larger-SS expert instead of stopping at that boundary.<br /><br />
+                        Trade-off: those long requests incur extra latency at each resubmit and add load to the larger-SS experts, which can lengthen queue times for the shorter-SS configurations under heavy use.<br /><br />
+                        Has no effect when there is no larger expert to continue on. Recommended: enabled.
+                      </>
+                    }
+                    arrow
+                  >
+                    <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+                  </Tooltip>
+                </Box>
               )}
               <TableContainer>
                 <Table size="small" sx={{ border: '1px solid', borderColor: 'divider' }}>

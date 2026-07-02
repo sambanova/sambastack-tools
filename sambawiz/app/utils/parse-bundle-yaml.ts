@@ -11,6 +11,7 @@ interface YamlBundleTemplate {
   spec: {
     models: {
       [modelName: string]: {
+        auto_resubmit?: boolean;
         default_expert_values?: {
           spec_decoding?: {
             draft_model: string;
@@ -46,6 +47,7 @@ export interface ParsedBundleState {
   selectedModels: string[];
   selectedConfigs: ConfigSelection[];
   draftModels: { [modelName: string]: string };
+  autoResubmit: { [modelName: string]: boolean };
 }
 
 export type ParseError = { error: string };
@@ -78,9 +80,13 @@ export function parseBundleYamlContent(yamlContent: string, options?: ParseOptio
   const selectedModels: string[] = [];
   const selectedConfigs: ConfigSelection[] = [];
   const draftModels: { [modelName: string]: string } = {};
+  const autoResubmit: { [modelName: string]: boolean } = {};
 
   for (const [modelName, modelData] of Object.entries(bundleTemplate.spec.models)) {
     selectedModels.push(modelName);
+    // Reflect the loaded YAML exactly: absent means off. (New models added in the
+    // form default to on; only loaded bundles pass through this parser.)
+    autoResubmit[modelName] = modelData.auto_resubmit === true;
 
     if (!modelData.experts) {
       return { error: `Unsupported YAML structure: expecting "experts" for model "${modelName}"` };
@@ -169,5 +175,6 @@ export function parseBundleYamlContent(yamlContent: string, options?: ParseOptio
     selectedModels: [...new Set(selectedModels)],
     selectedConfigs,
     draftModels,
+    autoResubmit,
   };
 }

@@ -135,13 +135,14 @@ export default function BundleBuilderPage() {
     setLoadError(null);
   };
 
-  const dispatchLoadAndClose = (data: { bundleName: string; selectedModels: string[]; selectedConfigs: unknown[]; draftModels: Record<string, string> }) => {
+  const dispatchLoadAndClose = (data: { bundleName: string; selectedModels: string[]; selectedConfigs: unknown[]; draftModels: Record<string, string>; autoResubmit?: Record<string, boolean> }) => {
     window.dispatchEvent(new CustomEvent('loadBundleState', {
       detail: {
         bundleName: data.bundleName,
         selectedModels: data.selectedModels,
         selectedConfigs: data.selectedConfigs,
-        draftModels: data.draftModels
+        draftModels: data.draftModels,
+        autoResubmit: data.autoResubmit
       }
     }));
     handleCloseDialog();

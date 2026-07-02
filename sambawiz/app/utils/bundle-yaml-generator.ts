@@ -28,6 +28,7 @@ interface ModelExperts {
 interface BundleTemplateModels {
   [modelName: string]: {
     experts: ModelExperts;
+    auto_resubmit?: boolean;
   };
 }
 
@@ -80,7 +81,8 @@ export function generateBundleYaml(
   pefConfigs: PefConfigs,
   bundleName: string,
   checkpointsDir: string = '',
-  draftModels: { [modelName: string]: string } = {}
+  draftModels: { [modelName: string]: string } = {},
+  autoResubmit: { [modelName: string]: boolean } = {}
 ): string {
   // Group configs by model
   const modelConfigs: { [modelName: string]: ConfigSelection[] } = {};
@@ -202,6 +204,21 @@ export function generateBundleYaml(
     } else {
       templateModels[modelName] = { experts };
     }
+
+    // auto_resubmit (default enabled): when on, the operator auto-wires each
+    // expert's resubmit_to to the next-larger-SS expert so generations that exceed
+    // the current expert's sequence length continue instead of stopping.
+    //
+    // We intentionally do NOT gate on the number of visible experts. DYT-style
+    // PEFs contain multiple experts that do not surface in the available-PEF
+    // output, so a model that looks single-expert may still have a ladder to
+    // climb. Relying on the visible SS count would wrongly suppress the flag for
+    // those. It is a harmless no-op in fast-coe when there is genuinely nothing
+    // larger to resubmit to. Omitted only for embedding models (no generation).
+    const autoResubmitEnabled = autoResubmit[modelName] !== false;
+    if (autoResubmitEnabled && !isEmbeddingModel) {
+      templateModels[modelName].auto_resubmit = true;
+    }
   });
 
   // Build Bundle spec.checkpoints
@@ -258,7 +275,7 @@ spec:
   models:
 ${Object.entries(templateModels).map(([modelName, model]) => {
   return `    ${modelName}:
-      experts:
+${model.auto_resubmit ? '      auto_resubmit: true\n' : ''}      experts:
 ${Object.entries(model.experts).map(([ss, expert]) => {
   let expertStr = `        ${ss}:
           configs:

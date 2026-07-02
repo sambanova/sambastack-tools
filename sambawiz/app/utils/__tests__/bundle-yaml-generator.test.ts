@@ -554,5 +554,77 @@ describe('bundle-yaml-generator', () => {
       expect(yaml).toContain('2048:');
       expect(yaml).not.toContain('default:');
     });
+
+    describe('auto_resubmit', () => {
+      it('should emit auto_resubmit: true by default for a multi-SS generative model', () => {
+        // selectedConfigs has two SS levels (1024, 2048) for a generative model
+        const yaml = generateBundleYaml(selectedConfigs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+        expect(yaml).toContain('auto_resubmit: true');
+      });
+
+      it('should place auto_resubmit under the model, above experts', () => {
+        const yaml = generateBundleYaml(selectedConfigs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+        // First occurrence of the model name is the BundleTemplate spec.models entry
+        const modelSection = yaml.split('Meta-Llama-3.1-8B-Instruct:')[1];
+        const autoResubmitIdx = modelSection.indexOf('auto_resubmit: true');
+        const expertsIdx = modelSection.indexOf('experts:');
+        expect(autoResubmitIdx).toBeGreaterThanOrEqual(0);
+        expect(autoResubmitIdx).toBeLessThan(expertsIdx);
+      });
+
+      it('should omit auto_resubmit when explicitly disabled for the model', () => {
+        const yaml = generateBundleYaml(
+          selectedConfigs,
+          mockCheckpointMapping,
+          mockPefConfigs,
+          'test-bundle',
+          '',
+          {},
+          { 'Meta-Llama-3.1-8B-Instruct': false }
+        );
+        expect(yaml).not.toContain('auto_resubmit');
+      });
+
+      it('should still emit auto_resubmit for a single visible-SS generative model (DYT PEFs may hide experts)', () => {
+        // A model that appears single-expert may still be backed by a DYT PEF
+        // whose internal experts are not visible in the PEF output, so we must
+        // not suppress the flag based on the visible SS count.
+        const configs: ConfigSelection[] = [
+          {
+            modelName: 'Meta-Llama-3.1-8B-Instruct',
+            ss: '1024',
+            bs: '1',
+            pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+          },
+          {
+            modelName: 'Meta-Llama-3.1-8B-Instruct',
+            ss: '1024',
+            bs: '16',
+            pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
+          },
+        ];
+        const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+        expect(yaml).toContain('auto_resubmit: true');
+      });
+
+      it('should omit auto_resubmit for embedding models even with multiple SS', () => {
+        const configs: ConfigSelection[] = [
+          {
+            modelName: 'E5-Mistral-7B-Instruct',
+            ss: '4k',
+            bs: '1',
+            pefName: 'E5-Mistral-7B-Instruct_4k_bs1',
+          },
+          {
+            modelName: 'E5-Mistral-7B-Instruct',
+            ss: '8k',
+            bs: '1',
+            pefName: 'E5-Mistral-7B-Instruct_8k_bs1',
+          },
+        ];
+        const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
+        expect(yaml).not.toContain('auto_resubmit');
+      });
+    });
   });
 });

@@ -14,6 +14,7 @@ interface BundleBuilderState {
   bundleName: string;
   generatedYaml: string;
   draftModels: { [modelName: string]: string };
+  autoResubmit?: { [modelName: string]: boolean };
 }
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'bundle-builder-state.json');
