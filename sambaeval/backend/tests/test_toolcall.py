@@ -1,19 +1,20 @@
 """Tests for per-row tool definitions and tool-call capture.
 
-Two layers, both fully offline:
+Tool calling is a base-level capability, so everything here runs against public
+code — no private generator required. Three layers, all fully offline:
   * dataset parsing: a row's ``tools`` list flows into ``DatasetRow.tools``;
-  * generator capture: the base ``stream_completion`` accumulates streamed
-    ``tool_calls`` deltas into ``last_tool_calls``, ``parsed_tool_calls``
-    decodes their arguments, and ``ToolCallGenerator`` serializes the decision
-    as JSON and passes ``tools`` to the request.
+  * base capture: ``stream_completion`` accumulates streamed ``tool_calls``
+    deltas into ``last_tool_calls`` and ``parsed_tool_calls`` decodes them;
+  * default generator: the default generator (which just runs
+    ``OutputGenerator``) forwards the ``tools`` / ``tool_choice`` request kwargs
+    to the provider and captures the model's tool-call reply.
 
-The generator layer stubs the OpenAI client with a fake stream, so no provider
+The generator layers stub the OpenAI client with a fake stream, so no provider
 is contacted and no API key is needed.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,17 +23,16 @@ import pytest
 
 from sambaeval.datasets import row_from_obj
 
-# base.py lives in scripts/generators/; the tool-calling generator is a private
-# artifact under scripts/private/. Both are imported the same way the executor's
-# in-process loader imports them (base is always on sys.path; the generator is
-# resolved by path).
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
-for _d in (_SCRIPTS / "generators", _SCRIPTS / "private"):
-    if str(_d) not in sys.path:
-        sys.path.insert(0, str(_d))
+# base.py and the default generator live in scripts/generators/, imported the
+# same way the executor's in-process loader reaches them (base is always on
+# sys.path). Tool calling is a base capability, so the default generator (which
+# just runs OutputGenerator) exercises it — no private generator needed.
+_GENERATORS = Path(__file__).resolve().parents[2] / "scripts" / "generators"
+if str(_GENERATORS) not in sys.path:
+    sys.path.insert(0, str(_GENERATORS))
 
 import base  # noqa: E402
-import toolcall_generator  # noqa: E402
+import default_generator  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -179,12 +179,16 @@ def test_text_only_stream_leaves_no_tool_calls():
 
 
 # --------------------------------------------------------------------------- #
-# ToolCallGenerator contract
+# default generator: tool forwarding + capture (public, no private artifact)
 # --------------------------------------------------------------------------- #
+# The default generator (default_generator.py) just runs OutputGenerator, so
+# tool calling is exercised at the base level: stream_completion forwards the
+# `tools` / `tool_choice` request kwargs to the provider and captures the
+# model's tool-call reply.
 
-def test_toolcall_generator_emits_decision_json_and_sends_tools():
-    gen = _make_generator(toolcall_generator.ToolCallGenerator)
-    gen.tools = [_tool("query_event_step")]
+def test_default_generator_forwards_tools_and_captures_calls():
+    gen = _make_generator(default_generator.OutputGenerator)
+    tools = [_tool("query_event_step")]
     chunks = [
         _chunk(_delta(tool_calls=[
             _tc_delta(0, id="c1", name="query_event_step",
@@ -193,31 +197,33 @@ def test_toolcall_generator_emits_decision_json_and_sends_tools():
     ]
     sink = _install_fake(gen, chunks)
 
-    out = gen.generate_output("sys", [{"role": "user", "content": "check it"}])
-    decision = json.loads(out)
-    assert decision["tool_calls"] == [
-        {"name": "query_event_step", "arguments": {"masterRef": "ILC335"}}]
-    assert decision["content"] == ""
-    # tools were forwarded to the request, tool_choice defaulted to auto
-    assert sink["tools"] == gen.tools
+    text = gen.stream_completion(
+        [{"role": "user", "content": "check it"}],
+        tools=tools,
+        tool_choice="auto",
+    )
+    # tools / tool_choice forwarded verbatim to the request
+    assert sink["tools"] == tools
     assert sink["tool_choice"] == "auto"
-    # system prompt prepended
-    assert sink["messages"][0] == {"role": "system", "content": "sys"}
+    # the model's tool call was captured and decodes cleanly
+    assert text == ""
+    assert gen.parsed_tool_calls() == [
+        {"name": "query_event_step", "arguments": {"masterRef": "ILC335"}}]
 
 
-def test_toolcall_generator_no_tools_omits_tools_kwarg():
-    gen = _make_generator(toolcall_generator.ToolCallGenerator)
-    gen.tools = None
+def test_default_generator_without_tools_sends_no_tools_kwarg():
+    gen = _make_generator(default_generator.OutputGenerator)
     chunks = [
         _chunk(_delta(content="just text")),
         _chunk(usage=_Usage({"prompt_tokens": 4, "completion_tokens": 2})),
     ]
     sink = _install_fake(gen, chunks)
+    # The default generate_output path sends no tool kwargs.
     out = gen.generate_output("", [{"role": "user", "content": "hi"}])
-    decision = json.loads(out)
-    assert decision["tool_calls"] == []
-    assert decision["content"] == "just text"
-    assert "tools" not in sink  # no tools => no tools kwarg sent
+    assert out == "just text"
+    assert "tools" not in sink
+    assert "tool_choice" not in sink
+    assert gen.parsed_tool_calls() == []
 
 
 if __name__ == "__main__":
