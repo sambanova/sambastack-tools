@@ -155,6 +155,7 @@ def run_generator(
     system_prompt = _resolve_system_prompt(experiment_system_prompt, model, row)
     generator = generator_cls(provider.model_dump(), model.model_dump())
     generator.example_id = row.example_id
+    generator.tools = row.tools
     messages = [m.model_dump(exclude_none=True) for m in row.messages]
     output = generator.generate_output(system_prompt, messages)
     metrics = generator.aggregate_metrics()

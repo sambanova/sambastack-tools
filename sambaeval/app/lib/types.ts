@@ -55,6 +55,10 @@ export interface Experiment {
   // dataset. Set by the "Run on first N examples" field in the UI when the
   // user lowers it below the dataset's size.
   example_count?: number;
+  // True when the experiment lives in the private (gitignored) data tree, along
+  // with the run results it produces. Derived by the backend from the file's
+  // folder; sent on save to choose which tree to write to.
+  private?: boolean;
 }
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
@@ -141,6 +145,10 @@ export interface RunMeta {
   // True once another run's results have been merged into this one; such a run
   // resumes/retries by rebuilding from its own rows (see backend RunMeta).
   merged?: boolean;
+  // True when the run was started for only a subset of the experiment's models
+  // (a "partial" run). Like a merged run, it resumes/retries by rebuilding from
+  // its own rows rather than re-expanding to every model in the experiment.
+  partial?: boolean;
   token_usage?: RunTokenUsage[];
   // Stable identifier for the dataset this run used (filename, or a content
   // hash for inline datasets). Used to restrict "Merge Results" to runs over

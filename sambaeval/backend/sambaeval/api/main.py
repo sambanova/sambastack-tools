@@ -51,6 +51,7 @@ def _build_experiment(body: dict, exp_id: str, *, with_example_count: bool) -> E
         "dataset": body.get("dataset") if body.get("dataset") is not None else "",
         "scorer": body.get("scorer") or {"type": "heuristic"},
         "output_generator": body.get("output_generator") or "",
+        "private": bool(body.get("private")),
     }
     if with_example_count and isinstance(body.get("example_count"), int):
         data["example_count"] = body["example_count"]
@@ -126,10 +127,32 @@ async def run(exp_id: str, request: Request):
     )
     run_id: Optional[str] = qp.get("run_id") or None
     merge_conflict = "overwrite" if qp.get("merge_conflict") == "overwrite" else "skip"
+    # Optional model subset for a new or merged run (comma-separated
+    # "provider|name" keys). Absent => run every model in the experiment (the
+    # default). Resume/retry rebuild from the run's own rows, so it's ignored
+    # there.
+    models_param = qp.get("models")
+    selected_models: Optional[list[str]] = (
+        [m for m in models_param.split(",") if m]
+        if (models_param and mode in ("new", "auto", "merged"))
+        else None
+    )
 
     experiment = storage.get_experiment(exp_id)
     if experiment is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
+
+    if selected_models is not None:
+        experiment_model_keys = {
+            f"{m.provider_name}|{m.name}" for m in experiment.models
+        }
+        chosen = [m for m in selected_models if m in experiment_model_keys]
+        if not chosen:
+            return JSONResponse(
+                {"error": "Select at least one of the experiment's models."},
+                status_code=400,
+            )
+        selected_models = chosen
 
     if mode == "merged":
         # Generate the current experiment's results into an existing target run.
@@ -206,6 +229,7 @@ async def run(exp_id: str, request: Request):
                 mode=mode,
                 run_id=run_id,
                 merge_conflict=merge_conflict,
+                selected_models=selected_models,
                 on_progress=on_progress,
                 control=control,
             )
@@ -554,7 +578,7 @@ async def post_dataset(request: Request):
     lower = name.lower()
     if not name or not (lower.endswith(".csv") or lower.endswith(".jsonl")):
         return JSONResponse({"error": "Dataset name must end with .csv or .jsonl"}, status_code=400)
-    storage.write_dataset(name, body.get("content") or "")
+    storage.write_dataset(name, body.get("content") or "", private=bool(body.get("private")))
     return {"name": name}
 
 
@@ -650,6 +674,7 @@ def serve() -> None:
             reload_dirs=[
                 str(root / "backend" / "sambaeval"),
                 str(root / "scripts" / "generators"),
+                str(root / "scripts" / "private"),
             ],
         )
     else:

@@ -2,12 +2,18 @@
 
 This document catalogs the automated tests for the SambaEval evaluation engine.
 
-**Total Tests:** 32 automated (pytest)
+**Total Tests:** 63 automated (pytest), plus 1 opt-in Podman integration test
+(skipped unless `SCICODE_PODMAN_INTEGRATION=1`)
 **Test Status:** ✅ All passing
 **Focus:** Run lifecycle (pause, terminate, cancel, resume), retrying the failed
 rows of a past run, cancelling orphaned runs, the per-run error log
-(`errors.json`), and merging runs (combining two finished runs, and running a
-new "merged" run into an existing one).
+(`errors.json`), merging runs (combining two finished runs, and running a
+new "merged" run into an existing one), running a chosen subset of the
+experiment's models (a "partial" run) for both new and merged runs,
+per-row tool definitions with tool-call capture (tool-calling evals), the
+private (gitignored) data tree (private experiments and the dataset/scorer/run
+results they touch), and the SciCode Podman sandbox lifecycle (auto-start,
+VM right-sizing, and the container-concurrency cap).
 **Runtime:** Fully offline. No provider, network, or API key is contacted.
 
 ## Table of Contents
@@ -25,6 +31,9 @@ new "merged" run into an existing one).
 - [Error Log Tests](#error-log-tests)
 - [Merge Results Tests](#merge-results-tests)
 - [Merged Run Tests](#merged-run-tests)
+- [Tool-Calling Tests](#tool-calling-tests)
+- [Private Scope Tests](#private-scope-tests)
+- [Sandbox Runtime Tests](#sandbox-runtime-tests)
 - [Continuous Integration](#continuous-integration)
 
 ---
@@ -315,7 +324,11 @@ File: `tests/test_merged_run.py`
 target run, in place: new keys are generated, conflicts are resolved **before**
 any prompt runs ("skip" keeps the target row, "overwrite" re-generates it), and
 target rows the experiment doesn't cover are preserved. The run is flagged
-`merged` so a later resume rebuilds it the same safe way. These drive the real
+`merged` so a later resume rebuilds it the same safe way. A run (new or merged)
+can also be restricted to a subset of the experiment's models via
+`selected_models` (keyed by `provider|name`); a subset **new** run is flagged
+`partial` rather than `merged` so it, too, resumes by rebuilding from its own
+rows instead of re-expanding to every model. These drive the real
 `run_experiment` executor with the echo generator; seeded rows carry sentinel
 outputs so a test can tell whether a row was preserved or regenerated.
 
@@ -333,12 +346,192 @@ every row keeps its stale sentinel output and the count is unchanged.
 With **overwrite**, each conflicting row is re-generated (echo → the prompt,
 scored `1.0`) reusing its original `result_id`, so the row is replaced in place.
 
-### 4. `test_resume_merged_run_preserves_uncovered_rows`
+### 4. `test_merged_run_selected_models_only_runs_chosen`
+A merged run restricted to one model via `selected_models` with **overwrite**
+regenerates only the chosen model's rows; the deselected model's target rows are
+preserved verbatim despite the overwrite policy (their keys are never covered).
+
+### 5. `test_new_run_selected_models_only_runs_chosen`
+A fresh `mode="new"` run whose `selected_models` names one of two experiment
+models produces only that model's rows (each scored `1.0`), with `total`/
+`completed` reflecting the subset and the run flagged `partial == True` (and
+`merged == False`).
+
+### 6. `test_new_run_all_models_is_not_partial`
+A new run with no selection (all models) is flagged neither `partial` nor
+`merged`, and its `total` is the full model×dataset grid.
+
+### 7. `test_resume_subset_new_run_does_not_re_expand`
+Resuming a partial new run rebuilds the same subset — the deselected model is
+**not** re-added even though the live experiment still lists it, because the
+`partial` flag routes resume through the row-defined rebuild.
+
+### 8. `test_resume_merged_run_preserves_uncovered_rows`
 A paused merged run (one model done and preserved, plus a completed and an
 errored row of the merged model) is resumed via the normal resume path. The
 rows the current grid doesn't cover **survive** (the data-loss guard), the
 completed row is carried over, the errored row re-runs to success, no
 `result_id`s collide, and the `merged` flag persists.
+
+---
+
+## Tool-Calling Tests
+
+File: `tests/test_toolcall.py`
+
+A dataset row may carry `tools` — the OpenAI-style function definitions (JSON
+schemas) available to the model for that row — distinct from the tool-use
+*history* already expressible via message `tool_calls`/`tool` roles. `tools`
+flows `DatasetRow.tools → generator.tools` and is sent as the top-level request
+param by tool-calling generators. The base `OutputGenerator.stream_completion`
+captures any emitted `tool_calls` (accumulated across streamed deltas) into
+`last_tool_calls`, and `ToolCallGenerator` serializes the decision as
+`{"tool_calls": [...], "content": ...}` so a judge can score whether the right
+tool was called with the right arguments. The generator tests stub the OpenAI
+client with a fake stream, so they stay offline and key-free.
+
+### 1. `test_row_parses_tools_list`
+A row with a `tools` list parses into `DatasetRow.tools` preserving the function
+names — the per-row tool menu the generator will send.
+
+### 2. `test_row_without_tools_is_none`
+A row that omits `tools` has `DatasetRow.tools is None` (text-only rows are
+unaffected).
+
+### 3. `test_row_non_list_tools_coerced_to_none`
+A non-list `tools` value (e.g. a string) is coerced to `None` rather than passed
+through as a malformed request param.
+
+### 4. `test_stream_completion_accumulates_tool_calls_across_deltas`
+The base `stream_completion` reassembles a tool call whose `name` and
+`arguments` arrive in separate streamed chunks into a single
+`last_tool_calls` entry (`arguments` concatenated to valid JSON), and records
+exactly one LLM call in the metrics.
+
+### 5. `test_parsed_tool_calls_decodes_and_falls_back`
+`parsed_tool_calls` JSON-decodes each call's `arguments`, returns `{}` for empty
+arguments, and falls back to the raw string when the model emitted invalid JSON
+(so a malformed call is still visible to the scorer, not dropped).
+
+### 6. `test_text_only_stream_leaves_no_tool_calls`
+A pure-text stream returns the joined text and leaves `last_tool_calls` empty —
+capture is passive and never fabricates a call.
+
+### 7. `test_toolcall_generator_emits_decision_json_and_sends_tools`
+`ToolCallGenerator.generate_output` returns the decision JSON with the parsed
+tool call, forwards `tools` to the request with `tool_choice` defaulting to
+`auto`, and prepends the system prompt.
+
+### 8. `test_toolcall_generator_no_tools_omits_tools_kwarg`
+With no row tools, the generator sends no `tools` kwarg and returns the text as
+`content` with an empty `tool_calls` list — a tools-less row degrades to a plain
+completion.
+
+> Note: `base.py` lives in `scripts/generators/`, but the tool-calling generator
+> itself is a private artifact under `scripts/private/toolcall_generator.py`
+> (see Private Scope Tests). The test puts both directories on `sys.path`.
+
+---
+
+## Private Scope Tests
+
+File: `tests/test_private_scope.py`
+
+An experiment marked **private** lives under `data/private/experiments/` and the
+dataset, scorer, and run results it touches resolve to / land in the mirrored
+`data/private/` subtrees — all gitignored. The folder is the source of truth for
+the `private` flag (it is not persisted in the experiment JSON). Fully offline
+via the temp `SAMBAEVAL_DATA_DIR` and the echo generator.
+
+### 1. `test_private_experiment_saves_to_private_tree`
+`save_experiment` with `private=True` writes to `data/private/experiments/` (not
+the public tree), omits `private` from the JSON, and `get_experiment` reads the
+flag back as `True` from the folder.
+
+### 2. `test_public_experiment_saves_to_public_tree`
+The default (`private=False`) writes to the public tree only.
+
+### 3. `test_toggling_privacy_moves_the_file`
+Flipping `private` re-saves into the other tree and deletes the stale copy, so
+the experiment is never listed twice.
+
+### 4. `test_list_experiments_merges_both_trees`
+`list_experiments` returns experiments from both trees, each carrying the
+`private` flag derived from its folder.
+
+### 5. `test_private_dataset_is_listed_and_loaded`
+A dataset dropped in `data/private/datasets/` is included by `list_datasets` and
+resolved by `load_dataset`.
+
+### 6. `test_private_scorer_is_listed_and_fetched`
+A scorer in `data/private/scorers/` is included by `list_scorers` and returned
+by `get_scorer`.
+
+### 7. `test_private_experiment_runs_land_in_private_results`
+Executing a private experiment writes its run under `data/private/results/`
+(not the public results tree), and `read_run_results` reads it back
+transparently.
+
+### 8. `test_post_dataset_private_lands_in_private_tree`
+`POST /api/datasets` with `private: true` writes to `data/private/datasets/` —
+the contract the Datasets page's "Private" checkbox relies on.
+
+### 9. `test_put_experiment_private_flag_round_trips_through_api`
+`PUT`/`GET /api/experiments/{id}` with `private: true` moves the experiment
+file to the private tree and reflects the flag back; untoggling moves it back to
+the public tree — the contract the Experiment page's "Private" toggle relies on.
+
+---
+
+## Sandbox Runtime Tests
+
+File: `tests/test_sandbox_runtime.py`
+
+Covers the SciCode Podman sandbox lifecycle in
+`scripts/generators/sandbox_runtime.py` — the mechanism that keeps a down
+Podman VM from silently scoring every step `0`. Every `podman` invocation is
+stubbed by a `FakePodman` that models a VM's state/memory, so the logic tests
+run **fully offline with no Podman installed** (they pass identically on the
+`ubuntu-latest` CI runner, where `podman machine` doesn't apply).
+
+### 1. `test_stopped_vm_is_rightsized_then_started_then_ready`
+A stopped, undersized VM is grown to the memory cap and started **in that
+order** (`machine set` before `machine start`, since sizing only applies to a
+stopped VM), then the daemon socket is polled until it answers.
+
+### 2. `test_running_vm_is_a_noop`
+An already-running VM issues no `machine set`/`machine start` — the fast path.
+
+### 3. `test_already_large_vm_is_not_resized`
+A VM deliberately larger than the cap is started as-is, never shrunk.
+
+### 4. `test_autostart_disabled_raises_without_starting`
+With `SCICODE_AUTO_START_PODMAN=0`, a down VM raises `SandboxUnavailable`
+without starting anything (the executor turns this into a run-level abort).
+
+### 5. `test_no_machine_and_no_daemon_raises`
+No machine and no reachable daemon (misconfigured host) raises rather than hangs.
+
+### 6. `test_failed_start_raises`
+A `machine start` that returns non-zero surfaces as `SandboxUnavailable`.
+
+### 7. `test_ready_is_cached_second_call_touches_no_podman`
+Once ready, a second call is a pure cache hit — no further `podman` calls
+(the idempotency the per-run preflight + per-step lazy check both rely on).
+
+### 8-9. `test_cap_concurrency_*`
+Concurrency above `MAX_CONTAINERS` is clamped with a warning; at/below is passed
+through silently.
+
+### 10. `test_sizing_invariant_containers_fit_the_vm`
+Guards the sizing math: `MAX_CONTAINERS × PER_CONTAINER_MB < VM_MEMORY_MB`, and
+the container semaphore is sized to `MAX_CONTAINERS`.
+
+### 11. `test_real_podman_starts_and_connects` (opt-in, skipped in CI)
+The only test that touches real Podman: it actually starts the VM and asserts
+the daemon connects and the VM is sized for the container cap. Guarded behind
+`SCICODE_PODMAN_INTEGRATION=1` so it never runs on Actions (no VM there) and
+doesn't slow the default suite.
 
 ---
 
@@ -349,3 +542,9 @@ These tests run in GitHub Actions via
 on pushes and pull requests to `main` that touch `sambaeval/**`. The job installs
 the package with the `test` extra (`uv sync --extra test`) and runs
 `pytest tests/`.
+
+The sandbox lifecycle tests run here unchanged — they stub `podman`, so no
+container runtime is needed. The one real-Podman integration test
+(`test_real_podman_starts_and_connects`) is skipped unless
+`SCICODE_PODMAN_INTEGRATION=1`, which CI never sets, so Actions never tries to
+start a VM.

@@ -21,6 +21,9 @@ const EXPECTED_OUTPUT_TOOLTIP =
 const WEIGHT_TOOLTIP =
   "Score multiplier, defaults to 1. The heuristic scorer returns weight on a hit; the LLM judge multiplies its normalized score by weight.\n\nUse it to:\n\n(a) Stress the relative importance of examples in the final score — e.g. weight a critical regression case at 5.0 and trivia at 0.5.\n\n(b) Combine multiple contains: checks for a single logical example by splitting it across several rows with partial weights — e.g. two rows with weight 0.5 each, one asserting contains:Paris and one asserting contains:France, sum to a max of 1.0 only when both substrings appear.";
 
+const PRIVATE_TOOLTIP =
+  "Save this dataset to the private (gitignored) tree at data/private/datasets/ instead of data/datasets/. Use it for datasets that shouldn't be committed — they stay local to your machine. This is independent of experiment privacy: any experiment (public or private) can reference it, and marking an experiment private does not require a private dataset.";
+
 const DEFAULT_ROW_COUNT = 5;
 
 const emptyRow = (): DatasetRow => ({
@@ -60,6 +63,8 @@ export default function DatasetsPage() {
   const [rows, setRows] = useState<DatasetRow[]>(() =>
     Array.from({ length: DEFAULT_ROW_COUNT }, emptyRow),
   );
+  // When set, the new dataset is written to the private (gitignored) tree.
+  const [isPrivate, setIsPrivate] = useState(false);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -98,6 +103,7 @@ export default function DatasetsPage() {
   const resetCreate = () => {
     setName("");
     setRows(Array.from({ length: DEFAULT_ROW_COUNT }, emptyRow));
+    setIsPrivate(false);
   };
 
   const resolveName = (raw: string): string | null => {
@@ -140,7 +146,7 @@ export default function DatasetsPage() {
     await fetch(apiUrl("/api/datasets"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: finalName, content }),
+      body: JSON.stringify({ name: finalName, content, private: isPrivate }),
     });
     setSaving(false);
     resetCreate();
@@ -159,9 +165,10 @@ export default function DatasetsPage() {
     await fetch(apiUrl("/api/datasets"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: file.name, content: text }),
+      body: JSON.stringify({ name: file.name, content: text, private: isPrivate }),
     });
     setSaving(false);
+    setIsPrivate(false);
     setMode("choose");
     refresh();
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -209,7 +216,10 @@ export default function DatasetsPage() {
       {mode === "upload" && (
         <div className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-6 mb-6">
           <button
-            onClick={() => setMode("choose")}
+            onClick={() => {
+              setIsPrivate(false);
+              setMode("choose");
+            }}
             className="text-[var(--muted)] text-sm hover:text-[var(--accent)] mb-4"
           >
             ← Back
@@ -219,6 +229,16 @@ export default function DatasetsPage() {
               Select a .csv or .jsonl file from your computer to add it as a
               dataset. The file&apos;s name becomes the dataset name.
             </p>
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none mb-4">
+              <input
+                type="checkbox"
+                checked={isPrivate}
+                onChange={(e) => setIsPrivate(e.target.checked)}
+                className="w-auto"
+              />
+              <span>Private</span>
+              <InfoTooltip text={PRIVATE_TOOLTIP} />
+            </label>
             <input
               ref={fileInputRef}
               type="file"
@@ -251,7 +271,7 @@ export default function DatasetsPage() {
           >
             ← Back
           </button>
-          <div className="grid grid-cols-12 gap-3 mb-4">
+          <div className="grid grid-cols-12 gap-3 mb-4 items-end">
             <div className="col-span-6">
               <label className="text-xs text-[var(--muted)] block mb-1">
                 Dataset name (saved as .jsonl)
@@ -261,6 +281,18 @@ export default function DatasetsPage() {
                 onChange={(e) => setName(e.target.value)}
                 placeholder="my_eval"
               />
+            </div>
+            <div className="col-span-6">
+              <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={isPrivate}
+                  onChange={(e) => setIsPrivate(e.target.checked)}
+                  className="w-auto"
+                />
+                <span>Private</span>
+                <InfoTooltip text={PRIVATE_TOOLTIP} />
+              </label>
             </div>
           </div>
 

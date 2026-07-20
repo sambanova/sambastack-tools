@@ -111,6 +111,10 @@ class Experiment(BaseModel):
     output_generator: Optional[str] = None
     concurrency: Optional[int] = None
     example_count: Optional[int] = None
+    # True when the experiment lives in the private (gitignored) tree. Derived
+    # from its file location on read; on save it decides which tree to write to.
+    # Not persisted in the experiment JSON — the folder is the source of truth.
+    private: bool = False
 
 
 class DatasetRow(BaseModel):
@@ -121,6 +125,10 @@ class DatasetRow(BaseModel):
     system_prompt: Optional[str] = None
     expected_output: str = ""
     weight: float = 1.0
+    # OpenAI-style tool/function definitions available to the model for this
+    # row (the JSON schemas, not the calls). Passed through to generators that
+    # drive tool-calling evals; ignored by text-only generators.
+    tools: Optional[list[Any]] = None
 
 
 class ResultRow(BaseModel):
@@ -163,3 +171,8 @@ class RunMeta(BaseModel):
     # own rows and preserve the ones the grid doesn't cover, rather than pruning
     # them as orphans. Absent in pre-existing run.json files → defaults False.
     merged: bool = False
+    # True when the run was started for only a subset of the experiment's models
+    # (a "partial" run). Like a merged run, its grid is defined by its own rows —
+    # not the full experiment — so resuming/retrying must rebuild from those rows
+    # and must not re-expand to the models the run deliberately left out.
+    partial: bool = False
