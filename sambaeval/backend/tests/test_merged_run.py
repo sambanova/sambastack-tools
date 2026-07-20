@@ -113,6 +113,84 @@ def test_merged_run_overwrite_regenerates_conflicting_rows(data_dir, make_experi
         assert r.result_id == i
 
 
+def test_merged_run_selected_models_only_runs_chosen(data_dir, make_experiment):
+    # Target holds stale rows for two models; the merge selects only "echo-model"
+    # with overwrite. The chosen model is regenerated; the deselected "A" rows
+    # are preserved verbatim even though the conflict policy is "overwrite".
+    target = _seed(
+        make_experiment,
+        [
+            _row(0, "A", 0, output="STALE"),
+            _row(1, "A", 1, output="STALE"),
+            _row(2, "echo-model", 0, output="STALE"),
+            _row(3, "echo-model", 1, output="STALE"),
+        ],
+        n_rows=2,
+    )
+    exp = _with_models(make_experiment, ["A", "echo-model"], n_rows=2)
+
+    executor.run_experiment(
+        exp,
+        mode="merged",
+        run_id=target,
+        merge_conflict="overwrite",
+        selected_models=["Echo|echo-model"],
+    )
+
+    keys = _by_key(storage.read_run_results("t", target))
+    # Deselected model A: untouched despite the overwrite policy.
+    assert keys[("Echo", "A", 0)].output == "STALE"
+    assert keys[("Echo", "A", 1)].output == "STALE"
+    # Selected echo-model: regenerated (echo → prompt "q{i}", score 1.0).
+    assert keys[("Echo", "echo-model", 0)].output == "q0"
+    assert keys[("Echo", "echo-model", 1)].score == 1.0
+
+
+def test_new_run_selected_models_only_runs_chosen(data_dir, make_experiment):
+    # A fresh run with two models in the experiment but only "echo-model"
+    # selected produces just that model's rows; the run is flagged partial (not
+    # merged) so its subset shape survives a later resume.
+    exp = _with_models(make_experiment, ["A", "echo-model"], n_rows=2)
+
+    result = executor.run_experiment(
+        exp, mode="new", selected_models=["Echo|echo-model"]
+    )
+
+    rows = storage.read_run_results("t", result.run_id)
+    assert {(r.model, r.example_id) for r in rows} == {
+        ("echo-model", 0),
+        ("echo-model", 1),
+    }
+    assert all(r.score == 1.0 for r in rows)
+    meta = storage.read_run_meta("t", result.run_id)
+    assert meta.total == 2 and meta.completed == 2
+    assert meta.partial is True and meta.merged is False
+
+
+def test_new_run_all_models_is_not_partial(data_dir, make_experiment):
+    # Selecting nothing (all models) leaves the run neither partial nor merged.
+    exp = _with_models(make_experiment, ["A", "echo-model"], n_rows=2)
+    result = executor.run_experiment(exp, mode="new")
+    meta = storage.read_run_meta("t", result.run_id)
+    assert meta.partial is False and meta.merged is False
+    assert meta.total == 4
+
+
+def test_resume_subset_new_run_does_not_re_expand(data_dir, make_experiment):
+    # The subset new run above, once interrupted, must resume as the same subset
+    # even though the experiment still lists model "A".
+    exp = _with_models(make_experiment, ["A", "echo-model"], n_rows=2)
+    first = executor.run_experiment(
+        exp, mode="new", selected_models=["Echo|echo-model"]
+    )
+
+    executor.run_experiment(exp, mode="resume", run_id=first.run_id)
+
+    rows = storage.read_run_results("t", first.run_id)
+    # Model A was never added back in by the resume.
+    assert {r.model for r in rows} == {"echo-model"}
+
+
 def test_resume_merged_run_preserves_uncovered_rows(data_dir, make_experiment):
     # A merged run paused partway: model "A" done (preserved), echo-model/0 done,
     # echo-model/1 errored. Flagged merged + paused, like a real paused merge.

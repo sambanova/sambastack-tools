@@ -8,7 +8,7 @@
       "system_prompt": "global",
       "provider_name": "SambaNova",
       "additional_kwargs": {
-        "temperature": 0
+        "temperature": 1
       },
       "input_price": 0.6,
       "output_price": 2.4

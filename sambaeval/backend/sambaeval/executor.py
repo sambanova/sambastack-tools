@@ -57,6 +57,7 @@ def run_experiment(
     mode: str = "new",
     run_id: Optional[str] = None,
     merge_conflict: str = "skip",
+    selected_models: Optional[list[str]] = None,
     on_progress: Optional[Callable[[ExecutorProgress], None]] = None,
     control: Optional[RunControl] = None,
 ) -> RunResult:
@@ -70,13 +71,28 @@ def run_experiment(
     providers = storage.list_providers()
     provider_by_name = {p.name: p for p in providers}
 
-    total_tasks = len(experiment.models) * len(dataset)
+    # A run may target a subset of the experiment's models (default: all),
+    # keyed by "provider|name" so same-named models on different providers stay
+    # distinct. Applies to "new" and "merged" runs; resume/retry never pass it
+    # and instead rebuild from the run's own rows (see the merged branch).
+    model_filter = set(selected_models) if selected_models else None
+
+    def _model_selected(model: ModelConfig) -> bool:
+        return (
+            model_filter is None
+            or f"{model.provider_name}|{model.name}" in model_filter
+        )
+
+    selected_model_count = sum(1 for m in experiment.models if _model_selected(m))
+    total_tasks = selected_model_count * len(dataset)
 
     prior_rows: list[ResultRow] = []
-    # A merged run's rows span more than the current experiment's grid, so its
-    # universe is rebuilt differently (see below). mode=="merged" creates one;
-    # resuming/retrying a run that was previously merged into is also "merged".
-    run_is_merged = False
+    # A merged run and a partial (model-subset) run both have a grid defined by
+    # their own rows rather than the full experiment×dataset grid, so their
+    # universe is rebuilt from those rows (see below). mode=="merged" creates a
+    # merged run; a subset "new" run is partial; resuming/retrying a run that is
+    # either also takes this path.
+    rebuild_from_rows = False
     # "resume" continues an unfinished run; "retry" re-runs the failed rows of
     # any past run (including a completed one). Both carry over the rows that
     # already succeeded and re-dispatch everything else — for a finished run
@@ -100,7 +116,10 @@ def run_experiment(
             raise RuntimeError(f"Run {run_id} has no results to {mode} from")
         prior_rows = existing
         prior_meta = storage.read_run_meta(experiment.id, run_id)
-        run_is_merged = bool(prior_meta and prior_meta.merged)
+        # Merged or partial: either means "rebuild from the run's own rows".
+        rebuild_from_rows = bool(
+            prior_meta and (prior_meta.merged or prior_meta.partial)
+        )
     elif mode == "merged":
         # Generate the current experiment's results into an existing target run,
         # in place. The target's run_id is required; its rows become the prior
@@ -112,9 +131,13 @@ def run_experiment(
         if existing is None:
             raise RuntimeError(f"Target run {run_id} has no results to merge into")
         prior_rows = existing
-        run_is_merged = True
+        rebuild_from_rows = True
     else:
-        meta = storage.create_run(experiment, total_tasks)
+        # A subset selection makes the new run a partial grid; flag it partial so
+        # resuming it later preserves that shape instead of re-expanding.
+        meta = storage.create_run(
+            experiment, total_tasks, partial=model_filter is not None
+        )
         run_id = meta.run_id
 
     control = control or RunControl()
@@ -128,8 +151,8 @@ def run_experiment(
 
     universe: list[ResultRow] = []
     tasks: list[_Task] = []
-    if run_is_merged:
-        # A merged run carries rows beyond the current experiment's grid, so we
+    if rebuild_from_rows:
+        # A merged/partial run carries a grid defined by its rows, so we
         # key off the *existing* rows to keep their result_ids stable, decide per
         # (provider, model, example_id) whether to (re)run, and preserve every
         # row the grid doesn't cover. New keys get a result_id past the current
@@ -143,9 +166,26 @@ def run_experiment(
                 return merge_conflict == "overwrite"
             return existing_row.status != "completed"
 
+        # Which models this pass should consider:
+        #   * mode=="merged": the chosen subset (default all). Deselected models
+        #     generate no tasks and, since their keys are never marked `covered`,
+        #     their existing target rows are preserved by the not-covered sweep.
+        #   * resume/retry: only the models the run already contains, so resuming
+        #     a partial run (a subset merge, or a subset "new" run) rebuilds the
+        #     same grid instead of re-expanding to the full experiment.
+        prior_model_keys = {f"{r.provider}|{r.model}" for r in prior_rows}
+
+        def _model_active(model: ModelConfig) -> bool:
+            key = f"{model.provider_name}|{model.name}"
+            if mode == "merged":
+                return _model_selected(model)
+            return key in prior_model_keys
+
         next_id = max((r.result_id for r in prior_rows), default=0) + 1
         covered: set[str] = set()
         for mi, model in enumerate(experiment.models):
+            if not _model_active(model):
+                continue
             for row in dataset:
                 key = _row_key(model.provider_name, model.name, row.example_id)
                 covered.add(key)
@@ -162,6 +202,11 @@ def run_experiment(
                 universe.append(r)
     else:
         for mi, model in enumerate(experiment.models):
+            # A new run honors the model selection; resume/retry pass none, so
+            # this keeps the full grid for them. Skipped models leave gaps in the
+            # result_id sequence, which is fine — ids only need to be unique.
+            if not _model_selected(model):
+                continue
             for ri, row in enumerate(dataset):
                 result_id = mi * len(dataset) + ri + 1
                 carried = prior_by_key.get(
@@ -189,6 +234,25 @@ def run_experiment(
     generator_cls = load_generator_class(
         resolve_generator_path(experiment.output_generator)
     )
+
+    # Sandbox preflight. Some generators (e.g. SciCode) execute model code in an
+    # external sandbox — a shared Podman VM — that must be up before any task
+    # runs. Prepare it ONCE here (auto-starting/right-sizing the VM) and, if it
+    # can't be made ready, abort the whole run with a clear error instead of
+    # letting every task fail identically with a silent zero score. The call
+    # also clamps concurrency to what the sandbox supports (warning if the run
+    # asked for more). Only when there is actual work to do.
+    prepare_sandbox = getattr(generator_cls, "prepare_sandbox", None)
+    if tasks and callable(prepare_sandbox):
+        try:
+            concurrency = prepare_sandbox(concurrency)
+        except Exception as err:  # noqa: BLE001 — abort the run, surface why
+            unregister_run(experiment.id, run_id)
+            storage.complete_run(experiment.id, run_id, "aborted")
+            raise RuntimeError(
+                f"Cannot prepare the execution sandbox for this experiment: "
+                f"{err}"
+            ) from err
 
     # Prune orphans and lay down carried rows so a mid-run crash is consistent.
     storage.save_run_results(experiment.id, run_id, universe)

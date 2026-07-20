@@ -61,6 +61,13 @@ def ensure_dirs() -> None:
         paths.datasets_dir(),
         paths.results_dir(),
         paths.scorers_dir(),
+        # Mirror the private tree so listing/globbing it is always safe. Empty
+        # dirs are gitignored, so this is harmless on checkouts that don't use
+        # private experiments.
+        paths.private_experiments_dir(),
+        paths.private_datasets_dir(),
+        paths.private_results_dir(),
+        paths.private_scorers_dir(),
     ):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -290,8 +297,11 @@ def _validate_scorer_name(name: str) -> None:
 def get_scorer(name: str) -> Optional[LlmJudgeScorerDef]:
     ensure_dirs()
     _validate_scorer_name(name)
+    path = paths.find_scorer_file(name)
+    if path is None:
+        return None
     try:
-        raw = paths.scorer_file_path(name).read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     import json
@@ -340,18 +350,22 @@ def _reconcile_orphan_run(experiment_id: str, meta: RunMeta) -> RunMeta:
 
 def list_runs(experiment_id: str) -> list[RunMeta]:
     ensure_dirs()
-    d = paths.experiment_runs_dir(experiment_id)
-    try:
-        entries = [e.name for e in d.iterdir()]
-    except OSError:
-        return []
+    # Union both trees: an experiment toggled between public/private may hold
+    # older runs in one tree and newer ones in the other.
+    seen: set[str] = set()
     runs: list[RunMeta] = []
-    for entry in entries:
-        if entry.startswith("."):
+    for d in paths.experiment_runs_dirs(experiment_id):
+        try:
+            entries = [e.name for e in d.iterdir()]
+        except OSError:
             continue
-        meta = _read_run_meta_unlocked(experiment_id, entry)
-        if meta:
-            runs.append(_reconcile_orphan_run(experiment_id, meta))
+        for entry in entries:
+            if entry.startswith(".") or entry in seen:
+                continue
+            seen.add(entry)
+            meta = _read_run_meta_unlocked(experiment_id, entry)
+            if meta:
+                runs.append(_reconcile_orphan_run(experiment_id, meta))
     runs.sort(key=lambda m: m.started_at, reverse=True)
     return runs
 
@@ -533,7 +547,9 @@ def merge_run_results(
     }
 
 
-def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
+def create_run(
+    experiment: Experiment, total_tasks: int, *, partial: bool = False
+) -> RunMeta:
     ensure_dirs()
     run_id = new_run_id()
     d = paths.run_dir(experiment.id, run_id)
@@ -550,6 +566,10 @@ def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
         total=total_tasks,
         completed=0,
         errors=0,
+        # A new run that covers only a subset of the experiment's models is
+        # flagged partial so a later resume rebuilds it from its own rows instead
+        # of re-expanding to every model in the (full) experiment.
+        partial=partial,
     )
     _write_run_meta_unlocked(experiment.id, meta)
     atomic_write(paths.run_results_path(experiment.id, run_id), serialize_rows([]))
@@ -769,49 +789,74 @@ def delete_run(experiment_id: str, run_id: str) -> str:
 def list_experiments() -> list[Experiment]:
     ensure_dirs()
     out: list[Experiment] = []
-    for entry in paths.experiments_dir().iterdir():
-        if entry.name.startswith(".") or entry.suffix != ".json":
+    seen: set[str] = set()
+    for d in paths.experiments_dirs():  # public first; public id shadows private
+        if not d.exists():
             continue
-        try:
-            raw = json.loads(entry.read_text(encoding="utf-8"))
+        is_private = d == paths.private_experiments_dir()
+        for entry in d.iterdir():
+            if entry.name.startswith(".") or entry.suffix != ".json":
+                continue
             slug = entry.stem
-            if raw.get("id") != slug:
-                raw["id"] = slug
-            out.append(Experiment.model_validate(raw))
-        except Exception:
-            continue  # skip malformed files
+            if slug in seen:
+                continue
+            seen.add(slug)
+            try:
+                raw = json.loads(entry.read_text(encoding="utf-8"))
+                if raw.get("id") != slug:
+                    raw["id"] = slug
+                # The folder is the source of truth for privacy.
+                raw["private"] = is_private
+                out.append(Experiment.model_validate(raw))
+            except Exception:
+                continue  # skip malformed files
     out.sort(key=lambda e: e.id)
     return out
 
 
 def get_experiment(experiment_id: str) -> Optional[Experiment]:
     ensure_dirs()
+    path = paths.find_experiment_file(experiment_id)
+    if path is None:
+        return None
     try:
-        raw = paths.experiment_file_path(experiment_id).read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
-        return Experiment.model_validate(json.loads(raw))
+        data = json.loads(raw)
+        data["private"] = paths.experiment_is_private(experiment_id)
+        return Experiment.model_validate(data)
     except Exception:
         return None
 
 
 def save_experiment(experiment: Experiment) -> None:
     ensure_dirs()
-    paths.experiment_file_path(experiment.id).write_text(
-        json.dumps(experiment.model_dump(exclude_none=True), indent=2),
+    private = bool(experiment.private)
+    target = paths.experiment_file_path(experiment.id, private=private)
+    # If the experiment's scope changed, drop the stale file in the other tree
+    # so it isn't listed twice.
+    other = paths.experiment_file_path(experiment.id, private=not private)
+    if other != target:
+        other.unlink(missing_ok=True)
+    # ``private`` is derived from the folder, not stored in the JSON.
+    target.write_text(
+        json.dumps(experiment.model_dump(exclude_none=True, exclude={"private"}), indent=2),
         encoding="utf-8",
     )
 
 
 def delete_experiment(experiment_id: str) -> None:
     ensure_dirs()
-    paths.experiment_file_path(experiment_id).unlink(missing_ok=True)
-    runs = paths.experiment_runs_dir(experiment_id)
-    if runs.exists():
-        import shutil
+    for private in (False, True):
+        paths.experiment_file_path(experiment_id, private=private).unlink(missing_ok=True)
+    import shutil
 
-        shutil.rmtree(runs, ignore_errors=True)
+    for base in (paths.results_dir(), paths.private_results_dir()):
+        runs = base / experiment_id
+        if runs.exists():
+            shutil.rmtree(runs, ignore_errors=True)
 
 
 def next_experiment_id() -> str:
@@ -898,13 +943,20 @@ def _scorer_from_raw(raw: dict, fallback_name: str) -> LlmJudgeScorerDef:
 def list_scorers() -> list[LlmJudgeScorerDef]:
     ensure_dirs()
     out: list[LlmJudgeScorerDef] = []
-    for entry in paths.scorers_dir().iterdir():
-        if entry.name.startswith(".") or entry.suffix != ".json":
+    seen: set[str] = set()
+    for d in paths.scorers_dirs():  # public first; a public name shadows private
+        if not d.exists():
             continue
-        try:
-            out.append(_scorer_from_raw(json.loads(entry.read_text(encoding="utf-8")), entry.stem))
-        except Exception:
-            continue
+        for entry in d.iterdir():
+            if entry.name.startswith(".") or entry.suffix != ".json":
+                continue
+            if entry.stem in seen:
+                continue
+            seen.add(entry.stem)
+            try:
+                out.append(_scorer_from_raw(json.loads(entry.read_text(encoding="utf-8")), entry.stem))
+            except Exception:
+                continue
     out.sort(key=lambda s: s.name)
     return out
 
@@ -912,7 +964,10 @@ def list_scorers() -> list[LlmJudgeScorerDef]:
 def save_scorer(scorer: LlmJudgeScorerDef) -> None:
     ensure_dirs()
     _validate_scorer_name(scorer.name)
-    paths.scorer_file_path(scorer.name).write_text(
+    # Keep an existing scorer in whatever tree it already lives in; new scorers
+    # default to the public tree.
+    path = paths.find_scorer_file(scorer.name) or paths.scorer_file_path(scorer.name)
+    path.write_text(
         json.dumps(scorer.model_dump(), indent=2), encoding="utf-8"
     )
 
@@ -920,7 +975,9 @@ def save_scorer(scorer: LlmJudgeScorerDef) -> None:
 def delete_scorer(name: str) -> None:
     ensure_dirs()
     _validate_scorer_name(name)
-    paths.scorer_file_path(name).unlink(missing_ok=True)
+    path = paths.find_scorer_file(name)
+    if path is not None:
+        path.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -928,22 +985,31 @@ def delete_scorer(name: str) -> None:
 # --------------------------------------------------------------------------- #
 def list_datasets() -> list[str]:
     ensure_dirs()
-    return sorted(
-        e.name
-        for e in paths.datasets_dir().iterdir()
-        if e.name.lower().endswith((".csv", ".jsonl"))
-    )
+    names: set[str] = set()
+    for d in paths.datasets_dirs():
+        if not d.exists():
+            continue
+        for e in d.iterdir():
+            if e.name.lower().endswith((".csv", ".jsonl")):
+                names.add(e.name)
+    return sorted(names)
 
 
 def read_dataset(name: str) -> str:
-    return paths.dataset_file_path(name).read_text(encoding="utf-8")
+    path = paths.find_dataset_file(name) or paths.dataset_file_path(name)
+    return path.read_text(encoding="utf-8")
 
 
-def write_dataset(name: str, content: str) -> None:
+def write_dataset(name: str, content: str, *, private: bool = False) -> None:
     ensure_dirs()
-    paths.dataset_file_path(name).write_text(content, encoding="utf-8")
+    # Keep an existing dataset in its current tree; a new dataset goes to the
+    # private tree when requested, otherwise public.
+    path = paths.find_dataset_file(name) or paths.dataset_file_path(name, private=private)
+    path.write_text(content, encoding="utf-8")
 
 
 def delete_dataset(name: str) -> None:
     ensure_dirs()
-    paths.dataset_file_path(name).unlink(missing_ok=True)
+    path = paths.find_dataset_file(name)
+    if path is not None:
+        path.unlink(missing_ok=True)

@@ -4,6 +4,7 @@ import { apiUrl } from "@/app/lib/api";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ResultsTable, { ModelSummaryTable } from "@/app/components/ResultsTable";
+import { ModelTradeoffChart } from "@/app/components/ModelTradeoffChart";
 import ModelNameCombobox from "@/app/components/ModelNameCombobox";
 import ErrorsTable from "@/app/components/ErrorsTable";
 import type {
@@ -26,6 +27,9 @@ import InfoTooltip from "@/app/components/InfoTooltip";
 
 const OUTPUT_GENERATOR_TOOLTIP =
   "Uses scripts/generators/default_generator.py if unspecified. If you would like to define custom behaviors like using the LLM output to invoke a tool, run a SQL query, or a whole agentic workflow to generate the final output, create a new script in scripts/generators/ that subclasses OutputGenerator from base.py and overrides the generate_output method (see sql_query_execution.py for an example). Set the path to your script in this field.";
+
+const PRIVATE_TOOLTIP =
+  "Store this experiment in the private (gitignored) tree at data/private/experiments/, and write the runs it produces to data/private/results/, so the experiment and its results are never committed. This is independent of the dataset, scorer, and generator it references — those can be public or private; a committed dataset is fine, the experiment and runs still stay local. Set this before the first run so results land in the right place. Saving applies the change (the experiment file moves between trees).";
 
 const DEFAULT_MODEL: ModelConfig = {
   name: "",
@@ -214,6 +218,14 @@ export default function ExperimentPage({
   const [runConflictPolicy, setRunConflictPolicy] = useState<
     "skip" | "overwrite"
   >("skip");
+  // Which of the experiment's models a run (new or merged) should (re)generate.
+  // `null` means all models; a list restricts the run to those models, each
+  // keyed by "provider|name" so two providers serving the same model name stay
+  // distinct. Lets you keep all models saved on the experiment but run only a
+  // subset (e.g. re-run a single model into an existing run).
+  const [selectedModels, setSelectedModels] = useState<
+    string[] | null
+  >(null);
   // Pause dialog state. "waiting" = pause requested, draining in-flight
   // threads; "done" = drain finished, run is paused and resumable. null = no
   // pause in progress.
@@ -736,7 +748,11 @@ export default function ExperimentPage({
   const streamRun = async (
     mode: RunMode,
     explicitRunId?: string,
-    opts?: { useLiveConfig?: boolean; mergeConflict?: "skip" | "overwrite" },
+    opts?: {
+      useLiveConfig?: boolean;
+      mergeConflict?: "skip" | "overwrite";
+      models?: string[];
+    },
   ) => {
     setRunning(true);
     setRunError(null);
@@ -754,6 +770,8 @@ export default function ExperimentPage({
     if (explicitRunId) qs.set("run_id", explicitRunId);
     if (opts?.useLiveConfig) qs.set("config", "live");
     if (opts?.mergeConflict) qs.set("merge_conflict", opts.mergeConflict);
+    if (opts?.models && opts.models.length > 0)
+      qs.set("models", opts.models.join(","));
 
     const abort = new AbortController();
     runAbortRef.current = abort;
@@ -814,7 +832,7 @@ export default function ExperimentPage({
     }
   };
 
-  const runAuto = async () => {
+  const runAuto = async (models?: string[]) => {
     await save();
     setRunError(null);
 
@@ -822,6 +840,7 @@ export default function ExperimentPage({
       concurrency: String(exp.concurrency ?? 4),
       mode: "auto",
     });
+    if (models && models.length > 0) qs.set("models", models.join(","));
     const abort = new AbortController();
     runAbortRef.current = abort;
     const probe = await fetch(apiUrl(`/api/experiments/${id}/run?${qs}`), {
@@ -903,11 +922,33 @@ export default function ExperimentPage({
     }
   };
 
+  // All model keys ("provider|name") on the experiment, and the subset the run
+  // should generate. `selectedModels === null` means "all". Returns null when
+  // every model is chosen (so the run sends no filter = run everything).
+  const allModelKeys = () =>
+    exp.models.map((m) => `${m.provider_name}|${m.name}`);
+  const chosenModelKeys = (): string[] => {
+    const all = allModelKeys();
+    return selectedModels === null
+      ? all
+      : all.filter((k) => selectedModels.includes(k));
+  };
+
   // The Run section's primary action. "New Run" keeps the existing auto/resume
   // flow; "Merged Run" generates the current experiment's results into the
   // chosen target run, checking each (provider, model, example id) for a
-  // conflict before running a prompt.
+  // conflict before running a prompt. Both honor the model selection.
   const runExperiment = async () => {
+    const all = allModelKeys();
+    const chosen = chosenModelKeys();
+    if (chosen.length === 0) {
+      setRunError("Select at least one model to run.");
+      return;
+    }
+    // Send the filter only when it's a real subset — selecting everything is
+    // the same as "all" and needs no param.
+    const models = chosen.length < all.length ? chosen : undefined;
+
     if (runMode === "merged") {
       if (!mergeTargetRunId) {
         setRunError("Choose an existing run to merge into.");
@@ -916,10 +957,26 @@ export default function ExperimentPage({
       await save();
       await streamRun("merged", mergeTargetRunId, {
         mergeConflict: runConflictPolicy,
+        models,
       });
       return;
     }
-    await runAuto();
+    await runAuto(models);
+  };
+
+  // Toggle one model in the run selection, keyed by "provider|name". `null`
+  // (the default) means every model is selected, so the first toggle
+  // materializes the full list and then removes the clicked one.
+  const toggleModel = (key: string) => {
+    setSelectedModels((prev) => {
+      const current =
+        prev === null
+          ? exp.models.map((m) => `${m.provider_name}|${m.name}`)
+          : prev;
+      return current.includes(key)
+        ? current.filter((k) => k !== key)
+        : [...current, key];
+    });
   };
 
   const chooseResume = async () => {
@@ -931,7 +988,17 @@ export default function ExperimentPage({
 
   const chooseNew = async () => {
     setPendingResume(null);
-    await streamRun("new");
+    // Carry the model selection through the resume dialog's "New Run" choice —
+    // otherwise starting fresh here would silently run every model.
+    const all = allModelKeys();
+    const chosen = chosenModelKeys();
+    if (chosen.length === 0) {
+      setRunError("Select at least one model to run.");
+      return;
+    }
+    await streamRun("new", undefined, {
+      models: chosen.length < all.length ? chosen : undefined,
+    });
   };
 
   // Runs that finished with at least one failed row — the candidates for
@@ -1508,6 +1575,18 @@ export default function ExperimentPage({
             spellCheck={false}
           />
         </div>
+        <div className="mt-3">
+          <label className="flex items-center gap-2 text-sm cursor-pointer select-none w-fit">
+            <input
+              type="checkbox"
+              checked={exp.private ?? false}
+              onChange={(e) => update({ private: e.target.checked })}
+              className="w-auto"
+            />
+            <span>Private</span>
+            <InfoTooltip text={PRIVATE_TOOLTIP} align="left" />
+          </label>
+        </div>
       </section>
 
       <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
@@ -1837,6 +1916,34 @@ export default function ExperimentPage({
             />
             Merged Run
           </label>
+        </div>
+
+        <div className="max-w-xl mb-4">
+          <p className="text-sm mb-2">Models to run:</p>
+          <div className="flex flex-col gap-2">
+            {exp.models.map((m, i) => {
+              const key = `${m.provider_name}|${m.name}`;
+              const selected =
+                selectedModels === null || selectedModels.includes(key);
+              return (
+                <label
+                  key={`${key}-${i}`}
+                  className="flex items-center gap-2 text-sm cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={running}
+                    onChange={() => toggleModel(key)}
+                  />
+                  {m.name}
+                  <span className="text-xs text-[var(--muted)]">
+                    ({m.provider_name})
+                  </span>
+                </label>
+              );
+            })}
+          </div>
         </div>
 
         {runMode === "merged" &&
@@ -2251,6 +2358,9 @@ export default function ExperimentPage({
               <h3 className="text-sm font-semibold mb-3">
                 Aggregated Results by Model
               </h3>
+              <div className="mb-4">
+                <ModelTradeoffChart rows={results} prices={displayPrices} />
+              </div>
               <ModelSummaryTable rows={results} prices={displayPrices} />
             </div>
           )}

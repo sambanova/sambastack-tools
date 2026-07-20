@@ -48,6 +48,13 @@ __pycache__/
 # providers.json holds API keys and must never be committed.
 /data/providers.json
 
+# Private (gitignored) trees. An experiment marked "Private" lives under
+# data/private/ along with the dataset, scorer, and run results it touches; the
+# custom generators such experiments use live under scripts/private/. Everything
+# here stays local — see the "Private scope" note in backend/sambaeval/paths.py.
+/data/private/
+/scripts/private/
+
 # SciCode numeric reference data (~1 GB). Downloaded separately and pointed to
 # via test_data_h5_path in scripts/generators/scicode_generator.py — never
 # committed. See the SciCode section of the README.

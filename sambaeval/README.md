@@ -390,7 +390,7 @@ The committed dataset covers all 80 problems. To regenerate it or cut it to a ch
 
 ### Running model code safely
 
-> **The SciCode generator executes model-generated Python.** By default it runs each sub-step inside an **ephemeral, network-less Podman container** (via [llm-sandbox](https://github.com/vndee/llm-sandbox)) — a fresh container per execution, destroyed immediately after. Because sub-steps run sequentially within a row, the number of *concurrent* containers is bounded by the executor's worker pool (default 4), not by the number of rows.
+> **The SciCode generator executes model-generated Python.** By default it runs each sub-step inside an **ephemeral, network-less Podman container** (via [llm-sandbox](https://github.com/vndee/llm-sandbox)) — a fresh container per execution, destroyed immediately after. Sub-steps run sequentially within a row, and the sandbox caps *concurrent* containers at **4** (memory-bound; see "Automatic startup & sizing" below) — a run configured for more parallelism is warned and throttled to 4, not the number of rows.
 
 This path has **no Docker dependency** — it uses Podman, and mounts are passed as plain OCI dicts. (The `docker` Python package is pulled in transitively by `llm-sandbox`, but it's just a client library; no Docker daemon, Desktop, or `~/.docker/config.json` is required.)
 
@@ -409,6 +409,10 @@ printf '{"auths":{}}' > /tmp/empty-auth.json
 podman build --authfile /tmp/empty-auth.json -t scicode-sandbox -f scripts/generators/scicode_sandbox.Dockerfile .
 ```
 
+**Automatic startup & sizing.** On macOS/Windows, Podman runs inside a single shared Linux VM (`podman-machine-default`). Before a run's first sub-step, the backend brings that VM up for you — if it's stopped it is **auto-started** and the run waits until the daemon actually answers; if the VM can't be made ready, the **whole run aborts** with a clear message instead of silently scoring every step `0` (the failure mode that looks like "all my models regressed"). There is only ever **one** VM: it is started once per process, guarded so parallel tasks don't race, and every container runs inside it.
+
+To keep parallel containers from oversubscribing that VM, sizing is bounded: each container is capped at **800 MB** and at most **4** run at once, and the VM is grown to **4 GB** if it's smaller (never above — a VM you've deliberately made larger is left alone). So `4 × 800 MB` fits under 4 GB with headroom for the VM itself. Ask for more concurrency and you'll get a warning and a cap back to 4. On native Linux (no VM — e.g. GitHub Actions), there's nothing to start and this is a no-op; if you'd rather manage Podman yourself, set `SCICODE_AUTO_START_PODMAN=0` and the run aborts (rather than starting anything) when the daemon isn't already up.
+
 **Backend selection** via the `SCICODE_SANDBOX` env var:
 
 | `SCICODE_SANDBOX` | Behaviour |
@@ -416,7 +420,14 @@ podman build --authfile /tmp/empty-auth.json -t scicode-sandbox -f scripts/gener
 | `podman` (default) | Ephemeral Podman container per execution. `test_data.h5` is bind-mounted read-only; `network_mode=none`; all capabilities dropped (`cap_drop=ALL`); memory/pids/CPU and open-file (`ulimits`) caps; execution force-killed after `STEP_TIMEOUT_SECONDS`. Assumes **rootless** Podman, so container-root maps to an unprivileged host UID. (A read-only rootfs, non-root in-container user, and `no-new-privileges` are *not* applied — this podman-py/crun stack can't express them without breaking execution; see the comment in `_run_in_sandbox`.) |
 | `subprocess`      | **Unsandboxed** local execution — dev/CI only, **not a security boundary**. |
 
-Other env vars: `SCICODE_SANDBOX_IMAGE` (image name, default `scicode-sandbox`), `SCICODE_SANDBOX_MEM` (memory limit, default `4g`), and `SCICODE_WITH_BACKGROUND` (include SciCode's per-step scientist background in the prompt when the fixture has it, default on; `0` forces the no-background setting).
+Other env vars:
+
+- `SCICODE_SANDBOX_IMAGE` — image name (default `scicode-sandbox`).
+- `SCICODE_SANDBOX_MEM` — per-container memory limit (default `800m`; see "Automatic startup & sizing" above). Raise it for a heavier problem set, but keep `4 × limit` under the VM's memory or containers will be OOM-killed.
+- `SCICODE_AUTO_START_PODMAN` — auto-start the Podman VM when it's down (default on; `0` to manage Podman yourself, in which case a down daemon aborts the run).
+- `SCICODE_PODMAN_START_TIMEOUT` — seconds to wait for the VM to boot and become reachable (default `180`).
+- `SCICODE_PODMAN_MACHINE` — name of the Podman machine to manage (default `podman-machine-default`).
+- `SCICODE_WITH_BACKGROUND` — include SciCode's per-step scientist background in the prompt when the fixture has it (default on; `0` forces the no-background setting).
 
 Two guards apply on **every** backend as defense-in-depth — **not** a boundary on their own:
 
