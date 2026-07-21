@@ -1,4 +1,4 @@
-import type { CheckpointMapping, PefMapping, PefConfigs } from '../../types/bundle';
+import type { CheckpointMapping, PefConfigs } from '../../types/bundle';
 
 /**
  * Mock data for testing
@@ -27,26 +27,6 @@ export const mockCheckpointMapping: CheckpointMapping = {
     resource_name: 'e5-mistral-7b-instruct',
     model_type: 'embedding',
   },
-};
-
-export const mockPefMapping: PefMapping = {
-  'Meta-Llama-3.1-8B-Instruct': [
-    'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-    'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
-    'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
-  ],
-  'Meta-Llama-3.1-70B-Instruct': [
-    'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
-    'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss2048',
-    'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
-  ],
-  'Qwen2.5-72B-Instruct': [
-    'COE_Qwen2-5-72B-Instruct_131k_bs1_ss4096',
-    'COE_Qwen2-5-72B-Instruct_131k_bs16_ss4096',
-  ],
-  'Llama-4-Maverick-17B-128E-Instruct': [
-    'llama-4-maverick-ss8192-bs1',
-  ],
 };
 
 export const mockPefConfigs: PefConfigs = {

@@ -23,7 +23,7 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'bundle-deployment-state.json');
+const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'model-deployment-state.json');
 
 /**
  * GET - Load the saved bundle deployment state
@@ -109,7 +109,7 @@ export async function GET() {
       try {
         // Check if the deployment exists
         execSync(
-          `kubectl -n ${namespace} get bundledeployment.sambanova.ai ${state.monitoredDeployment} -o name`,
+          `kubectl -n ${namespace} get modeldeployment.sambanova.ai ${state.monitoredDeployment} -o name`,
           {
             encoding: 'utf-8',
             env,

@@ -15,19 +15,25 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-interface Bundle {
+/**
+ * Minimal summary of a `ModelBundle` CR (replaces the old `Bundle`), just
+ * enough for the Model Deployment page's bundle picker: the name to
+ * reference (`spec.bundle` on the ModelDeployment), its validity, and which
+ * models/profiles it combines. There is no `spec.template` in v3 (that was
+ * the V2 BundleTemplate reference) — `modelConfigs` replaces it.
+ */
+interface ModelBundleSummary {
   name: string;
   namespace: string;
-  template: string;
   creationTimestamp: string;
   isValid: boolean;
   validationReason: string;
   validationMessage: string;
-  models: Record<string, unknown>;
+  modelConfigs: Array<{ model: string; profile?: string }>;
 }
 
 /**
- * GET - Fetch all bundles
+ * GET - Fetch all model bundles
  */
 export async function GET() {
   try {
@@ -73,7 +79,7 @@ export async function GET() {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} get bundle.sambanova.ai -o json`, {
+    const output = execSync(`kubectl -n ${namespace} get modelbundle.sambanova.ai -o json`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,
@@ -82,9 +88,9 @@ export async function GET() {
     const data = JSON.parse(output);
 
     // Transform the data to a more usable format
-    const bundles: Bundle[] = data.items.map((item: {
+    const bundles: ModelBundleSummary[] = data.items.map((item: {
       metadata: { name: string; namespace: string; creationTimestamp: string };
-      spec: { template: string; models?: Record<string, unknown> };
+      spec: { modelConfigs?: Array<{ model: string; profile?: string }> };
       status?: {
         conditions?: Array<{
           type?: string;
@@ -100,12 +106,14 @@ export async function GET() {
       return {
         name: item.metadata.name,
         namespace: item.metadata.namespace,
-        template: item.spec.template,
         creationTimestamp: item.metadata.creationTimestamp,
         isValid,
         validationReason: condition?.reason || 'Unknown',
         validationMessage: condition?.message || '',
-        models: item.spec.models || {},
+        modelConfigs: (item.spec.modelConfigs || []).map((mc) => ({
+          model: mc.model,
+          profile: mc.profile,
+        })),
       };
     });
 
@@ -114,7 +122,7 @@ export async function GET() {
       bundles,
     });
   } catch (error) {
-    console.error('Failed to fetch bundles:', error);
+    console.error('Failed to fetch model bundles:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     const stderr = (error && typeof error === 'object' && 'stderr' in error)
       ? String(error.stderr)
@@ -122,7 +130,7 @@ export async function GET() {
     return NextResponse.json(
       {
         success: false,
-        error: 'Failed to fetch bundles',
+        error: 'Failed to fetch model bundles',
         message,
         stderr,
       },

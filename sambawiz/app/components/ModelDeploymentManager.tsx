@@ -39,10 +39,17 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import Tooltip from '@mui/material/Tooltip';
+import yaml from 'js-yaml';
 import DocumentationPanel from './DocumentationPanel';
 import { arePodNamesShortened } from '../utils/pod-name-limits';
 
-interface BundleDeployment {
+/**
+ * A deployed `ModelDeployment` CR summary, as returned by
+ * `/api/model-deployment` (`spec.bundle` is the same field name as the old
+ * V2 `BundleDeployment.spec.bundle`, since SambaWiz always emits a named
+ * `spec.bundle` reference — see v3plan.md Q6).
+ */
+interface ModelDeploymentSummary {
   name: string;
   namespace: string;
   bundle: string;
@@ -57,15 +64,19 @@ interface BundleDeployment {
   };
 }
 
-interface Bundle {
+/**
+ * A `ModelBundle` CR summary, as returned by `/api/model-bundles` — just
+ * enough for the bundle picker (no `template`/`models` — those were V2
+ * `Bundle` fields; v3 combines profiles via `modelConfigs`).
+ */
+interface ModelBundleSummary {
   name: string;
   namespace: string;
-  template: string;
   creationTimestamp: string;
   isValid: boolean;
   validationReason: string;
   validationMessage: string;
-  models: Record<string, unknown>;
+  modelConfigs: Array<{ model: string; profile?: string }>;
 }
 
 interface PodStatusInfo {
@@ -112,9 +123,9 @@ export function getBundleDeploymentStatus(
   return "Deploying";
 }
 
-export default function BundleDeploymentManager() {
+export default function ModelDeploymentManager() {
   const searchParams = useSearchParams();
-  const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
+  const [bundleDeployments, setBundleDeployments] = useState<ModelDeploymentSummary[]>([]);
   const [deploymentToDelete, setDeploymentToDelete] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,7 +134,7 @@ export default function BundleDeploymentManager() {
   const [deleting, setDeleting] = useState<boolean>(false);
 
   // Section 2: Deploy a Bundle
-  const [validBundles, setValidBundles] = useState<Bundle[]>([]);
+  const [validBundles, setValidBundles] = useState<ModelBundleSummary[]>([]);
   const [selectedBundle, setSelectedBundle] = useState<string>('');
   const [deploymentName, setDeploymentName] = useState<string>('');
   const [loadingBundles, setLoadingBundles] = useState<boolean>(false);
@@ -167,7 +178,7 @@ export default function BundleDeploymentManager() {
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Fetch pod status for all deployments
-  const fetchAllDeploymentStatuses = async (deployments: BundleDeployment[]) => {
+  const fetchAllDeploymentStatuses = async (deployments: ModelDeploymentSummary[]) => {
     const statuses: Record<string, {
       cachePod: PodStatusInfo | null;
       defaultPod: PodStatusInfo | null;
@@ -194,14 +205,14 @@ export default function BundleDeploymentManager() {
     setAllDeploymentStatuses(statuses);
   };
 
-  // Fetch bundle deployments
+  // Fetch model deployments (always a fresh kubectl call — never cached)
   const fetchBundleDeployments = async () => {
     setLoading(true);
     setError(null);
     setSuccessMessage(null);
 
     try {
-      const response = await fetch('/api/bundle-deployment');
+      const response = await fetch('/api/model-deployment');
       const data = await response.json();
 
       if (data.success) {
@@ -209,7 +220,7 @@ export default function BundleDeploymentManager() {
         // Fetch pod statuses for all deployments
         await fetchAllDeploymentStatuses(data.bundleDeployments);
       } else {
-        setError(data.error || 'Failed to fetch bundle deployments');
+        setError(data.error || 'Failed to fetch model deployments');
       }
     } catch (err) {
       setError('Failed to connect to the server');
@@ -233,7 +244,7 @@ export default function BundleDeploymentManager() {
   // Load saved state from backend
   const loadSavedState = async () => {
     try {
-      const response = await fetch('/api/bundle-deployment-state');
+      const response = await fetch('/api/model-deployment-state');
       const data = await response.json();
       if (data.success && data.state) {
         // Restore the saved state
@@ -459,17 +470,17 @@ export default function BundleDeploymentManager() {
     };
   }, [monitoredDeployment]);
 
-  // Fetch bundles
+  // Fetch bundles (always a fresh kubectl call — never cached)
   const fetchBundles = async () => {
     setLoadingBundles(true);
 
     try {
-      const response = await fetch('/api/bundles');
+      const response = await fetch('/api/model-bundles');
       const data = await response.json();
 
       if (data.success) {
         // Filter to only valid bundles
-        const valid = data.bundles.filter((b: Bundle) => b.isValid);
+        const valid = data.bundles.filter((b: ModelBundleSummary) => b.isValid);
         setValidBundles(valid);
       } else {
         console.error('Failed to fetch bundles:', data.error);
@@ -481,24 +492,41 @@ export default function BundleDeploymentManager() {
     }
   };
 
-  // Generate BundleDeployment YAML
+  /**
+   * Generate a `ModelDeployment` document (replaces the old hand-built
+   * `BundleDeployment` template-literal string). Serialized with `js-yaml`'s
+   * `dump()` rather than manual indentation.
+   *
+   * Per v3plan.md Q6, SambaWiz always references the bundle by name
+   * (`spec.bundle`) — never inline `spec.models`. All other deployment
+   * knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) carry
+   * over unchanged from the V2 `BundleDeployment` defaults.
+   */
   const generateDeploymentYaml = (bundleName: string, deploymentName: string): string => {
-    return `apiVersion: sambanova.ai/v1alpha1
-kind: BundleDeployment
-metadata:
-  name: ${deploymentName}
-spec:
-  bundle: ${bundleName}
-  groups:
-  - minReplicas: 1
-    name: default
-    qosList:
-    - free
-  owner: no-reply@sambanova.ai
-  secretNames:
-  - sambanova-artifact-reader
-  engineConfig:
-    startupTimeout: 7200`;
+    const modelDeployment = {
+      apiVersion: 'sambanova.ai/v1alpha1',
+      kind: 'ModelDeployment',
+      metadata: {
+        name: deploymentName,
+      },
+      spec: {
+        bundle: bundleName,
+        groups: [
+          {
+            minReplicas: 1,
+            name: 'default',
+            qosList: ['free'],
+          },
+        ],
+        owner: 'no-reply@sambanova.ai',
+        secretNames: ['sambanova-artifact-reader'],
+        engineConfig: {
+          startupTimeout: 7200,
+        },
+      },
+    };
+
+    return yaml.dump(modelDeployment, { lineWidth: -1 }).trimEnd();
   };
 
   // Handle bundle selection
@@ -556,7 +584,7 @@ spec:
 
     // Save the current state before deploying
     try {
-      await fetch('/api/bundle-deployment-state', {
+      await fetch('/api/model-deployment-state', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -640,7 +668,7 @@ spec:
     setSuccessMessage(null);
 
     try {
-      const response = await fetch('/api/bundle-deployment', {
+      const response = await fetch('/api/model-deployment', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: deploymentToDelete }),
@@ -685,7 +713,7 @@ spec:
   };
 
   // Get deployment status display using pod status
-  const getStatusDisplay = (deployment: BundleDeployment) => {
+  const getStatusDisplay = (deployment: ModelDeploymentSummary) => {
     const podStatusInfo = allDeploymentStatuses[deployment.name];
 
     if (!podStatusInfo) {
@@ -782,7 +810,7 @@ spec:
   return (
     <Box>
       {/* Documentation Panel */}
-      <DocumentationPanel docFile="bundle-deployment.md" />
+      <DocumentationPanel docFile="model-deployment.md" />
 
       {/* Section 1: Check for existing Bundle Deployments */}
       <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
@@ -911,7 +939,7 @@ spec:
                 Select a valid bundle to deploy
               </Typography>
               <Tooltip
-                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Bundle Builder page and select 'Remote Environment' as the source."
+                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Model Selection page and select 'Remote Environment' as the source."
                 arrow
               >
                 <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />

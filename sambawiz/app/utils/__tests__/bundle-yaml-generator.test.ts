@@ -1,558 +1,300 @@
-import { generateBundleYaml, generateCheckpointName, generateVisionEmbeddingCheckpointName } from '../bundle-yaml-generator';
-import { mockCheckpointMapping, mockPefConfigs } from './mock-data';
-import type { ConfigSelection } from '../../types/bundle';
+import yaml from 'js-yaml';
+import {
+  formatModelRef,
+  isEmbeddingModel,
+  getEffectiveBatchingConfig,
+  deriveIsDefaultTier,
+  getDisplayName,
+  isSpecDecodingProfile,
+  buildModelBundleObject,
+  generateModelBundleYaml,
+  getHighestVersion,
+  type ModelBundleSelection,
+} from '../bundle-yaml-generator';
+import {
+  mockSingleArchModel,
+  mockMultiArchModel,
+  mockEmbeddingModel,
+  mockSpecDecodingTargetModel,
+  mockSpecDecodingDraftModel,
+  mockContinuousBatchingProfile,
+  mockHighInteractivityProfile,
+  mockSpecDecodingTargetProfile,
+  mockSpecDecodingDraftProfile,
+} from './v3-mock-data';
 
 describe('bundle-yaml-generator', () => {
-  describe('generateCheckpointName', () => {
-    it('should convert model name to uppercase checkpoint name', () => {
-      const result = generateCheckpointName('Meta-Llama-3.1-8B-Instruct');
-      expect(result).toBe('META_LLAMA_3_1_8B_INSTRUCT_CKPT');
-    });
-
-    it('should replace hyphens with underscores', () => {
-      const result = generateCheckpointName('my-model-name');
-      expect(result).toBe('MY_MODEL_NAME_CKPT');
-    });
-
-    it('should replace periods with underscores', () => {
-      const result = generateCheckpointName('model.v1.0');
-      expect(result).toBe('MODEL_V1_0_CKPT');
-    });
-
-    it('should remove special characters', () => {
-      const result = generateCheckpointName('model@name#123');
-      expect(result).toBe('MODEL_NAME_123_CKPT');
-    });
-
-    it('should collapse multiple underscores', () => {
-      const result = generateCheckpointName('model---name');
-      expect(result).toBe('MODEL_NAME_CKPT');
-    });
-
-    it('should remove leading and trailing underscores', () => {
-      const result = generateCheckpointName('-model-name-');
-      expect(result).toBe('MODEL_NAME_CKPT');
+  describe('getHighestVersion', () => {
+    it('picks the numeric-highest version, not lexicographically-highest', () => {
+      const model = {
+        metadata: { name: 'm' },
+        spec: {
+          name: 'M',
+          checkpoints: {
+            arch: {
+              versions: {
+                '1': { source: 'gs://a' },
+                '2': { source: 'gs://b' },
+                '10': { source: 'gs://c' },
+              },
+            },
+          },
+          metadata: { capabilities: [] },
+        },
+      };
+      expect(getHighestVersion(model, 'arch')).toBe('10');
     });
   });
 
-  describe('generateVisionEmbeddingCheckpointName', () => {
-    it('should generate vision embedding checkpoint name and remove -Instruct suffix', () => {
-      const result = generateVisionEmbeddingCheckpointName('Llama-4-Maverick-17B-128E-Instruct');
-      expect(result).toBe('LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT');
+  describe('formatModelRef', () => {
+    it('formats single-arch models as crname:version', () => {
+      expect(formatModelRef(mockSingleArchModel, 'e5-mistral')).toBe('e5-mistral-7b-instruct:1');
     });
 
-    it('should remove _INSTRUCT suffix for models ending with _instruct', () => {
-      const result = generateVisionEmbeddingCheckpointName('Model_Name_Instruct');
-      expect(result).toBe('MODEL_NAME_VISION_EMBD_CKPT');
-    });
-
-    it('should handle model names without instruct suffix', () => {
-      const result = generateVisionEmbeddingCheckpointName('Custom-Model');
-      expect(result).toBe('CUSTOM_MODEL_VISION_EMBD_CKPT');
-    });
-
-    it('should remove -instruct suffix after transformation', () => {
-      const result = generateVisionEmbeddingCheckpointName('my-model.v1-instruct');
-      expect(result).toBe('MY_MODEL_V1_VISION_EMBD_CKPT');
+    it('formats multi-arch models as crname:arch:version', () => {
+      expect(formatModelRef(mockMultiArchModel, 'llama-4-maverick')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick:1'
+      );
+      expect(formatModelRef(mockMultiArchModel, 'llama-4-maverick-v2')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick-v2:1'
+      );
     });
   });
 
-  describe('generateBundleYaml', () => {
-    const selectedConfigs: ConfigSelection[] = [
-      {
-        modelName: 'Meta-Llama-3.1-8B-Instruct',
-        ss: '1024',
-        bs: '1',
-        pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-      },
-      {
-        modelName: 'Meta-Llama-3.1-8B-Instruct',
-        ss: '2048',
-        bs: '1',
-        pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
-      },
-    ];
-
-    it('should generate valid YAML structure', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('apiVersion: sambanova.ai/v1alpha1');
-      expect(yaml).toContain('kind: BundleTemplate');
-      expect(yaml).toContain('kind: Bundle');
+  describe('isEmbeddingModel', () => {
+    it('is true when capabilities includes "embeddings"', () => {
+      expect(isEmbeddingModel(mockEmbeddingModel)).toBe(true);
+      expect(isEmbeddingModel(mockSingleArchModel)).toBe(true);
     });
 
-    it('should include bundle name in metadata', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'my-bundle'
-      );
+    it('is false otherwise', () => {
+      expect(isEmbeddingModel(mockMultiArchModel)).toBe(false);
+      expect(isEmbeddingModel(mockSpecDecodingTargetModel)).toBe(false);
+    });
+  });
 
-      expect(yaml).toContain('name: bt-my-bundle');
-      expect(yaml).toContain('name: b-my-bundle');
+  describe('getEffectiveBatchingConfig', () => {
+    it('prefers spec.defaultBatchingConfig over status.batchingConfig', () => {
+      const result = getEffectiveBatchingConfig(mockContinuousBatchingProfile);
+      expect(result).toEqual(mockContinuousBatchingProfile.spec.defaultBatchingConfig);
     });
 
-    it('should include model configurations', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('Meta-Llama-3.1-8B-Instruct:');
-      expect(yaml).toContain('pef: COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024:1');
-    });
-
-    it('should group configs by SS', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '16',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '2048',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
-        },
-      ];
-
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('1024:');
-      expect(yaml).toContain('2048:');
-    });
-
-    it('should include PEF names with versions', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('pef: COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024:1');
-      expect(yaml).toContain('pef: COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048:1');
-    });
-
-    it('should include checkpoint source path', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        'gs://my-bucket/'
-      );
-
-      expect(yaml).toContain('source: gs://my-bucket//checkpoints/llama-3.1-8b');
-    });
-
-    it('should use empty source when checkpointsDir is not provided', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('source: /checkpoints/llama-3.1-8b');
-    });
-
-    it('should set toolSupport to true for all checkpoints', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('toolSupport: true');
-    });
-
-    it('should include owner and secretNames', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('owner: no-reply@sambanova.ai');
-      expect(yaml).toContain('secretNames:');
-      expect(yaml).toContain('- sambanova-artifact-reader');
-    });
-
-    it('should handle multiple models', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Qwen2.5-72B-Instruct',
-          ss: '4096',
-          bs: '1',
-          pefName: 'COE_Qwen2-5-72B-Instruct_131k_bs1_ss4096',
-        },
-      ];
-
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      expect(yaml).toContain('Meta-Llama-3.1-8B-Instruct:');
-      expect(yaml).toContain('Qwen2.5-72B-Instruct:');
-      expect(yaml).toContain('META_LLAMA_3_1_8B_INSTRUCT_CKPT:');
-      expect(yaml).toContain('QWEN2_5_72B_INSTRUCT_CKPT:');
-    });
-
-    it('should handle speculative decoding with draft models using default_config_values', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
-          bs: '16',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '16',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
-        },
-      ];
-
-      const draftModels = {
-        'Meta-Llama-3.1-70B-Instruct': 'Meta-Llama-3.1-8B-Instruct',
+    it('falls back to status.batchingConfig when spec has none', () => {
+      const profile = {
+        metadata: { name: 'p' },
+        spec: { model_arch: 'a', features: [], pefs: [] },
+        status: { batchingConfig: { '8k': { batch_sizes: [1] } } },
       };
-
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        '',
-        draftModels
-      );
-
-      // Should use default_config_values when multiple configs all have matching draft configs
-      expect(yaml).toContain('spec_decoding:');
-      expect(yaml).toContain('default_config_values:');
-      expect(yaml).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
+      expect(getEffectiveBatchingConfig(profile)).toEqual({ '8k': { batch_sizes: [1] } });
     });
 
-    it('should handle speculative decoding with per-config spec_decoding when not all configs have draft', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
-          bs: '16',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs16_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-      ];
+    it('falls back to {} when neither is present', () => {
+      const profile = { metadata: { name: 'p' }, spec: { model_arch: 'a', features: [], pefs: [] } };
+      expect(getEffectiveBatchingConfig(profile)).toEqual({});
+    });
+  });
 
-      const draftModels = {
-        'Meta-Llama-3.1-70B-Instruct': 'Meta-Llama-3.1-8B-Instruct',
+  describe('deriveIsDefaultTier', () => {
+    const config = {
+      '8k': { batch_sizes: [2, 4] as number[] },
+      '32k': { batch_sizes: [2] as number[] },
+      '128k': { batch_sizes: [1] as number[] },
+    };
+
+    it('sets is_default on the smallest tier for embedding models', () => {
+      const result = deriveIsDefaultTier(config, true);
+      expect(result['8k'].is_default).toBe(true);
+      expect(result['32k'].is_default).toBeUndefined();
+      expect(result['128k'].is_default).toBeUndefined();
+    });
+
+    it('never sets is_default for non-embedding models', () => {
+      const result = deriveIsDefaultTier(config, false);
+      expect(result['8k'].is_default).toBeUndefined();
+      expect(result['32k'].is_default).toBeUndefined();
+      expect(result['128k'].is_default).toBeUndefined();
+    });
+
+    it('strips any pre-existing is_default when not embedding', () => {
+      const withDefault = { '8k': { batch_sizes: [1] as number[], is_default: true } };
+      const result = deriveIsDefaultTier(withDefault, false);
+      expect(result['8k'].is_default).toBeUndefined();
+    });
+
+    it('handles bare-int and t-suffixed tier keys', () => {
+      const mixed = { '448': { batch_sizes: [1] as number[] }, '10t': { batch_sizes: [2] as number[] } };
+      const result = deriveIsDefaultTier(mixed, true);
+      expect(result['10t'].is_default).toBe(true);
+      expect(result['448'].is_default).toBeUndefined();
+    });
+
+    it('returns an empty object for an empty config', () => {
+      expect(deriveIsDefaultTier({}, true)).toEqual({});
+    });
+  });
+
+  describe('getDisplayName', () => {
+    it('maps continuous_batching to "High Throughput"', () => {
+      expect(getDisplayName(mockContinuousBatchingProfile, [mockContinuousBatchingProfile])).toBe(
+        'High Throughput'
+      );
+    });
+
+    it('maps empty features to "High Interactivity"', () => {
+      expect(getDisplayName(mockHighInteractivityProfile, [mockHighInteractivityProfile])).toBe(
+        'High Interactivity'
+      );
+    });
+
+    it('leaves a lone profile of a type unnumbered', () => {
+      const siblings = [mockHighInteractivityProfile, mockContinuousBatchingProfile];
+      expect(getDisplayName(mockHighInteractivityProfile, siblings)).toBe('High Interactivity');
+      expect(getDisplayName(mockContinuousBatchingProfile, siblings)).toBe('High Throughput');
+    });
+
+    it('numbers profiles of the same type in listing order', () => {
+      const hi2 = {
+        metadata: { name: 'hi-2' },
+        spec: { model_arch: 'a', features: [], pefs: [] },
       };
+      const siblings = [mockHighInteractivityProfile, hi2];
+      expect(getDisplayName(mockHighInteractivityProfile, siblings)).toBe('High Interactivity 1');
+      expect(getDisplayName(hi2, siblings)).toBe('High Interactivity 2');
+    });
+  });
 
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        '',
-        draftModels
-      );
-
-      // Should have spec_decoding but NOT default_config_values (since not all configs have draft)
-      expect(yaml).toContain('spec_decoding:');
-      expect(yaml).not.toContain('default_config_values:');
-
-      // Should have inline spec_decoding for the config with draft
-      const targetSection = yaml.split('Meta-Llama-3.1-70B-Instruct:')[1].split('Meta-Llama-3.1-8B-Instruct:')[0];
-      expect(targetSection).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
+  describe('isSpecDecodingProfile', () => {
+    it('is true when a pef name contains "sd"', () => {
+      expect(isSpecDecodingProfile(mockSpecDecodingTargetProfile)).toBe(true);
     });
 
-    it('should not include spec_decoding for models without draft models', () => {
-      const yaml = generateBundleYaml(
-        selectedConfigs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
+    it('is false when no pef name contains "sd"', () => {
+      expect(isSpecDecodingProfile(mockContinuousBatchingProfile)).toBe(false);
+      expect(isSpecDecodingProfile(mockHighInteractivityProfile)).toBe(false);
+      expect(isSpecDecodingProfile(mockSpecDecodingDraftProfile)).toBe(false);
+    });
+  });
 
-      expect(yaml).not.toContain('spec_decoding:');
+  describe('buildModelBundleObject / generateModelBundleYaml', () => {
+    it('emits one modelConfigs entry per selection, with full batchingConfig always present', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
+      ];
+      const bundle = buildModelBundleObject('my-bundle', selections);
+
+      expect(bundle.metadata.name).toBe('my-bundle');
+      expect(bundle.spec.modelConfigs).toHaveLength(1);
+      const entry = bundle.spec.modelConfigs[0];
+      expect(entry.model).toBe('e5-mistral-7b-instruct:1');
+      expect(entry.profile).toBe('gpt-oss-fp8-dyt');
+      expect(entry.batchingConfig).toBeDefined();
+      expect(entry.modelSettings).toBeUndefined();
     });
 
-    it('should not add spec_decoding when draft model is "skip"', () => {
-      const configs: ConfigSelection[] = [
+    it('applies is_default to the smallest tier only for embedding models', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockEmbeddingModel, arch: 'gte-qwen2', profile: mockHighInteractivityProfile },
+      ];
+      const bundle = buildModelBundleObject('embed-bundle', selections);
+      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig!;
+      expect(batchingConfig['8k'].is_default).toBe(true);
+      expect(batchingConfig['32k'].is_default).toBeUndefined();
+      expect(batchingConfig['64k'].is_default).toBeUndefined();
+      expect(batchingConfig['128k'].is_default).toBeUndefined();
+    });
+
+    it('never sets is_default for non-embedding models', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockMultiArchModel, arch: 'llama-4-maverick', profile: mockHighInteractivityProfile },
+      ];
+      const bundle = buildModelBundleObject('non-embed-bundle', selections);
+      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig!;
+      Object.values(batchingConfig).forEach((tier) => expect(tier.is_default).toBeUndefined());
+    });
+
+    it('uses batchingConfigOverride instead of the profile default when present', () => {
+      const override = { '8k': { batch_sizes: [1] as number[] } };
+      const selections: ModelBundleSelection[] = [
         {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
+          model: mockSingleArchModel,
+          arch: 'e5-mistral',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: override,
         },
       ];
-
-      const draftModels = {
-        'Meta-Llama-3.1-70B-Instruct': 'skip',
-      };
-
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        '',
-        draftModels
-      );
-
-      expect(yaml).not.toContain('spec_decoding:');
+      const bundle = buildModelBundleObject('override-bundle', selections);
+      // The override's batch_sizes ([1], not the profile default) is what's used. mockSingleArchModel
+      // is an embedding model, so is_default:true is auto-added to the smallest (only) tier per Q2.
+      expect(bundle.spec.modelConfigs[0].batchingConfig).toEqual({ '8k': { batch_sizes: [1], is_default: true } });
     });
 
-    it('should only add spec_decoding when matching draft config exists', () => {
-      const configs: ConfigSelection[] = [
+    it('builds specDecodingPairs with bare crnames and no experts field, and marks the draft routable:false', () => {
+      const selections: ModelBundleSelection[] = [
         {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '4k',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss1024',
+          model: mockSpecDecodingDraftModel,
+          arch: 'llama-3p2-1b',
+          profile: mockSpecDecodingDraftProfile,
+          isDraftFor: mockSpecDecodingTargetModel.metadata.name,
         },
         {
-          modelName: 'Meta-Llama-3.1-70B-Instruct',
-          ss: '8k',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-70B-Instruct_32k_bs1_ss2048',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '4k',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+          model: mockSpecDecodingTargetModel,
+          arch: 'llama-3p3-70b',
+          profile: mockSpecDecodingTargetProfile,
         },
       ];
+      const bundle = buildModelBundleObject('spec-decode-bundle', selections);
 
-      const draftModels = {
-        'Meta-Llama-3.1-70B-Instruct': 'Meta-Llama-3.1-8B-Instruct',
-      };
+      expect(bundle.spec.specDecodingPairs).toEqual([
+        { draft: 'meta-llama-3-2-1b-instruct', target: 'meta-llama-3-3-70b-instruct' },
+      ]);
+      expect(bundle.spec.specDecodingPairs?.[0]).not.toHaveProperty('experts');
 
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        '',
-        draftModels
-      );
-
-      // Only the 4k SS should have spec_decoding (it has a matching draft config)
-      expect(yaml).toContain('spec_decoding:');
-
-      // Get the target model section
-      const targetModelSection = yaml.split('Meta-Llama-3.1-70B-Instruct:')[1].split('Meta-Llama-3.1-8B-Instruct:')[0];
-
-      // The 4k SS has only 1 config, so should use per-config spec_decoding (not default_config_values)
-      expect(targetModelSection).toContain('4k:');
-      expect(targetModelSection).toContain('spec_decoding:');
-      expect(targetModelSection).toContain('draft_model: Meta-Llama-3.1-8B-Instruct');
-
-      // The 8k SS should NOT have spec_decoding (no matching draft config)
-      expect(targetModelSection).toContain('8k:');
-      const section8k = targetModelSection.split('8k:')[1];
-      expect(section8k).not.toContain('spec_decoding:');
+      const draftEntry = bundle.spec.modelConfigs.find((c) => c.model.startsWith('meta-llama-3-2-1b-instruct'));
+      const targetEntry = bundle.spec.modelConfigs.find((c) => c.model.startsWith('meta-llama-3-3-70b-instruct'));
+      expect(draftEntry?.modelSettings).toEqual({ routable: false });
+      expect(targetEntry?.modelSettings).toBeUndefined();
     });
 
-    it('should group configs by sequence size (SS)', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '16',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '2048',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
-        },
+    it('omits specDecodingPairs entirely when there are none', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
       ];
-
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      // Should have two SS groups
-      expect(yaml).toContain('1024:');
-      expect(yaml).toContain('2048:');
-
-      // Both PEFs should appear in the YAML (they'll be under the same 1024 SS group)
-      expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024');
-      expect(yaml).toContain('COE_Meta-Llama-3-1-8B-Instruct_32k_bs16_ss1024');
+      const bundle = buildModelBundleObject('no-sd-bundle', selections);
+      expect(bundle.spec.specDecodingPairs).toBeUndefined();
     });
 
-    it('should include vision embedding checkpoint when present in checkpoint mapping', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Llama-4-Maverick-17B-128E-Instruct',
-          ss: '8k',
-          bs: '1',
-          pefName: 'llama-4-maverick-ss8192-bs1',
-        },
+    it('generates a ModelBundle YAML document with apiVersion/kind/metadata.name and no secretNames', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
       ];
+      const yamlStr = generateModelBundleYaml('yaml-bundle', selections);
+      const parsed = yaml.load(yamlStr) as Record<string, unknown>;
 
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle',
-        'gs://my-bucket/'
-      );
-
-      // Should include the main checkpoint
-      expect(yaml).toContain('LLAMA_4_MAVERICK_17B_128E_INSTRUCT_CKPT:');
-      expect(yaml).toContain('source: gs://my-bucket//checkpoints/llama-4-maverick');
-
-      // Should include the vision embedding checkpoint (without _INSTRUCT suffix)
-      expect(yaml).toContain('LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT:');
-      expect(yaml).toContain('source: gs://my-bucket//checkpoints/llama-4-maverick-vision');
-
-      // Should include vision_embedding_checkpoint reference in the model
-      expect(yaml).toContain('Llama-4-Maverick-17B-128E-Instruct:');
-      expect(yaml).toContain('checkpoint: LLAMA_4_MAVERICK_17B_128E_INSTRUCT_CKPT');
-      expect(yaml).toContain('vision_embedding_checkpoint: LLAMA_4_MAVERICK_17B_128E_VISION_EMBD_CKPT');
+      expect(parsed.apiVersion).toBe('sambanova.ai/v1alpha1');
+      expect(parsed.kind).toBe('ModelBundle');
+      expect((parsed.metadata as { name: string }).name).toBe('yaml-bundle');
+      expect(parsed.spec).not.toHaveProperty('secretNames');
+      expect(yamlStr).not.toMatch(/secretNames/);
     });
 
-    it('should not include vision embedding checkpoint when not present in checkpoint mapping', () => {
-      const configs: ConfigSelection[] = [
+    it('matches the field order from the worked spec-decoding example (model, profile, modelSettings, batchingConfig)', () => {
+      const selections: ModelBundleSelection[] = [
         {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
+          model: mockSpecDecodingDraftModel,
+          arch: 'llama-3p2-1b',
+          profile: mockSpecDecodingDraftProfile,
+          isDraftFor: mockSpecDecodingTargetModel.metadata.name,
         },
       ];
+      const yamlStr = generateModelBundleYaml('order-bundle', selections);
+      const modelIdx = yamlStr.indexOf('model:');
+      const profileIdx = yamlStr.indexOf('profile:');
+      const modelSettingsIdx = yamlStr.indexOf('modelSettings:');
+      const batchingConfigIdx = yamlStr.indexOf('batchingConfig:');
 
-      const yaml = generateBundleYaml(
-        configs,
-        mockCheckpointMapping,
-        mockPefConfigs,
-        'test-bundle'
-      );
-
-      // Should include the main checkpoint
-      expect(yaml).toContain('META_LLAMA_3_1_8B_INSTRUCT_CKPT:');
-
-      // Should NOT include vision embedding checkpoint
-      expect(yaml).not.toContain('VISION_EMBD_CKPT');
-      expect(yaml).not.toContain('vision_embedding_checkpoint:');
-    });
-
-    it('should rename smallest SS expert key to "default" for embedding models', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'E5-Mistral-7B-Instruct',
-          ss: '4k',
-          bs: '1',
-          pefName: 'E5-Mistral-7B-Instruct_4k_bs1',
-        },
-        {
-          modelName: 'E5-Mistral-7B-Instruct',
-          ss: '8k',
-          bs: '1',
-          pefName: 'E5-Mistral-7B-Instruct_8k_bs1',
-        },
-      ];
-
-      const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
-
-      // Smallest SS (4k) should be renamed to 'default'
-      expect(yaml).toContain('default:');
-      expect(yaml).not.toContain('4k:');
-      // Larger SS key stays as-is
-      expect(yaml).toContain('8k:');
-    });
-
-    it('should NOT rename smallest SS expert key to "default" for non-embedding models', () => {
-      const configs: ConfigSelection[] = [
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '1024',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss1024',
-        },
-        {
-          modelName: 'Meta-Llama-3.1-8B-Instruct',
-          ss: '2048',
-          bs: '1',
-          pefName: 'COE_Meta-Llama-3-1-8B-Instruct_32k_bs1_ss2048',
-        },
-      ];
-
-      const yaml = generateBundleYaml(configs, mockCheckpointMapping, mockPefConfigs, 'test-bundle');
-
-      // SS keys should remain unchanged
-      expect(yaml).toContain('1024:');
-      expect(yaml).toContain('2048:');
-      expect(yaml).not.toContain('default:');
+      expect(modelIdx).toBeLessThan(profileIdx);
+      expect(profileIdx).toBeLessThan(modelSettingsIdx);
+      expect(modelSettingsIdx).toBeLessThan(batchingConfigIdx);
     });
   });
 });

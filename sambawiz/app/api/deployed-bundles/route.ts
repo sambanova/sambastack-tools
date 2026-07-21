@@ -48,7 +48,7 @@ export async function GET() {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} get bundles -o yaml`, {
+    const output = execSync(`kubectl -n ${namespace} get modelbundle.sambanova.ai -o yaml`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,

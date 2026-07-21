@@ -29,7 +29,7 @@ describe('Playground Page', () => {
     renderWithProviders(<Playground />);
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
+      expect(global.fetch).toHaveBeenCalledWith('/api/model-deployment');
       expect(global.fetch).toHaveBeenCalledWith('/api/environments');
     });
   });

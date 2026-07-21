@@ -16,7 +16,7 @@ interface BundleBuilderState {
   draftModels: { [modelName: string]: string };
 }
 
-const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'bundle-builder-state.json');
+const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'model-selection-state.json');
 
 /**
  * GET - Load the saved bundle builder state

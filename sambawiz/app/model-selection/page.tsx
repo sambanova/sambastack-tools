@@ -19,11 +19,11 @@ import {
   Alert,
 } from '@mui/material';
 import AppLayout from '../components/AppLayout';
-import BundleForm from '../components/BundleForm';
+import ModelSelection from '../components/ModelSelection';
 
 type BundleSource = 'savedArtifacts' | 'deployedBundles';
 
-export default function BundleBuilderPage() {
+export default function ModelSelectionPage() {
   const [openDialog, setOpenDialog] = useState(false);
   const [bundleSource, setBundleSource] = useState<BundleSource>('savedArtifacts');
 
@@ -135,13 +135,12 @@ export default function BundleBuilderPage() {
     setLoadError(null);
   };
 
-  const dispatchLoadAndClose = (data: { bundleName: string; selectedModels: string[]; selectedConfigs: unknown[]; draftModels: Record<string, string> }) => {
+  const dispatchLoadAndClose = (data: { bundleName: string; modelConfigs: unknown[]; specDecodingPairs: unknown[] }) => {
     window.dispatchEvent(new CustomEvent('loadBundleState', {
       detail: {
         bundleName: data.bundleName,
-        selectedModels: data.selectedModels,
-        selectedConfigs: data.selectedConfigs,
-        draftModels: data.draftModels
+        modelConfigs: data.modelConfigs,
+        specDecodingPairs: data.specDecodingPairs,
       }
     }));
     handleCloseDialog();
@@ -184,7 +183,7 @@ export default function BundleBuilderPage() {
     <AppLayout>
       <Box>
         <Typography variant="h4" component="h1" gutterBottom sx={{ fontWeight: 600, mb: 1 }}>
-          Bundle Builder
+          Model Selection
         </Typography>
         <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
           Create model bundles with multiple model configurations or{' '}
@@ -211,7 +210,7 @@ export default function BundleBuilderPage() {
           {' '}an existing bundle
         </Typography>
 
-        <BundleForm />
+        <ModelSelection />
       </Box>
 
       {/* Load Existing Bundle Dialog */}

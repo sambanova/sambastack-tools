@@ -1,13 +1,13 @@
-# Bundle Deployment Page
+# Model Deployment Page
 
 ## Overview
 
-The Bundle Deployment page manages the deployment lifecycle of validated bundles. It allows you to view existing deployments, create new deployments, monitor deployment status, and view pod logs in real-time.
+The Model Deployment page manages the deployment lifecycle of validated bundles. It allows you to view existing deployments, create new deployments, monitor deployment status, and view pod logs in real-time.
 
 ## What Happens on This Page
 
 ### Section 1: Check Existing Bundle Deployments
-- Lists all BundleDeployment resources in your namespace
+- Lists all ModelDeployment resources in your namespace
 - Shows deployment status (Deployed, Deploying, Not Deployed)
 - Allows you to delete deployments
 - Click "Status" to monitor a specific deployment
@@ -28,56 +28,56 @@ The Bundle Deployment page manages the deployment lifecycle of validated bundles
 
 All commands use the namespace configured on the Home page.
 
-### 1. List Bundle Deployments
+### 1. List Model Deployments
 ```bash
-kubectl -n <namespace> get bundledeployment.sambanova.ai -o json
+kubectl -n <namespace> get modeldeployment.sambanova.ai -o json
 ```
-**Purpose**: Retrieves all BundleDeployment resources in the namespace
+**Purpose**: Retrieves all ModelDeployment resources in the namespace
 **When**: On page load and when clicking "Refresh"
 **Namespace**: Uses the namespace from your current environment configuration
 **What It Does**: Lists all deployed bundles with their status and metadata
 
-### 2. Get BundleDeployment Details
+### 2. Get ModelDeployment Details
 ```bash
-kubectl get bundledeployment.sambanova.ai <deployment-name> -n <namespace> -o json
+kubectl get modeldeployment.sambanova.ai <deployment-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves detailed information about a specific deployment
 **When**: When checking which models are deployed
 **Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Gets the bundle reference and deployment spec
+**What It Does**: Gets the bundle reference (`spec.bundle`) and deployment spec
 
 ### 3. Get Bundle Details
 ```bash
-kubectl get bundle.sambanova.ai <bundle-name> -n <namespace> -o json
+kubectl get modelbundle.sambanova.ai <bundle-name> -n <namespace> -o json
 ```
 **Purpose**: Retrieves the bundle specification including models
 **When**: When fetching available models for the Playground
 **Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Gets the list of models included in the bundle
+**What It Does**: Gets the list of models included in the bundle (`spec.modelConfigs[]`)
 
 ### 4. List Valid Bundles
 ```bash
-kubectl -n <namespace> get bundle.sambanova.ai -o json
+kubectl -n <namespace> get modelbundle.sambanova.ai -o json
 ```
-**Purpose**: Lists all Bundle resources to show validated bundles available for deployment
+**Purpose**: Lists all ModelBundle resources to show validated bundles available for deployment
 **When**: On page load
 **Namespace**: Uses the namespace from your current environment configuration
 **What It Does**: Retrieves all bundles and filters for those with validation status "ValidationSucceeded"
 
-### 5. Apply BundleDeployment
+### 5. Apply ModelDeployment
 ```bash
-kubectl -n <namespace> apply -f <bundle-deployment>.yaml
+kubectl -n <namespace> apply -f <model-deployment>.yaml
 ```
-**Purpose**: Creates a new BundleDeployment resource
+**Purpose**: Creates a new ModelDeployment resource
 **When**: When you click "Deploy"
 **Namespace**: Uses the namespace from your current environment configuration
 **What It Does**: Submits the deployment to the cluster, triggering pod creation
 
-### 6. Delete BundleDeployment
+### 6. Delete ModelDeployment
 ```bash
-kubectl -n <namespace> delete bundledeployment.sambanova.ai <deployment-name>
+kubectl -n <namespace> delete modeldeployment.sambanova.ai <deployment-name>
 ```
-**Purpose**: Removes a BundleDeployment and its associated pods
+**Purpose**: Removes a ModelDeployment and its associated pods
 **When**: When you click "Delete" on a deployment
 **Namespace**: Uses the namespace from your current environment configuration
 **What It Does**: Tears down the deployment and all associated resources
@@ -109,9 +109,34 @@ kubectl -n <namespace> logs <pod-name> -c inf --tail=5
 **Namespace**: Uses the namespace from your current environment configuration
 **Pod Name**: `inf-<deployment-name>-q-default-n-0`
 
+> **Note**: For deployment names long enough that Kubernetes naming limits would be exceeded, the inference operator truncates the name and appends a short hash to the pod/StatefulSet names above. SambaWiz resolves the real, possibly-shortened pod names from the cluster server-side, so status and log monitoring keep working correctly even when the displayed pod name differs from the naive `inf-<deployment-name>-...` pattern shown here.
+
+## Deploying a Bundle
+
+A ModelDeployment always references its bundle by name (`spec.bundle: <bundle-name>`) — it never inlines model definitions. The YAML generated by this page looks like:
+
+```yaml
+apiVersion: sambanova.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: <deployment-name>
+spec:
+  bundle: <bundle-name>
+  groups:
+    - minReplicas: 1
+      name: default
+      qosList:
+        - free
+  owner: no-reply@sambanova.ai
+  secretNames:
+    - sambanova-artifact-reader
+  engineConfig:
+    startupTimeout: 7200
+```
+
 ## Pod Architecture
 
-Each BundleDeployment creates two main pods:
+Each ModelDeployment creates two main pods:
 
 1. **Cache Pod** (`inf-<deployment-name>-cache-0`):
    - Loads model weights into memory

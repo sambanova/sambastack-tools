@@ -448,6 +448,19 @@ export default function Home() {
         return;
       }
 
+      // Generate model_profiles.json from the cluster's ModelProfile resources
+      // (must run after update-config so it uses the newly selected environment)
+      const profilesResponse = await fetch('/api/generate-model-profiles', {
+        method: 'POST',
+      });
+      const profilesData = await profilesResponse.json();
+
+      if (!profilesData.success) {
+        setSaveError(`Failed to generate model profiles from cluster: ${profilesData.error || 'Unknown error'}`);
+        setSaving(false);
+        return;
+      }
+
       setSaveSuccess(true);
       // Clear playground state so it re-fetches against the new environment
       fetch('/api/playground-state', { method: 'DELETE' }).catch(() => {});

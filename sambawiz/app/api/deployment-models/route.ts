@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { parseModelRef } from '../../utils/parse-bundle-yaml';
+import type { CheckpointMapping } from '../../types/bundle';
 
 interface KubeconfigEntry {
   file: string;
@@ -10,7 +12,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -69,11 +70,11 @@ export async function GET(request: NextRequest) {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    // Step 1: Get the BundleDeployment to extract the bundle name
-    let bundleDeploymentOutput: string;
+    // Step 1: Get the ModelDeployment to extract the bundle name
+    let modelDeploymentOutput: string;
     try {
-      bundleDeploymentOutput = execSync(
-        `kubectl get bundledeployment.sambanova.ai ${deploymentName} -n ${namespace} -o json`,
+      modelDeploymentOutput = execSync(
+        `kubectl get modeldeployment.sambanova.ai ${deploymentName} -n ${namespace} -o json`,
         {
           encoding: 'utf-8',
           env,
@@ -81,7 +82,7 @@ export async function GET(request: NextRequest) {
         }
       );
     } catch (error) {
-      console.error('Error getting bundle deployment:', error);
+      console.error('Error getting model deployment:', error);
       const details = error instanceof Error ? error.message : 'Unknown error';
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)
@@ -89,7 +90,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: 'Failed to get bundle deployment',
+          error: 'Failed to get model deployment',
           details,
           stderr,
         },
@@ -97,20 +98,20 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Parse the BundleDeployment JSON
-    let bundleDeployment: {
+    // Parse the ModelDeployment JSON
+    let modelDeployment: {
       spec?: {
         bundle?: string;
       };
     };
     try {
-      bundleDeployment = JSON.parse(bundleDeploymentOutput);
+      modelDeployment = JSON.parse(modelDeploymentOutput);
     } catch (error) {
-      console.error('Error parsing bundle deployment JSON:', error);
+      console.error('Error parsing model deployment JSON:', error);
       return NextResponse.json(
         {
           success: false,
-          error: 'Failed to parse bundle deployment data',
+          error: 'Failed to parse model deployment data',
           details: error instanceof Error ? error.message : 'Unknown error',
         },
         { status: 500 }
@@ -118,7 +119,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Extract bundle name from spec
-    const bundleName = bundleDeployment?.spec?.bundle;
+    const bundleName = modelDeployment?.spec?.bundle;
     if (!bundleName) {
       return NextResponse.json(
         {
@@ -129,11 +130,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Step 2: Get the Bundle to extract the models
-    let bundleOutput: string;
+    // Step 2: Get the ModelBundle to extract the models
+    let modelBundleOutput: string;
     try {
-      bundleOutput = execSync(
-        `kubectl get bundle.sambanova.ai ${bundleName} -n ${namespace} -o json`,
+      modelBundleOutput = execSync(
+        `kubectl get modelbundle.sambanova.ai ${bundleName} -n ${namespace} -o json`,
         {
           encoding: 'utf-8',
           env,
@@ -141,7 +142,7 @@ export async function GET(request: NextRequest) {
         }
       );
     } catch (error) {
-      console.error('Error getting bundle:', error);
+      console.error('Error getting model bundle:', error);
       const details = error instanceof Error ? error.message : 'Unknown error';
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)
@@ -149,7 +150,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: 'Failed to get bundle',
+          error: 'Failed to get model bundle',
           details,
           stderr,
         },
@@ -157,29 +158,30 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Parse the Bundle JSON
-    let bundle: {
+    // Parse the ModelBundle JSON
+    let modelBundle: {
       spec?: {
-        models?: Record<string, unknown>;
+        modelConfigs?: Array<{ model?: string }>;
       };
     };
     try {
-      bundle = JSON.parse(bundleOutput);
+      modelBundle = JSON.parse(modelBundleOutput);
     } catch (error) {
-      console.error('Error parsing bundle JSON:', error);
+      console.error('Error parsing model bundle JSON:', error);
       return NextResponse.json(
         {
           success: false,
-          error: 'Failed to parse bundle data',
+          error: 'Failed to parse model bundle data',
           details: error instanceof Error ? error.message : 'Unknown error',
         },
         { status: 500 }
       );
     }
 
-    // Extract model names from spec.models
-    const models = bundle?.spec?.models;
-    if (!models || typeof models !== 'object') {
+    // Extract model crnames from spec.modelConfigs[] (a list in v3, replacing
+    // the old v2 spec.models object keyed by model name).
+    const modelConfigs = modelBundle?.spec?.modelConfigs;
+    if (!Array.isArray(modelConfigs) || modelConfigs.length === 0) {
       return NextResponse.json(
         {
           success: false,
@@ -189,9 +191,33 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Get model names (keys) and sort alphabetically (case-insensitive)
-    const modelNames = Object.keys(models).sort((a, b) =>
-      a.toLowerCase().localeCompare(b.toLowerCase())
+    const crnames = modelConfigs
+      .map((entry) => (typeof entry?.model === 'string' ? parseModelRef(entry.model).crname : undefined))
+      .filter((crname): crname is string => Boolean(crname));
+
+    // Reverse-map crname -> display name via checkpoint_mapping.json (same
+    // byCrname lookup pattern used in ModelSelection.tsx), so the Playground
+    // dropdown keeps showing/using the same display names it always has.
+    let checkpointMapping: CheckpointMapping = {};
+    try {
+      const checkpointMappingPath = path.join(process.cwd(), 'app/data/checkpoint_mapping.json');
+      if (existsSync(checkpointMappingPath)) {
+        checkpointMapping = JSON.parse(readFileSync(checkpointMappingPath, 'utf-8'));
+      }
+    } catch (error) {
+      console.warn('Failed to load checkpoint_mapping.json for display-name lookup:', error);
+    }
+
+    const byCrname: Record<string, string> = {};
+    Object.entries(checkpointMapping).forEach(([displayName, entry]) => {
+      byCrname[entry.resource_name] = displayName;
+    });
+
+    // Fall back to the bare crname when it isn't in the cache, so unmapped
+    // models still show up instead of silently disappearing. De-dupe in case
+    // multiple entries resolve to the same display name.
+    const modelNames = Array.from(new Set(crnames.map((crname) => byCrname[crname] ?? crname))).sort(
+      (a, b) => a.toLowerCase().localeCompare(b.toLowerCase())
     );
 
     return NextResponse.json({

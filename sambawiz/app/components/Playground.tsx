@@ -34,7 +34,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
-import { getBundleDeploymentStatus } from './BundleDeploymentManager';
+import { getBundleDeploymentStatus } from './ModelDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
 
@@ -155,7 +155,7 @@ export default function Playground() {
     setError(null);
 
     try {
-      const response = await fetch('/api/bundle-deployment');
+      const response = await fetch('/api/model-deployment');
       const data = await response.json();
 
       if (data.success) {

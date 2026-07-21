@@ -16,7 +16,7 @@ interface AppConfig {
 }
 
 /**
- * POST - Deploy a bundle by applying BundleDeployment YAML
+ * POST - Deploy a bundle by applying ModelDeployment YAML
  */
 export async function POST(request: NextRequest) {
   try {
@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
 
     // Save YAML to temporary file
     const timestamp = Date.now();
-    const fileName = `bundle-deployment-${timestamp}.yaml`;
+    const fileName = `model-deployment-${timestamp}.yaml`;
     const filePath = path.join(process.cwd(), 'temp', fileName);
 
     // Ensure temp directory exists
@@ -125,7 +125,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: 'Bundle deployment applied successfully',
+      message: 'Model deployment applied successfully',
       output: applyOutput.trim(),
       filePath,
     });

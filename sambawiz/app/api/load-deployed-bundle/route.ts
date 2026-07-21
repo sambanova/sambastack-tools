@@ -3,7 +3,7 @@ import { readFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
 import yaml from 'js-yaml';
-import { parseBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
+import { parseModelBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
 
 interface KubeconfigEntry {
   file: string;
@@ -17,20 +17,7 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-interface BundleResource {
-  metadata?: {
-    name?: string;
-    annotations?: Record<string, unknown>;
-    [key: string]: unknown;
-  };
-  spec?: {
-    template?: string;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
-interface BundleTemplateResource {
+interface ModelBundleResource {
   metadata?: {
     name?: string;
     annotations?: Record<string, unknown>;
@@ -80,53 +67,30 @@ export async function GET(request: NextRequest) {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    // Get the bundle YAML
-    const bundleYamlStr = execSync(`kubectl -n ${namespace} get bundle ${bundleName} -o yaml`, {
-      encoding: 'utf-8',
-      env,
-      timeout: 30000,
-    });
-
-    const bundleDoc = yaml.load(bundleYamlStr) as BundleResource;
-
-    // Remove metadata.annotations
-    if (bundleDoc.metadata?.annotations) {
-      delete bundleDoc.metadata.annotations;
-    }
-
-    // Extract the BundleTemplate name from spec.template
-    const templateName = bundleDoc.spec?.template;
-    if (!templateName) {
-      return NextResponse.json(
-        { success: false, error: 'Bundle does not have a spec.template field' },
-        { status: 400 }
-      );
-    }
-
-    // Get the bundletemplate YAML
-    const bundleTemplateYamlStr = execSync(
-      `kubectl -n ${namespace} get bundletemplate ${templateName} -o yaml`,
+    // Get the ModelBundle YAML. A ModelBundle is self-contained — it
+    // references ModelProfile/Model CRs by name but doesn't need them
+    // fetched to be parsed (profiles/models already exist in the cluster
+    // and aren't shown in the builder), so unlike the old Bundle+BundleTemplate
+    // flow there's no second kubectl call chasing spec.template.
+    const modelBundleYamlStr = execSync(
+      `kubectl -n ${namespace} get modelbundle.sambanova.ai ${bundleName} -o yaml`,
       { encoding: 'utf-8', env, timeout: 30000 }
     );
 
-    const bundleTemplateDoc = yaml.load(bundleTemplateYamlStr) as BundleTemplateResource;
+    const modelBundleDoc = yaml.load(modelBundleYamlStr) as ModelBundleResource;
 
-    // Remove metadata.annotations and metadata.labels from bundletemplate
-    if (bundleTemplateDoc.metadata?.annotations) {
-      delete bundleTemplateDoc.metadata.annotations;
+    // Remove metadata.annotations and metadata.labels
+    if (modelBundleDoc.metadata?.annotations) {
+      delete modelBundleDoc.metadata.annotations;
     }
-    if (bundleTemplateDoc.metadata?.labels) {
-      delete bundleTemplateDoc.metadata.labels;
+    if (modelBundleDoc.metadata?.labels) {
+      delete modelBundleDoc.metadata.labels;
     }
 
-    // Serialize back to YAML and concatenate: <bundletemplate>\n---\n<bundle>
-    const bundleTemplateClean = yaml.dump(bundleTemplateDoc);
-    const bundleClean = yaml.dump(bundleDoc);
-    const combinedYaml = `${bundleTemplateClean}---\n${bundleClean}`;
+    const modelBundleClean = yaml.dump(modelBundleDoc);
 
     // Parse using the same logic as saved artifacts
-    const convert = request.nextUrl.searchParams.get('convert') === 'true';
-    const result = parseBundleYamlContent(combinedYaml, { skipUnknownPefs: convert });
+    const result = parseModelBundleYamlContent(modelBundleClean);
     if ('error' in result) {
       return NextResponse.json({ success: false, error: result.error }, { status: 400 });
     }

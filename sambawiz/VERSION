@@ -1,2 +1,2 @@
-app: 1.5.4
-minimum-sambastack-helm: 1.1.1
+app: 2.0.0
+minimum-sambastack-helm: 1.2.0

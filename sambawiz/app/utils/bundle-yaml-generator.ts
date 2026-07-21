@@ -1,327 +1,229 @@
-import type { ConfigSelection, CheckpointMapping, PefConfigs } from '../types/bundle';
+import yaml from 'js-yaml';
+import type {
+  Model,
+  ModelProfile,
+  ModelBundle,
+  ModelConfigEntry,
+  SpecDecodingPair,
+  BatchingConfig,
+} from '../types/bundle';
 
-interface ModelExpertConfig {
-  pef: string;
-  dynamic_dims?: {
-    batch_size: {
-      values: number[];
-    };
-  };
-  spec_decoding?: {
-    draft_model: string;
-  };
-  _hasSpecDecoding?: boolean; // Internal flag for tracking spec_decoding configs
-  _isDyt?: boolean; // Internal flag for DYT PEF configs
+/**
+ * V3 `ModelBundle` generator — framework-agnostic (no React/MUI imports) so
+ * it can be shared by the Model Selection UI and the CLI (see v3plan.md,
+ * "Parallel execution plan", Thread B).
+ *
+ * Replaces the old V2 generator, which hand-built a `BundleTemplate\n---\n
+ * Bundle` string via template literals. This generator instead builds a
+ * plain-object `ModelBundle` document and serializes it with `js-yaml`.
+ */
+
+/**
+ * One "model selection" going into the bundle — one per `modelConfigs[]`
+ * entry. `arch` is the checkpoint arch pinned in Step 2 of the builder (the
+ * only arch, for single-arch models; the user-picked arch, for multi-arch
+ * models). `batchingConfigOverride`, if present, is the Step-3 bundle-level
+ * override; otherwise the profile's own effective default is used.
+ * `isDraftFor`, when set, is the *target* model's crname, marking this
+ * selection as a spec-decoding draft.
+ */
+export interface ModelBundleSelection {
+  model: Model;
+  arch: string;
+  profile: ModelProfile;
+  batchingConfigOverride?: BatchingConfig;
+  isDraftFor?: string;
 }
 
-interface ModelExperts {
-  [ss: string]: {
-    configs: ModelExpertConfig[];
-    default_config_values?: {
-      spec_decoding?: {
-        draft_model: string;
-      };
-    };
-  };
+/**
+ * Parses a batching-config tier key (`8k`, `32k`, `448`, `10t`) into a
+ * comparable number, so the smallest tier can be found. Adapted from the old
+ * V2 `parseExpertKey`, extended to accept the `t` (codes-length) suffix
+ * mentioned in v3plan.md alongside the `k` suffix.
+ */
+function parseTierKey(key: string): number {
+  const match = key.match(/^(\d+(?:\.\d+)?)([kt])?$/i);
+  if (!match) {
+    return parseFloat(key);
+  }
+  const value = parseFloat(match[1]);
+  const suffix = match[2]?.toLowerCase();
+  if (suffix === 'k') {
+    return value * 1024;
+  }
+  return value;
 }
 
-interface BundleTemplateModels {
-  [modelName: string]: {
-    experts: ModelExperts;
+/**
+ * Finds the highest checkpoint version under a `Model`'s given arch (Q11 —
+ * always pin the latest version). Versions are numeric strings ("1", "2",
+ * "10"), so comparison is numeric, not lexicographic.
+ */
+export function getHighestVersion(model: Model, arch: string): string {
+  const archData = model.spec.checkpoints[arch];
+  if (!archData) {
+    throw new Error(`Model "${model.metadata.name}" has no checkpoint arch "${arch}"`);
+  }
+  const versions = Object.keys(archData.versions);
+  if (versions.length === 0) {
+    throw new Error(`Model "${model.metadata.name}" arch "${arch}" has no checkpoint versions`);
+  }
+  return versions.reduce((highest, current) => (Number(current) > Number(highest) ? current : highest));
+}
+
+/**
+ * Formats a `modelConfigs[].model` ref per the plan's Model-ref format:
+ * `<crname>:<version>` when the Model CR has exactly one checkpoint arch,
+ * else `<crname>:<arch>:<version>` (arch pinned via the Step-2 dropdown).
+ */
+export function formatModelRef(model: Model, arch: string): string {
+  const version = getHighestVersion(model, arch);
+  const archCount = Object.keys(model.spec.checkpoints).length;
+  return archCount === 1
+    ? `${model.metadata.name}:${version}`
+    : `${model.metadata.name}:${arch}:${version}`;
+}
+
+/**
+ * A model is an embedding model when its `spec.metadata.capabilities`
+ * includes `"embeddings"` (Q10).
+ */
+export function isEmbeddingModel(model: Model): boolean {
+  return model.spec.metadata.capabilities?.includes('embeddings') ?? false;
+}
+
+/**
+ * A profile's effective batching config: its own declarative default, else
+ * the operator-published resolved default, else empty (per `batching.py`'s
+ * priority — the live-generated fallback isn't something SambaWiz computes).
+ */
+export function getEffectiveBatchingConfig(profile: ModelProfile): BatchingConfig {
+  return profile.spec.defaultBatchingConfig ?? profile.status?.batchingConfig ?? {};
+}
+
+/**
+ * Returns a copy of `batchingConfig` with `is_default` stripped from every
+ * tier, then re-applied to exactly the smallest tier — but only when
+ * `isEmbedding` is true (Q2). Non-embedding models never get `is_default` set.
+ */
+export function deriveIsDefaultTier(batchingConfig: BatchingConfig, isEmbedding: boolean): BatchingConfig {
+  const tierKeys = Object.keys(batchingConfig);
+  const result: BatchingConfig = {};
+
+  for (const key of tierKeys) {
+    result[key] = { batch_sizes: batchingConfig[key].batch_sizes };
+  }
+
+  if (isEmbedding && tierKeys.length > 0) {
+    const smallestKey = tierKeys.reduce((min, key) => (parseTierKey(key) < parseTierKey(min) ? key : min));
+    result[smallestKey] = { ...result[smallestKey], is_default: true };
+  }
+
+  return result;
+}
+
+type ProfileDisplayType = 'High Throughput' | 'High Interactivity';
+
+function resolveProfileType(profile: ModelProfile): ProfileDisplayType {
+  return profile.spec.features?.includes('continuous_batching') ? 'High Throughput' : 'High Interactivity';
+}
+
+/**
+ * Derives a profile card's display title from `spec.features`, never
+ * `metadata.name`: `continuous_batching` => "High Throughput", else "High
+ * Interactivity". When more than one profile of the same resulting type is
+ * present in `allProfilesForSameModel`, they're numbered in listing order
+ * ("High Interactivity 1", "High Interactivity 2", ...); a lone profile of a
+ * type is left unnumbered.
+ *
+ * This is UI-facing (no UI consumes it yet), but lives in the shared module
+ * per Thread B's scope so the future UI thread and the CLI can both use it.
+ */
+export function getDisplayName(profile: ModelProfile, allProfilesForSameModel: ModelProfile[]): string {
+  const type = resolveProfileType(profile);
+  const sameType = allProfilesForSameModel.filter((candidate) => resolveProfileType(candidate) === type);
+
+  if (sameType.length <= 1) {
+    return type;
+  }
+
+  const index = sameType.findIndex(
+    (candidate) => candidate === profile || candidate.metadata.name === profile.metadata.name
+  );
+  const number = index === -1 ? sameType.length : index + 1;
+  return `${type} ${number}`;
+}
+
+/**
+ * A profile is a spec-decoding profile when any of its `spec.pefs` entries
+ * has a name (the part before `:version`) containing `"sd"` as a substring.
+ */
+export function isSpecDecodingProfile(profile: ModelProfile): boolean {
+  return profile.spec.pefs.some((ref) => {
+    const name = ref.includes(':') ? ref.slice(0, ref.lastIndexOf(':')) : ref;
+    return name.includes('sd');
+  });
+}
+
+/**
+ * Builds the `ModelBundle` object (metadata + spec) for the given
+ * selections, before YAML serialization. Exposed separately so callers that
+ * want the plain JS object (e.g. parser round-trip tests) don't have to
+ * re-parse YAML.
+ */
+export function buildModelBundleObject(bundleName: string, selections: ModelBundleSelection[]): ModelBundle {
+  const modelConfigs: ModelConfigEntry[] = selections.map((selection) => {
+    const baseBatchingConfig = selection.batchingConfigOverride ?? getEffectiveBatchingConfig(selection.profile);
+    const batchingConfig = deriveIsDefaultTier(baseBatchingConfig, isEmbeddingModel(selection.model));
+
+    // Insertion order matters here: it drives the emitted YAML key order
+    // (model, profile, modelSettings, batchingConfig), matching v3plan.md's
+    // worked spec-decoding example.
+    const entry: ModelConfigEntry = {
+      model: formatModelRef(selection.model, selection.arch),
+      profile: selection.profile.metadata.name,
+    };
+
+    if (selection.isDraftFor) {
+      entry.modelSettings = { routable: false };
+    }
+
+    entry.batchingConfig = batchingConfig;
+
+    return entry;
+  });
+
+  const specDecodingPairs: SpecDecodingPair[] = selections
+    .filter((selection): selection is ModelBundleSelection & { isDraftFor: string } => Boolean(selection.isDraftFor))
+    .map((selection) => ({
+      draft: selection.model.metadata.name,
+      target: selection.isDraftFor,
+    }));
+
+  return {
+    metadata: { name: bundleName },
+    spec: {
+      modelConfigs,
+      ...(specDecodingPairs.length > 0 ? { specDecodingPairs } : {}),
+    },
   };
 }
 
 /**
- * Parse expert key (e.g. "4k", "16k", "128") to a numeric value for comparison
+ * Builds a single `ModelBundle` YAML document from the given selections
+ * (`apiVersion: sambanova.ai/v1alpha1`, `kind: ModelBundle`), serialized with
+ * `js-yaml`'s `dump()` (not hand-built template strings). No `secretNames`
+ * is emitted (Q7) — profiles carry them.
  */
-function parseExpertKey(key: string): number {
-  if (key.endsWith('k')) {
-    return parseFloat(key.slice(0, -1)) * 1024;
-  }
-  return parseFloat(key);
-}
+export function generateModelBundleYaml(bundleName: string, selections: ModelBundleSelection[]): string {
+  const bundle = buildModelBundleObject(bundleName, selections);
 
-/**
- * Generate checkpoint name from model name
- */
-export function generateCheckpointName(modelName: string): string {
-  return modelName
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '') + '_CKPT';
-}
+  const document = {
+    apiVersion: 'sambanova.ai/v1alpha1',
+    kind: 'ModelBundle',
+    metadata: bundle.metadata,
+    spec: bundle.spec,
+  };
 
-/**
- * Generate vision embedding checkpoint name from model name
- */
-export function generateVisionEmbeddingCheckpointName(modelName: string): string {
-  const checkpointBaseName = modelName
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '');
-
-  // Check if the transformed checkpoint base name ends with "_INSTRUCT"
-  if (checkpointBaseName.endsWith('_INSTRUCT')) {
-    // Remove "_INSTRUCT" suffix from the base name
-    return checkpointBaseName.replace(/_INSTRUCT$/, '') + '_VISION_EMBD_CKPT';
-  }
-
-  return checkpointBaseName + '_VISION_EMBD_CKPT';
-}
-
-/**
- * Generate complete bundle YAML from selected configurations
- */
-export function generateBundleYaml(
-  selectedConfigs: ConfigSelection[],
-  checkpointMapping: CheckpointMapping,
-  pefConfigs: PefConfigs,
-  bundleName: string,
-  checkpointsDir: string = '',
-  draftModels: { [modelName: string]: string } = {}
-): string {
-  // Group configs by model
-  const modelConfigs: { [modelName: string]: ConfigSelection[] } = {};
-  selectedConfigs.forEach(config => {
-    if (!modelConfigs[config.modelName]) {
-      modelConfigs[config.modelName] = [];
-    }
-    modelConfigs[config.modelName].push(config);
-  });
-
-  // Build BundleTemplate spec.models
-  const templateModels: BundleTemplateModels = {};
-
-  Object.entries(modelConfigs).forEach(([modelName, configs]) => {
-    const experts: ModelExperts = {};
-
-    // Check if this model has a draft model assigned
-    const draftModel = draftModels[modelName];
-    const hasDraftModel = draftModel && draftModel !== 'skip';
-
-    // Group by SS
-    configs.forEach(config => {
-      if (!experts[config.ss]) {
-        experts[config.ss] = { configs: [] };
-      }
-
-      const pefConfigValue = pefConfigs[config.pefName];
-      const isDyt = Array.isArray(pefConfigValue);
-      const version = isDyt
-        ? (pefConfigValue.find((e) => e.ss === config.ss && e.bs === config.bs)?.latestVersion || '1')
-        : (pefConfigValue?.latestVersion || '1');
-
-      if (isDyt) {
-        // For DYT PEFs: merge all selected batch sizes for this SS into one config entry
-        const pefRef = `${config.pefName}:${version}`;
-        const existingEntry = experts[config.ss].configs.find(e => e._isDyt && e.pef === pefRef);
-        if (existingEntry?.dynamic_dims) {
-          existingEntry.dynamic_dims.batch_size.values.push(parseInt(config.bs, 10));
-        } else {
-          experts[config.ss].configs.push({
-            pef: pefRef,
-            _isDyt: true,
-            dynamic_dims: { batch_size: { values: [parseInt(config.bs, 10)] } },
-          });
-        }
-        return; // Skip spec_decoding logic for DYT configs
-      }
-
-      // Check if this config will have spec_decoding (i.e., is a target model with matching draft config)
-      let hasMatchingDraftConfig = false;
-      if (hasDraftModel) {
-        const draftModelHasMatchingConfig = selectedConfigs.some(
-          (sc) => sc.modelName === draftModel && sc.ss === config.ss && sc.bs === config.bs
-        );
-        hasMatchingDraftConfig = draftModelHasMatchingConfig;
-      }
-
-      const expertConfig: ModelExpertConfig = {
-        pef: `${config.pefName}:${version}`
-      };
-
-      experts[config.ss].configs.push(expertConfig);
-
-      // Track if this specific config needs spec_decoding
-      if (hasMatchingDraftConfig) {
-        expertConfig._hasSpecDecoding = true;
-      }
-    });
-
-    // For each expert (SS level), determine if we should use default_config_values or per-config spec_decoding
-    // Use default_config_values only when:
-    // 1. There are multiple configs for this SS/expert
-    // 2. ALL configs have matching draft configs
-    if (hasDraftModel) {
-      Object.entries(experts).forEach(([, expert]) => {
-        // Check if ALL configs in this expert have matching draft configs
-        const allConfigsHaveDraft = expert.configs.every((config) => config._hasSpecDecoding);
-        const hasMultipleConfigs = expert.configs.length > 1;
-
-        if (allConfigsHaveDraft && hasMultipleConfigs) {
-          // Use default_config_values for this expert (saves YAML lines when multiple configs exist)
-          expert.default_config_values = {
-            spec_decoding: {
-              draft_model: draftModel
-            }
-          };
-          // Clean up temporary flags
-          expert.configs.forEach((config: ModelExpertConfig) => delete config._hasSpecDecoding);
-        } else {
-          // Use per-config spec_decoding
-          expert.configs.forEach((config: ModelExpertConfig) => {
-            if (config._hasSpecDecoding) {
-              config.spec_decoding = {
-                draft_model: draftModel
-              };
-              delete config._hasSpecDecoding;
-            }
-          });
-        }
-      });
-    }
-
-    // Rename the smallest expert key to 'default' only for embedding models
-    const isEmbeddingModel = checkpointMapping[modelName]?.model_type === 'embedding';
-    const expertKeys = Object.keys(experts);
-    if (isEmbeddingModel && expertKeys.length > 0) {
-      const minKey = expertKeys.reduce((min, key) =>
-        parseExpertKey(key) < parseExpertKey(min) ? key : min
-      );
-      if (minKey !== 'default') {
-        const renamedExperts: ModelExperts = {};
-        expertKeys.forEach(key => {
-          renamedExperts[key === minKey ? 'default' : key] = experts[key];
-        });
-        templateModels[modelName] = { experts: renamedExperts };
-      } else {
-        templateModels[modelName] = { experts };
-      }
-    } else {
-      templateModels[modelName] = { experts };
-    }
-  });
-
-  // Build Bundle spec.checkpoints
-  const checkpoints: { [key: string]: { source: string; toolSupport: boolean } } = {};
-  Object.keys(modelConfigs).forEach(modelName => {
-    const checkpointName = generateCheckpointName(modelName);
-    const checkpointData = checkpointMapping[modelName];
-    const checkpointPath = checkpointData?.path || '';
-    const fullCheckpointPath = checkpointsDir ? `${checkpointsDir}${checkpointPath}` : checkpointPath;
-    checkpoints[checkpointName] = {
-      source: fullCheckpointPath,
-      toolSupport: true
-    };
-
-    // Add vision embedding checkpoint if present
-    if (checkpointData?.vision_embedding_checkpoint) {
-      const visionEmbeddingCheckpointName = generateVisionEmbeddingCheckpointName(modelName);
-      const visionEmbeddingPath = checkpointData.vision_embedding_checkpoint;
-      const fullVisionEmbeddingPath = checkpointsDir ? `${checkpointsDir}${visionEmbeddingPath}` : visionEmbeddingPath;
-      checkpoints[visionEmbeddingCheckpointName] = {
-        source: fullVisionEmbeddingPath,
-        toolSupport: true
-      };
-    }
-  });
-
-  // Build Bundle spec.models
-  const bundleModels: { [key: string]: { checkpoint: string; template: string; vision_embedding_checkpoint?: string } } = {};
-  Object.keys(modelConfigs).forEach(modelName => {
-    const checkpointName = generateCheckpointName(modelName);
-    const checkpointData = checkpointMapping[modelName];
-    const model: { checkpoint: string; template: string; vision_embedding_checkpoint?: string } = {
-      checkpoint: checkpointName,
-      template: modelName
-    };
-
-    // Add vision embedding checkpoint reference if present
-    if (checkpointData?.vision_embedding_checkpoint) {
-      model.vision_embedding_checkpoint = generateVisionEmbeddingCheckpointName(modelName);
-    }
-
-    bundleModels[modelName] = model;
-  });
-
-  // Generate YAML strings
-  const bundleTemplateName = `bt-${bundleName}`;
-  const bundleManifestName = `b-${bundleName}`;
-
-  const bundleTemplateYaml = `apiVersion: sambanova.ai/v1alpha1
-kind: BundleTemplate
-metadata:
-  name: ${bundleTemplateName}
-spec:
-  models:
-${Object.entries(templateModels).map(([modelName, model]) => {
-  return `    ${modelName}:
-      experts:
-${Object.entries(model.experts).map(([ss, expert]) => {
-  let expertStr = `        ${ss}:
-          configs:
-${expert.configs.map(config => {
-  if (config._isDyt && config.dynamic_dims) {
-    let configStr = `          - dynamic_dims:\n              batch_size:\n                values:`;
-    const uniqueSortedValues = [...new Set(config.dynamic_dims.batch_size.values)].sort((a, b) => a - b);
-    uniqueSortedValues.forEach(bs => {
-      configStr += `\n                - ${bs}`;
-    });
-    configStr += `\n            pef: ${config.pef}`;
-    return configStr;
-  }
-  let configStr = `          - pef: ${config.pef}`;
-  if (config.spec_decoding) {
-    configStr += `
-            spec_decoding:
-              draft_model: ${config.spec_decoding.draft_model}`;
-  }
-  return configStr;
-}).join('\n')}`;
-
-  // Add default_config_values if present
-  if (expert.default_config_values?.spec_decoding) {
-    expertStr += `
-          default_config_values:
-            spec_decoding:
-              draft_model: ${expert.default_config_values.spec_decoding.draft_model}`;
-  }
-
-  return expertStr;
-}).join('\n')}`;
-}).join('\n')}
-  owner: no-reply@sambanova.ai
-  secretNames:
-  - sambanova-artifact-reader
-  usePefCRs: true`;
-
-  const bundleYaml = `apiVersion: sambanova.ai/v1alpha1
-kind: Bundle
-metadata:
-  name: ${bundleManifestName}
-spec:
-  checkpoints:
-${Object.entries(checkpoints).map(([name, checkpoint]) => {
-  return `    ${name}:
-      source: ${checkpoint.source}
-      toolSupport: ${checkpoint.toolSupport}`;
-}).join('\n')}
-  models:
-${Object.entries(bundleModels).map(([modelName, model]) => {
-  let modelStr = `    ${modelName}:
-      checkpoint: ${model.checkpoint}
-      template: ${model.template}`;
-  if (model.vision_embedding_checkpoint) {
-    modelStr += `
-      vision_embedding_checkpoint: ${model.vision_embedding_checkpoint}`;
-  }
-  return modelStr;
-}).join('\n')}
-  secretNames:
-  - sambanova-artifact-reader
-  template: ${bundleTemplateName}`;
-
-  return `${bundleTemplateYaml}\n---\n${bundleYaml}\n`;
+  return yaml.dump(document, { noRefs: true, lineWidth: -1 });
 }

@@ -15,7 +15,13 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
-interface BundleDeployment {
+/**
+ * Summary of a `ModelDeployment` CR (replaces the old `BundleDeployment`).
+ * `bundle` comes from `spec.bundle` — same field name as the old
+ * `BundleDeployment.spec.bundle`, since SambaWiz always emits a named
+ * `spec.bundle` reference (never inline `spec.models`, per v3plan.md Q6).
+ */
+interface ModelDeploymentSummary {
   name: string;
   namespace: string;
   bundle: string;
@@ -31,7 +37,7 @@ interface BundleDeployment {
 }
 
 /**
- * GET - Fetch all bundle deployments
+ * GET - Fetch all model deployments
  */
 export async function GET() {
   try {
@@ -77,7 +83,7 @@ export async function GET() {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} get bundledeployment.sambanova.ai -o json`, {
+    const output = execSync(`kubectl -n ${namespace} get modeldeployment.sambanova.ai -o json`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,
@@ -86,10 +92,10 @@ export async function GET() {
     const data = JSON.parse(output);
 
     // Transform the data to a more usable format
-    const bundleDeployments: BundleDeployment[] = data.items.map((item: {
+    const bundleDeployments: ModelDeploymentSummary[] = data.items.map((item: {
       metadata: { name: string; namespace: string; creationTimestamp: string };
       spec: { bundle: string };
-      status?: BundleDeployment['status'];
+      status?: ModelDeploymentSummary['status'];
     }) => ({
       name: item.metadata.name,
       namespace: item.metadata.namespace,
@@ -103,7 +109,7 @@ export async function GET() {
       bundleDeployments,
     });
   } catch (error) {
-    console.error('Failed to fetch bundle deployments:', error);
+    console.error('Failed to fetch model deployments:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     const stderr = (error && typeof error === 'object' && 'stderr' in error)
       ? String(error.stderr)
@@ -111,7 +117,7 @@ export async function GET() {
     return NextResponse.json(
       {
         success: false,
-        error: 'Failed to fetch bundle deployments',
+        error: 'Failed to fetch model deployments',
         message,
         stderr,
       },
@@ -121,7 +127,7 @@ export async function GET() {
 }
 
 /**
- * DELETE - Delete a bundle deployment
+ * DELETE - Delete a model deployment
  */
 export async function DELETE(request: NextRequest) {
   try {
@@ -130,7 +136,7 @@ export async function DELETE(request: NextRequest) {
 
     if (!name || typeof name !== 'string') {
       return NextResponse.json(
-        { error: 'Bundle deployment name is required' },
+        { error: 'Model deployment name is required' },
         { status: 400 }
       );
     }
@@ -177,7 +183,7 @@ export async function DELETE(request: NextRequest) {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    const output = execSync(`kubectl -n ${namespace} delete bundledeployment.sambanova.ai ${name}`, {
+    const output = execSync(`kubectl -n ${namespace} delete modeldeployment.sambanova.ai ${name}`, {
       encoding: 'utf-8',
       env,
       timeout: 30000,
@@ -185,11 +191,11 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Bundle deployment ${name} deleted successfully`,
+      message: `Model deployment ${name} deleted successfully`,
       output: output.trim(),
     });
   } catch (error) {
-    console.error('Failed to delete bundle deployment:', error);
+    console.error('Failed to delete model deployment:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     const stderr = (error && typeof error === 'object' && 'stderr' in error)
       ? String(error.stderr)
@@ -197,7 +203,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: 'Failed to delete bundle deployment',
+        error: 'Failed to delete model deployment',
         message,
         stderr,
       },
