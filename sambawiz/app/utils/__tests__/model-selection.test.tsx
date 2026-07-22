@@ -221,7 +221,7 @@ describe('ModelSelection (V3)', () => {
     expect(await within(multiArchRow).findByText('Profile: High Interactivity')).toBeInTheDocument();
   });
 
-  it('shows the batching-config override editor seeded from the profile, supporting both list and "*" modes', async () => {
+  it('renders the override grid seeded from the profile: supported cells enabled, "All" auto-checks, and "*" mode', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
     };
@@ -233,14 +233,22 @@ describe('ModelSelection (V3)', () => {
     const user = userEvent.setup();
     await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
 
-    await waitFor(() => expect(screen.getByText('3. Override Batching Configuration')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('3. Override Batching Configuration (Optional)')).toBeInTheDocument());
 
-    // Default: list mode, seeded from the profile's effective batching config.
-    // Two tiers ('4k', '16k') each render their own "Batch sizes" field; the
-    // first corresponds to '4k' (insertion order from the profile's config).
-    const listInputs = (await screen.findAllByLabelText('Batch sizes (comma-separated)')) as HTMLInputElement[];
-    const listInput = listInputs[0];
-    expect(listInput.value).toBe('1, 4');
+    // Step 3 is optional and collapsed by default — expand it before interacting with the grid.
+    await user.click(screen.getByRole('button', { name: 'Expand batching overrides' }));
+
+    // The '4k' tier of the profile supports batch sizes [1, 4]. In the grid, cells 1 and 4 are
+    // enabled and (seeded from the profile) checked; an unsupported size like 2 is disabled; and
+    // since every supported cell is checked, the row's "All" checkbox is auto-checked.
+    const cell1 = await screen.findByRole('checkbox', { name: 'Batch size 1 for 4k' });
+    const cell4 = screen.getByRole('checkbox', { name: 'Batch size 4 for 4k' });
+    const cell2 = screen.getByRole('checkbox', { name: 'Batch size 2 for 4k' });
+    const allCell = screen.getByRole('checkbox', { name: 'All batch sizes for 4k' });
+    expect(cell1).toBeChecked();
+    expect(cell4).toBeChecked();
+    expect(cell2).toBeDisabled();
+    expect(allCell).toBeChecked();
 
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
@@ -249,21 +257,18 @@ describe('ModelSelection (V3)', () => {
       expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([1, 4]);
     });
 
-    // Editing the list updates the emitted batch_sizes.
-    await user.clear(listInput);
-    await user.type(listInput, '1, 2, 8');
-
+    // Unchecking a supported cell drops it from the list and clears "All".
+    await user.click(cell4);
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
         spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
       };
-      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([1, 2, 8]);
+      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([1]);
     });
+    expect(screen.getByRole('checkbox', { name: 'All batch sizes for 4k' })).not.toBeChecked();
 
-    // Toggling "All batch sizes" switches that tier to the '*' sentinel.
-    const allCheckbox = screen.getAllByRole('checkbox', { name: 'All batch sizes (*)' })[0];
-    await user.click(allCheckbox);
-
+    // Checking "All" collapses the tier to the '*' sentinel.
+    await user.click(screen.getByRole('checkbox', { name: 'All batch sizes for 4k' }));
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
         spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };

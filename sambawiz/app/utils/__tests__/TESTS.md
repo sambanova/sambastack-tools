@@ -2,9 +2,9 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** 2026-07-21 — Rewritten for the **v3 bundle** migration (SambaWiz 2.0.0). The old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
-**Total Tests:** 150 automated across 13 suites + a legacy manual test plan
-**Test Status:** ✅ All 150 tests passing (13/13 suites)
+**Last Updated:** 2026-07-21 — Added 7 `isPodProbeFailure` unit tests: a fresh deployment whose pod is still `PodInitializing`/`ContainerCreating` no longer reports "Deployment failed" (the logs probe's transient "command failed" is now excluded), while genuine failures (not found, no resources, CrashLoopBackOff, ...) still report. Earlier (same date): added a Model Deployment Manager integration test covering the long-name warning — it previews the operator-shortened pod names (fetched from the new `/api/predicted-pod-names` route) and lists only the pods actually truncated+hashed. Earlier still: rewritten for the **v3 bundle** migration (SambaWiz 2.0.0) — the old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
+**Total Tests:** 159 automated across 13 suites + a legacy manual test plan
+**Test Status:** ✅ All 159 tests passing (13/13 suites)
 **Focus:** Core business logic (V3 YAML generation/parsing, model↔profile join, batching config), API/route integration, and CLI parity
 
 ## Table of Contents
@@ -83,7 +83,7 @@ decoding → observe the generated `ModelBundle` YAML.
 | auto-selects and collapses the only matching profile for a single-profile model | Single-profile models are auto-selected and their row starts collapsed |
 | renders one card tile per matching profile, single-selects, and collapses on selection | Card-tile row behavior: one tile per profile, single-select, collapse-on-select |
 | shows the arch dropdown only for models with more than one matching arch | Multi-arch models require an arch pick before profiles list (Q3) |
-| shows the batching-config override editor seeded from the profile, supporting both list and "*" modes | Step-3 override editor seeded from the profile default; supports explicit lists and `*` |
+| renders the override grid seeded from the profile: supported cells enabled, "All" auto-checks, and "*" mode | Step-3 override is a checkbox grid (context-length rows × fixed batch-size columns); cells enable per profile support, "All" auto-checks when every supported cell is checked and collapses the tier to `*` |
 | shows the draft-model dropdown only for spec-decoding profiles | The draft dropdown appears only when the profile has an `sd` PEF |
 | wires a chosen draft model into the generated ModelBundle YAML (routable:false + specDecodingPairs) | End-to-end: draft selection produces `specDecodingPairs` + `modelSettings.routable:false` on the draft |
 
@@ -94,7 +94,7 @@ it is queryable by accessible name and correctly labeled for assistive tech.
 
 ### Model Deployment Manager
 
-**File:** [model-deployment.test.tsx](model-deployment.test.tsx) · **Component:** `ModelDeploymentManager` (formerly `BundleDeploymentManager`) · **Tests:** 10 (6 status logic + 4 integration)
+**File:** [model-deployment.test.tsx](model-deployment.test.tsx) · **Component:** `ModelDeploymentManager` (formerly `BundleDeploymentManager`) · **Tests:** 18 (6 status logic + 7 probe-failure logic + 5 integration)
 
 #### `getBundleDeploymentStatus` (pure logic — 6)
 
@@ -107,7 +107,21 @@ it is queryable by accessible name and correctly labeled for assistive tech.
 | should return "Deploying" when only cache pod exists and is ready | Partial deployment (cache only) |
 | should return "Deploying" when only default pod exists and is ready | Partial deployment (default only) |
 
-#### Integration (4)
+#### `isPodProbeFailure` (pure logic — 7)
+
+Decides whether a status/logs probe error means the pods are genuinely not running (→ "Deployment failed") vs. a benign startup state.
+
+| Test | Description |
+|------|-------------|
+| returns false when there is no error message | `null` → not a failure |
+| does NOT flag a logs probe failing because the container is still initializing | Regression: `PodInitializing` "command failed" during a fresh deploy is not a failure |
+| does NOT flag a container that is still being created | `ContainerCreating` is a benign transient state |
+| flags a pod that could not be found | `NotFound` → genuine failure |
+| flags a generic command failure that is not a startup state | e.g. `Unable to connect to the server` |
+| flags "no resources" (nothing scheduled) | `No resources found` → genuine failure |
+| flags a real crash even though the container is "waiting to start" | `CrashLoopBackOff` is not excluded (only PodInitializing/ContainerCreating are) |
+
+#### Integration (5)
 
 | Test | Description |
 |------|-------------|
@@ -115,6 +129,7 @@ it is queryable by accessible name and correctly labeled for assistive tech.
 | only lists bundles whose validation succeeded in the bundle picker | Only `Valid`-condition `ModelBundle`s are offered for deployment |
 | generates a ModelDeployment document that references the bundle by name (never inline spec.models) | Emits `spec.bundle: <name>`, never inline `spec.models` (Q6) |
 | deletes a deployment via the modeldeployment.sambanova.ai-backed route | Deletion targets the `ModelDeployment` CR |
+| previews the operator-shortened pod names in the long-name warning | For a name past the truncate threshold, fetches `/api/predicted-pod-names` and lists only the pods actually shortened (default here; cache omitted because it matches its naive form) |
 
 ---
 
@@ -262,7 +277,7 @@ Covers the V3 rewrite: captures **all** archs from `Model.spec.checkpoints` (not
 
 #### Generate Model Profiles Route
 
-**File:** [../../api/generate-model-profiles/route.test.ts](../../api/generate-model-profiles/route.test.ts) · **Tests:** 10 · **(new route)**
+**File:** [../../api/generate-model-profiles/route.test.ts](../../api/generate-model-profiles/route.test.ts) · **Tests:** 11 · **(new route)**
 
 The new V3 profile cache generator: `kubectl get modelprofiles -o json` → `ModelProfilesCache`-shaped
 `model_profiles.json`.
@@ -279,6 +294,7 @@ The new V3 profile cache generator: `kubectl get modelprofiles -o json` → `Mod
 | returns 400 when no kubeconfig file is configured (no active environment) | Missing `currentKubeconfig` |
 | returns 500 when app-config.json cannot be read (not found) | `readFile` rejection surfaced as 500 |
 | returns 500 when kubectl fails | `execSync` throw surfaced as 500 |
+| returns a clear 400 (not a 500) when the backend has no ModelProfile CRD (v2-only backend) | Detects the "no resource type modelprofiles" kubectl error and returns a "does not support v3 bundles" message |
 
 ---
 
@@ -345,10 +361,10 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| **Total automated tests** | **150** | across 13 suites, all passing |
-| UI components (API/behavior) | 20 | home (1), playground (1), model-selection (8), model-deployment (10) |
+| **Total automated tests** | **159** | across 13 suites, all passing |
+| UI components (API/behavior) | 28 | home (1), playground (1), model-selection (8), model-deployment (18) |
 | Core utilities | 83 | availability (9), generator (27), parser (10), pef-config (26), inference-pod-names (8), pod-name-limits (3) |
-| API route handlers | 23 | generate-checkpoint-mapping (13), generate-model-profiles (10) |
+| API route handlers | 24 | generate-checkpoint-mapping (13), generate-model-profiles (11) |
 | CLI | 24 | bin/__tests__/cli.test.ts |
 
 ### Automated Test Breakdown by File
@@ -358,7 +374,7 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 | home.test.tsx | 1 | API integration on mount |
 | playground.test.tsx | 1 | API integration on mount |
 | model-selection.test.tsx | 8 | V3 selection flow (cards, arch dropdown, overrides, spec decoding → ModelBundle) |
-| model-deployment.test.tsx | 10 | Deployment status logic (6) + ModelDeployment integration (4) |
+| model-deployment.test.tsx | 18 | Deployment status logic (6) + probe-failure logic (7) + ModelDeployment integration (5) |
 | model-availability.test.ts | 9 | V3 model↔profile join, no-profile guard, embedding detection |
 | bundle-yaml-generator.test.ts | 27 | V3 ModelBundle generator + helpers |
 | parse-bundle-yaml.test.ts | 10 | V3 ModelBundle parser (round-trip, V2 rejection) |
@@ -366,9 +382,9 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 | inference-pod-names.test.ts | 8 | Pod-name derivation |
 | pod-name-limits.test.ts | 3 | Pod-name length limits |
 | api/generate-checkpoint-mapping/route.test.ts | 13 | Multi-arch checkpoint capture + capabilities (V3) |
-| api/generate-model-profiles/route.test.ts | 10 | ModelProfile cache generation + batching fallback (V3) |
+| api/generate-model-profiles/route.test.ts | 11 | ModelProfile cache generation + batching fallback + non-v3-backend detection (V3) |
 | bin/__tests__/cli.test.ts | 24 | V3 CLI: cache→CR conversion, join, shared-generator parity |
-| **Total** | **150** | |
+| **Total** | **151** | |
 
 ---
 
@@ -448,5 +464,9 @@ The bundle builder moved from V2 (`BundleTemplate` + `Bundle` + `BundleDeploymen
    `@jest-environment node` route suites can start.
 3. The draft-model `Select` in `ModelSelection.tsx` was given a proper `InputLabel`+`labelId` (matching
    the arch `Select`) — fixes the draft-wiring test and improves accessibility.
+4. **Empty-profiles-cache guard.** `generate-model-profiles` now detects a backend with no
+   `ModelProfile` CRD (a v2-only backend) and returns a clear 400 ("does not support v3 bundles")
+   instead of a raw 500; `Home.handleApply` blocks with an actionable message when the profiles cache
+   comes back with `count: 0`. Added one route test for the non-v3-backend branch (generate-model-profiles: 10 → 11).
 
-Result: **150/150 passing across 13 suites.**
+Result: **151/151 passing across 13 suites.**

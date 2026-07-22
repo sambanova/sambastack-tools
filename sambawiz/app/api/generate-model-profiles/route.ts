@@ -67,12 +67,35 @@ export async function POST() {
     const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
-    // Run kubectl get modelprofiles
-    const kubectlOutput = execSync(`kubectl -n ${namespace} get modelprofiles -o json`, {
-      env,
-      timeout: 60000,
-      encoding: 'utf-8',
-    });
+    // Run kubectl get modelprofiles. A backend that only supports v2 bundles has no
+    // ModelProfile CRD, so kubectl fails with "the server doesn't have a resource type".
+    // Surface that as a clear, actionable v3-support error instead of a raw 500.
+    let kubectlOutput: string;
+    try {
+      kubectlOutput = execSync(`kubectl -n ${namespace} get modelprofiles -o json`, {
+        env,
+        timeout: 60000,
+        encoding: 'utf-8',
+        maxBuffer: 100 * 1024 * 1024,
+      });
+    } catch (kubectlError) {
+      const stderr = (kubectlError && typeof kubectlError === 'object' && 'stderr' in kubectlError)
+        ? String((kubectlError as { stderr?: unknown }).stderr ?? '')
+        : '';
+      const message = kubectlError instanceof Error ? kubectlError.message : String(kubectlError);
+      const combined = `${message}\n${stderr}`;
+      if (/doesn't have a resource type|could not find the requested resource|server could not find|no matches for kind|resource type.*modelprofile/i.test(combined)) {
+        return NextResponse.json({
+          success: false,
+          error:
+            "This environment's backend does not support v3 bundles: the ModelProfile CRD " +
+            '(modelprofiles.sambanova.ai) was not found. SambaWiz 2.x requires a SambaStack ' +
+            'backend that provides ModelProfile/ModelBundle. Please upgrade the backend or ' +
+            'select a v3-capable environment.',
+        }, { status: 400 });
+      }
+      throw kubectlError; // unrelated failure — handled by the outer catch as a 500
+    }
 
     const profilesData: KubectlOutput = JSON.parse(kubectlOutput);
     const modelProfiles: ModelProfilesCache = {};

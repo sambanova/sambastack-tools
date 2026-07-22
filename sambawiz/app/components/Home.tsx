@@ -461,6 +461,21 @@ export default function Home() {
         return;
       }
 
+      // Guard: a v3-capable environment that has models should also have ModelProfiles.
+      // Zero profiles means either the backend doesn't support v3 bundles or none are
+      // installed yet — either way, no model can be added to a bundle, so surface it here
+      // rather than letting the user discover it as a wall of per-model exclusions on the
+      // Model Selection page.
+      if (!profilesData.count || profilesData.count === 0) {
+        setSaveError(
+          'Environment applied, but 0 model profiles were found in this environment. ' +
+          'No models can be added to a bundle until ModelProfiles exist. Confirm the backend ' +
+          'supports v3 bundles (ModelProfile / ModelBundle) and that profiles are installed.'
+        );
+        setSaving(false);
+        return;
+      }
+
       setSaveSuccess(true);
       // Clear playground state so it re-fetches against the new environment
       fetch('/api/playground-state', { method: 'DELETE' }).catch(() => {});

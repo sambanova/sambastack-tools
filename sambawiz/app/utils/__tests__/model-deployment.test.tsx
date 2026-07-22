@@ -1,7 +1,7 @@
 import { screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
-import ModelDeploymentManager, { getBundleDeploymentStatus } from '../../components/ModelDeploymentManager';
+import ModelDeploymentManager, { getBundleDeploymentStatus, isPodProbeFailure } from '../../components/ModelDeploymentManager';
 
 // Mock next/navigation
 jest.mock('next/navigation', () => ({
@@ -65,6 +65,48 @@ describe('Model Deployment Manager', () => {
       const defaultPod = { ready: 1, total: 1, status: 'Running' };
       const status = getBundleDeploymentStatus(null, defaultPod);
       expect(status).toBe('Deploying');
+    });
+  });
+
+  describe('isPodProbeFailure', () => {
+    it('returns false when there is no error message', () => {
+      expect(isPodProbeFailure(null)).toBe(false);
+    });
+
+    it('does NOT flag a logs probe failing because the container is still initializing', () => {
+      // Regression: a fresh deployment whose default pod is still PodInitializing
+      // was wrongly reported as "Deployment failed" because the logs command fails
+      // with a "command failed" message while the container is waiting to start.
+      const msg =
+        'Command failed: kubectl -n default logs inf-bd-ds-v32-gemma-4-31b-llama-75550aed-q-default-n-0 -c inf --tail=5\n' +
+        'Error from server (BadRequest): container "inf" in pod "inf-bd-ds-v32-gemma-4-31b-llama-75550aed-q-default-n-62521c1375" is waiting to start: PodInitializing';
+      expect(isPodProbeFailure(msg)).toBe(false);
+    });
+
+    it('does NOT flag a container that is still being created', () => {
+      const msg =
+        'Command failed: kubectl logs ...\ncontainer "inf" is waiting to start: ContainerCreating';
+      expect(isPodProbeFailure(msg)).toBe(false);
+    });
+
+    it('flags a pod that could not be found', () => {
+      expect(isPodProbeFailure('Error from server (NotFound): pods "inf-x-cache-0" not found')).toBe(true);
+    });
+
+    it('flags a generic command failure that is not a startup state', () => {
+      expect(isPodProbeFailure('Command failed: kubectl get pods\nUnable to connect to the server')).toBe(true);
+    });
+
+    it('flags "no resources" (nothing scheduled)', () => {
+      expect(isPodProbeFailure('No resources found in default namespace.')).toBe(true);
+    });
+
+    it('flags a real crash even though the container is "waiting to start"', () => {
+      // CrashLoopBackOff / ImagePullBackOff also say "waiting to start", but they
+      // are genuine failures — only PodInitializing/ContainerCreating are benign.
+      const msg =
+        'Command failed: kubectl logs ...\ncontainer "inf" is waiting to start: CrashLoopBackOff';
+      expect(isPodProbeFailure(msg)).toBe(true);
     });
   });
 
@@ -208,6 +250,81 @@ describe('Model Deployment Manager', () => {
     expect(generatedYaml).toContain('startupTimeout: 7200');
     expect(generatedYaml).toContain('owner: no-reply@sambanova.ai');
     expect(generatedYaml).toContain('sambanova-artifact-reader');
+
+    jest.useFakeTimers();
+  });
+
+  it('previews the operator-shortened pod names in the long-name warning', async () => {
+    jest.useRealTimers();
+
+    const longName = 'bd-llama-4-maverick-17b-128e-instruct-alcf'; // > 36 chars → default pod truncated
+    // For this name the cache pod (63-char limit) is NOT shortened — it matches
+    // its naive `inf-<name>-cache-0` form — so only the default pod is listed.
+    const naiveCache = `inf-${longName}-cache-0`;
+    const shortenedDefault = 'inf-bd-llama-4-maverick-17b-128-f0968391-q-default-n-0';
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url.startsWith('/api/predicted-pod-names')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            deploymentName: longName,
+            podNames: { cache: naiveCache, default: shortenedDefault },
+          }),
+        });
+      }
+      if (url === '/api/model-bundles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            bundles: [
+              {
+                name: 'my-bundle',
+                namespace: 'default',
+                creationTimestamp: '2024-01-01T00:00:00Z',
+                isValid: true,
+                validationReason: 'ValidationSucceeded',
+                validationMessage: '',
+                modelConfigs: [{ model: 'llama-3-8b-instruct:1', profile: 'llama-3-8b-hi' }],
+              },
+            ],
+          }),
+        });
+      }
+      // model-deployment (list) + model-deployment-state (no saved state)
+      return Promise.resolve({ ok: true, json: async () => ({ success: false, bundleDeployments: [] }) });
+    });
+
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const user = userEvent.setup();
+    const bundleSelect = await screen.findByLabelText('Bundle');
+    await user.click(bundleSelect);
+    await user.click(await screen.findByRole('option', { name: 'my-bundle' }));
+
+    const nameField = await screen.findByLabelText('Deployment Name');
+    await user.clear(nameField); // clear the bundle-derived default name first
+    await user.type(nameField, longName);
+
+    // The warning fetches the operator-derived names (debounced) and renders them.
+    await waitFor(
+      () => {
+        expect(global.fetch).toHaveBeenCalledWith(
+          `/api/predicted-pod-names?deploymentName=${encodeURIComponent(longName)}`
+        );
+      },
+      { timeout: 3000 }
+    );
+
+    const warning = await screen.findByText(/the pod names will be shortened as follows/i);
+    await waitFor(() => expect(warning.textContent).toContain(`default: ${shortenedDefault}`));
+    // The cache pod isn't shortened for this name, so it must NOT be listed.
+    expect(warning.textContent).not.toContain('cache:');
+    expect(warning.textContent).not.toContain(naiveCache);
 
     jest.useFakeTimers();
   });

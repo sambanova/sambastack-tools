@@ -204,4 +204,20 @@ describe('generate-model-profiles route', () => {
     expect(response.status).toBe(500);
     expect(body.success).toBe(false);
   });
+
+  it('returns a clear 400 (not a 500) when the backend has no ModelProfile CRD (v2-only backend)', async () => {
+    (execSync as jest.Mock).mockImplementation(() => {
+      const err = new Error('Command failed: kubectl -n default get modelprofiles -o json') as Error & { stderr?: string };
+      err.stderr = 'error: the server doesn\'t have a resource type "modelprofiles"';
+      throw err;
+    });
+
+    const response = await POST();
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('does not support v3 bundles');
+    expect(body.error).toContain('ModelProfile');
+  });
 });

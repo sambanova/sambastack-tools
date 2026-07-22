@@ -27,11 +27,17 @@ import {
   DialogContent,
   DialogContentText,
   DialogActions,
-  FormControlLabel,
+  Table,
+  TableHead,
+  TableBody,
+  TableRow,
+  TableCell,
+  Collapse,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import SaveIcon from '@mui/icons-material/Save';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import type {
   CheckpointMappingV3,
   ModelProfilesCache,
@@ -219,29 +225,30 @@ function ProfileCard({
   );
 }
 
-/** Editable batching-config override for a single model, seeded from the profile's effective config. Never exposes `is_default` (auto-derived by the generator). */
+/** Fixed batch-size columns for the override grid (plus a leading "All" column). */
+const BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
+
+/**
+ * Editable batching-config override for a single model, rendered as a checkbox grid.
+ *
+ * Rows are the profile's context-length tiers; columns are "All" + BATCH_COLUMNS. A cell is
+ * enabled only when that batch size is supported for the tier by the profile (`universe` — the
+ * profile's effective config, which is the complete universe of supported tiers × batch sizes).
+ * "All" reflects/controls every supported cell in its row: checking it selects all supported
+ * (stored as `'*'`), and it auto-checks when every supported cell is checked. The current
+ * selection lives in `override` and flows to the generator; `is_default` is never exposed
+ * (auto-derived by the generator).
+ */
 function BatchingOverrideEditor({
-  editorKey,
+  universe,
   override,
   onChange,
 }: {
-  editorKey: string;
+  universe: BatchingConfig;
   override: BatchingConfig;
   onChange: (next: BatchingConfig) => void;
 }) {
-  const [rawText, setRawText] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    const initial: Record<string, string> = {};
-    Object.entries(override).forEach(([tier, cfg]) => {
-      initial[tier] = Array.isArray(cfg.batch_sizes) ? cfg.batch_sizes.join(', ') : '';
-    });
-    setRawText(initial);
-    // Only reset raw text when switching to a different model/profile, not on every override tweak.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editorKey]);
-
-  const tiers = Object.keys(override);
+  const tiers = Object.keys(universe);
 
   if (tiers.length === 0) {
     return (
@@ -251,52 +258,76 @@ function BatchingOverrideEditor({
     );
   }
 
+  // Batch sizes the profile supports for a tier, restricted to the fixed columns.
+  const supportedFor = (tier: string): number[] => {
+    const bs = universe[tier]?.batch_sizes;
+    if (bs === '*' || bs === undefined) return [...BATCH_COLUMNS];
+    return BATCH_COLUMNS.filter((c) => bs.includes(c));
+  };
+
+  const setTier = (tier: string, batch_sizes: BatchingConfig[string]['batch_sizes']) => {
+    onChange({ ...override, [tier]: { batch_sizes } });
+  };
+
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-      {tiers.map((tier) => {
-        const cfg = override[tier];
-        const isAll = cfg.batch_sizes === '*';
-        return (
-          <Box key={tier} sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-            <Typography variant="body2" sx={{ minWidth: 60, fontWeight: 600 }}>
-              {tier}
-            </Typography>
-            <FormControlLabel
-              control={
+    <Table size="small" sx={{ width: 'auto', '& td, & th': { border: 0, px: 1, py: 0.25 } }}>
+      <TableHead>
+        <TableRow>
+          <TableCell sx={{ fontWeight: 600 }}>Context</TableCell>
+          <TableCell align="center" sx={{ fontWeight: 600 }}>All</TableCell>
+          {BATCH_COLUMNS.map((c) => (
+            <TableCell key={c} align="center" sx={{ fontWeight: 600 }}>{c}</TableCell>
+          ))}
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {tiers.map((tier) => {
+          const supported = supportedFor(tier);
+          const bs = override[tier]?.batch_sizes;
+          const isChecked = (c: number) => bs === '*' || (Array.isArray(bs) && bs.includes(c));
+          const allChecked = supported.length > 0 && supported.every(isChecked);
+
+          const toggleAll = (checked: boolean) => setTier(tier, checked ? '*' : []);
+
+          const toggleCell = (c: number, checked: boolean) => {
+            const current: number[] = bs === '*' ? [...supported] : Array.isArray(bs) ? [...bs] : [];
+            const next = checked
+              ? Array.from(new Set([...current, c])).sort((a, b) => a - b)
+              : current.filter((x) => x !== c);
+            // Collapse to '*' when every supported batch size is selected (All auto-checks).
+            setTier(tier, supported.length > 0 && supported.every((s) => next.includes(s)) ? '*' : next);
+          };
+
+          return (
+            <TableRow key={tier}>
+              <TableCell sx={{ fontWeight: 600 }}>{tier}</TableCell>
+              <TableCell align="center">
                 <Checkbox
-                  checked={isAll}
-                  onChange={(e) => {
-                    const next: BatchingConfig = { ...override, [tier]: { batch_sizes: e.target.checked ? '*' : [] } };
-                    onChange(next);
-                  }}
+                  size="small"
+                  checked={allChecked}
+                  onChange={(e) => toggleAll(e.target.checked)}
+                  inputProps={{ 'aria-label': `All batch sizes for ${tier}` }}
                 />
-              }
-              label="All batch sizes (*)"
-            />
-            {!isAll && (
-              <TextField
-                size="small"
-                label="Batch sizes (comma-separated)"
-                value={rawText[tier] ?? ''}
-                onChange={(e) => {
-                  const text = e.target.value;
-                  setRawText((prev) => ({ ...prev, [tier]: text }));
-                  const parsed = text
-                    .split(',')
-                    .map((v) => v.trim())
-                    .filter((v) => v.length > 0)
-                    .map((v) => Number(v))
-                    .filter((v) => !Number.isNaN(v));
-                  const next: BatchingConfig = { ...override, [tier]: { batch_sizes: parsed } };
-                  onChange(next);
-                }}
-                sx={{ minWidth: 260 }}
-              />
-            )}
-          </Box>
-        );
-      })}
-    </Box>
+              </TableCell>
+              {BATCH_COLUMNS.map((c) => {
+                const enabled = supported.includes(c);
+                return (
+                  <TableCell key={c} align="center">
+                    <Checkbox
+                      size="small"
+                      disabled={!enabled}
+                      checked={enabled && isChecked(c)}
+                      onChange={(e) => toggleCell(c, e.target.checked)}
+                      inputProps={{ 'aria-label': `Batch size ${c} for ${tier}` }}
+                    />
+                  </TableCell>
+                );
+              })}
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -406,6 +437,7 @@ export default function ModelSelection() {
   const [generatedYaml, setGeneratedYaml] = useState<string>('');
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [copiedToClipboard, setCopiedToClipboard] = useState<boolean>(false);
+  const [overrideExpanded, setOverrideExpanded] = useState<boolean>(false);
   const [pendingLoad, setPendingLoad] = useState<ParsedModelBundleState | null>(null);
   const [validationResult, setValidationResult] = useState<{
     success: boolean;
@@ -1080,24 +1112,41 @@ export default function ModelSelection() {
         </Paper>
       )}
 
-      {/* Step 3: Override the selected profile's batching config */}
+      {/* Step 3: Override the selected profile's batching config (optional, collapsed by default) */}
       {modelsWithResolvedProfile.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
-          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-            3. Override Batching Configuration
-          </Typography>
-          {modelsWithResolvedProfile.map(({ displayName, state, profile }, idx) => (
-            <Box key={displayName} sx={{ mb: idx < modelsWithResolvedProfile.length - 1 ? 3 : 0 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
-                {displayName}
-              </Typography>
-              <BatchingOverrideEditor
-                editorKey={`${displayName}:${profile.metadata.name}`}
-                override={state.override}
-                onChange={(next) => handleOverrideChange(displayName, next)}
-              />
+          <Box
+            onClick={() => setOverrideExpanded((v) => !v)}
+            sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+          >
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              3. Override Batching Configuration (Optional)
+            </Typography>
+            <IconButton
+              size="small"
+              aria-label={overrideExpanded ? 'Collapse batching overrides' : 'Expand batching overrides'}
+              aria-expanded={overrideExpanded}
+              onClick={(e) => { e.stopPropagation(); setOverrideExpanded((v) => !v); }}
+            >
+              <ExpandMoreIcon sx={{ transform: overrideExpanded ? 'rotate(180deg)' : 'none', transition: '0.2s' }} />
+            </IconButton>
+          </Box>
+          <Collapse in={overrideExpanded} unmountOnExit>
+            <Box sx={{ mt: 2 }}>
+              {modelsWithResolvedProfile.map(({ displayName, state, profile }, idx) => (
+                <Box key={displayName} sx={{ mb: idx < modelsWithResolvedProfile.length - 1 ? 3 : 0 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                    {displayName}
+                  </Typography>
+                  <BatchingOverrideEditor
+                    universe={getEffectiveBatchingConfig(profile)}
+                    override={state.override}
+                    onChange={(next) => handleOverrideChange(displayName, next)}
+                  />
+                </Box>
+              ))}
             </Box>
-          ))}
+          </Collapse>
         </Paper>
       )}
 
@@ -1105,7 +1154,7 @@ export default function ModelSelection() {
       {modelSelections && modelSelections.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-            4. Bundle YAML
+            4. Save & Validate Selections
           </Typography>
 
           <Box sx={{ mb: 2 }}>
@@ -1115,7 +1164,7 @@ export default function ModelSelection() {
               label="Bundle Name"
               value={bundleName}
               onChange={(e) => setBundleName(e.target.value)}
-              helperText="Edit the bundle name (used for the ModelBundle resource)"
+              helperText="The bundle name will be used to save your selections in a YAML file"
               variant="outlined"
               size="small"
             />

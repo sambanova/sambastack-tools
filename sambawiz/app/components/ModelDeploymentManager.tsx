@@ -123,6 +123,26 @@ export function getBundleDeploymentStatus(
   return "Deploying";
 }
 
+/**
+ * Whether a status/logs probe error message indicates the expected pods are
+ * genuinely not running (so the deployment should be reported as failed).
+ *
+ * A "not found" / "no resources" / "command failed" message normally means the
+ * pods could not be scheduled or were deleted. The one important exception is a
+ * logs probe that fails only because a container is still starting up
+ * ("PodInitializing" / "ContainerCreating" — e.g. `container "inf" ... is
+ * waiting to start: PodInitializing`). That is the normal early state of a fresh
+ * deployment, not a failure, so it is explicitly excluded. Genuine failures such
+ * as CrashLoopBackOff, ImagePullBackOff or "not found" are still reported.
+ *
+ * @param msg - The probe error message, or null when the probe succeeded
+ */
+export function isPodProbeFailure(msg: string | null): boolean {
+  if (!msg) return false;
+  if (/podinitializing|containercreating/i.test(msg)) return false;
+  return /not\s*found|no resources|command failed/i.test(msg);
+}
+
 export default function ModelDeploymentManager() {
   const searchParams = useSearchParams();
   const [bundleDeployments, setBundleDeployments] = useState<ModelDeploymentSummary[]>([]);
@@ -133,7 +153,7 @@ export default function ModelDeploymentManager() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState<boolean>(false);
   const [deleting, setDeleting] = useState<boolean>(false);
 
-  // Section 2: Deploy a Bundle
+  // Section 2: Deploy a Model Bundle
   const [validBundles, setValidBundles] = useState<ModelBundleSummary[]>([]);
   const [selectedBundle, setSelectedBundle] = useState<string>('');
   const [deploymentName, setDeploymentName] = useState<string>('');
@@ -146,6 +166,10 @@ export default function ModelDeploymentManager() {
     message: string;
     output?: string;
   } | null>(null);
+  // Operator-derived pod names previewed in the long-name warning. The operator
+  // truncates+hashes long names using server-only crypto, so these are resolved
+  // by /api/predicted-pod-names rather than computed in the client bundle.
+  const [predictedPodNames, setPredictedPodNames] = useState<{ cache: string; default: string } | null>(null);
 
   // Section 3: Check Deployment Status
   const [podLogs, setPodLogs] = useState<string>('');
@@ -176,6 +200,36 @@ export default function ModelDeploymentManager() {
   const [saveDialogOpen, setSaveDialogOpen] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveResult, setSaveResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Resolve the operator's shortened pod names for the long-name warning. Only
+  // fetch when the name is actually long enough to be truncated, and debounce so
+  // we don't hit the endpoint on every keystroke.
+  useEffect(() => {
+    if (!arePodNamesShortened(deploymentName)) {
+      setPredictedPodNames(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `/api/predicted-pod-names?deploymentName=${encodeURIComponent(deploymentName)}`
+        );
+        const data = await response.json();
+        if (!cancelled && data.success && data.podNames) {
+          setPredictedPodNames(data.podNames);
+        }
+      } catch {
+        if (!cancelled) setPredictedPodNames(null);
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [deploymentName]);
 
   // Fetch pod status for all deployments
   const fetchAllDeploymentStatuses = async (deployments: ModelDeploymentSummary[]) => {
@@ -274,9 +328,9 @@ export default function ModelDeploymentManager() {
         // Auto-suggest deployment name
         let suggestedName = '';
         if (bundleParam.startsWith('b-')) {
-          suggestedName = bundleParam.replace('b-', 'bd-');
+          suggestedName = bundleParam.replace('b-', 'md-');
         } else {
-          suggestedName = `bd-${bundleParam}`;
+          suggestedName = `md-${bundleParam}`;
         }
         setDeploymentName(suggestedName);
 
@@ -538,9 +592,9 @@ export default function ModelDeploymentManager() {
     let suggestedName = '';
     if (bundleName) {
       if (bundleName.startsWith('b-')) {
-        suggestedName = bundleName.replace('b-', 'bd-');
+        suggestedName = bundleName.replace('b-', 'md-');
       } else {
-        suggestedName = `bd-${bundleName}`;
+        suggestedName = `md-${bundleName}`;
       }
       setDeploymentName(suggestedName);
 
@@ -812,11 +866,11 @@ export default function ModelDeploymentManager() {
       {/* Documentation Panel */}
       <DocumentationPanel docFile="model-deployment.md" />
 
-      {/* Section 1: Check for existing Bundle Deployments */}
+      {/* Section 1: Check for existing Model Deployments */}
       <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6" sx={{ fontWeight: 600 }}>
-            1. Check for existing Bundle Deployments
+            1. Check for existing Model Deployments
           </Typography>
           <Button
             variant="outlined"
@@ -911,10 +965,10 @@ export default function ModelDeploymentManager() {
         )}
       </Paper>
 
-      {/* Section 2: Deploy a Bundle */}
+      {/* Section 2: Deploy a Model Bundle */}
       <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
         <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-          2. Deploy a Bundle
+          2. Deploy a Model Bundle
         </Typography>
 
         {/* Loading State */}
@@ -972,7 +1026,7 @@ export default function ModelDeploymentManager() {
                   label="Deployment Name"
                   value={deploymentName}
                   onChange={(e) => handleDeploymentNameChange(e.target.value)}
-                  helperText="Enter the name for this bundle deployment (e.g., bd-your-bundle-name)"
+                  helperText="Enter the name for this bundle deployment (e.g., md-your-bundle-name)"
                   variant="outlined"
                   sx={{ mb: 3 }}
                 />
@@ -985,8 +1039,21 @@ export default function ModelDeploymentManager() {
                   <Typography variant="caption" sx={{ color: 'warning.main', display: 'block', mt: -2, mb: 2 }}>
                     Warning: This name is long enough that the operator will shorten the pod
                     names (truncate + hash) to satisfy Kubernetes naming limits. The deployment
-                    name itself is unchanged; SambaWiz resolves the real pod names from the
-                    cluster when matching status and logs.
+                    name itself is unchanged, but the pod names will be shortened as follows:
+                    {(() => {
+                      if (!predictedPodNames) return ' (resolving…)';
+                      // Only surface pods the operator actually shortened — compare
+                      // the resolved name against the naive `inf-<name>-…` form.
+                      const shortened = [
+                        { label: 'cache', name: predictedPodNames.cache, naive: `inf-${deploymentName}-cache-0` },
+                        { label: 'default', name: predictedPodNames.default, naive: `inf-${deploymentName}-q-default-n-0` },
+                      ].filter((pod) => pod.name !== pod.naive);
+                      return shortened.map((pod) => (
+                        <span key={pod.label} style={{ display: 'block', fontFamily: 'monospace' }}>
+                          {pod.label}: {pod.name}
+                        </span>
+                      ));
+                    })()}
                   </Typography>
                 )}
 
@@ -1365,15 +1432,16 @@ export default function ModelDeploymentManager() {
               podStatus.cachePod.ready === podStatus.cachePod.total &&
               podStatus.defaultPod.ready === podStatus.defaultPod.total;
 
-            // A "not found" / command failure from any probe means the expected
-            // pods are not actually running (e.g. nothing could be scheduled
-            // because no hosts were free). Never report success in that case.
-            const isMissing = (msg: string | null) =>
-              !!msg && /not\s*found|no resources|command failed/i.test(msg);
+            // A probe error means the expected pods are not actually running
+            // (e.g. nothing could be scheduled because no hosts were free) — never
+            // report success in that case. A logs probe that fails only because a
+            // container is still starting up ("PodInitializing" / "ContainerCreating")
+            // is the normal early state of a fresh deployment and is not a failure
+            // (see isPodProbeFailure).
             const hasError =
-              isMissing(podStatusError) ||
-              isMissing(podLogsError) ||
-              isMissing(defaultPodLogsError);
+              isPodProbeFailure(podStatusError) ||
+              isPodProbeFailure(podLogsError) ||
+              isPodProbeFailure(defaultPodLogsError);
 
             if (bothReady && !hasError) {
               return (
