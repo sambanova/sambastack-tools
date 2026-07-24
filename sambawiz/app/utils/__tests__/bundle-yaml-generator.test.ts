@@ -1,6 +1,7 @@
 import yaml from 'js-yaml';
 import {
   formatModelRef,
+  formatModelRefLatest,
   isEmbeddingModel,
   getEffectiveBatchingConfig,
   deriveIsDefaultTier,
@@ -57,6 +58,35 @@ describe('bundle-yaml-generator', () => {
       );
       expect(formatModelRef(mockMultiArchModel, 'llama-4-maverick-v2')).toBe(
         'llama-4-maverick-17b-128e-instruct:llama-4-maverick-v2:1'
+      );
+    });
+
+    it('uses an explicit version override in place of the latest version', () => {
+      expect(formatModelRef(mockSingleArchModel, 'e5-mistral', '3')).toBe('e5-mistral-7b-instruct:3');
+      expect(formatModelRef(mockMultiArchModel, 'llama-4-maverick', '2')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick:2'
+      );
+    });
+  });
+
+  describe('formatModelRefLatest', () => {
+    it('formats single-arch models as bare crname (no arch, no version → latest)', () => {
+      expect(formatModelRefLatest(mockSingleArchModel, 'e5-mistral')).toBe('e5-mistral-7b-instruct');
+    });
+
+    it('formats multi-arch models as crname:arch (no version → latest)', () => {
+      expect(formatModelRefLatest(mockMultiArchModel, 'llama-4-maverick')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick'
+      );
+      expect(formatModelRefLatest(mockMultiArchModel, 'llama-4-maverick-v2')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick-v2'
+      );
+    });
+
+    it('pins the version override when provided (instead of omitting it for latest)', () => {
+      expect(formatModelRefLatest(mockSingleArchModel, 'e5-mistral', '3')).toBe('e5-mistral-7b-instruct:3');
+      expect(formatModelRefLatest(mockMultiArchModel, 'llama-4-maverick', '2')).toBe(
+        'llama-4-maverick-17b-128e-instruct:llama-4-maverick:2'
       );
     });
   });

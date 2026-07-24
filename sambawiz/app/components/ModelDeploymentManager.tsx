@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useSearchParams, useRouter } from 'next/navigation';
 import {
   Box,
   Paper,
@@ -29,6 +29,9 @@ import {
   Collapse,
   IconButton,
   LinearProgress,
+  Radio,
+  RadioGroup,
+  FormControlLabel,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -145,6 +148,25 @@ export function isPodProbeFailure(msg: string | null): boolean {
 
 export default function ModelDeploymentManager() {
   const searchParams = useSearchParams();
+  const router = useRouter();
+
+  // Model-source query params. When BOTH are present the page deploys a single
+  // model + named profile inline (`spec.models`) instead of referencing a
+  // ModelBundle CR. `modelPath` is a "<ModelCRname>[:<arch>][:<version>]" ref and
+  // `profileName` is a ModelProfile's metadata.name. The Model Selection page
+  // will later redirect here with these set.
+  const modelPath = searchParams.get('modelPath');
+  const profileName = searchParams.get('profileName');
+  const hasModelParams = Boolean(modelPath && profileName);
+
+  // Section 2 source selector: deploy an individual "model" (+ profile) or a
+  // "bundle". Defaults to "model" only when both model params are present.
+  const [deployMode, setDeployMode] = useState<'model' | 'bundle'>(
+    hasModelParams ? 'model' : 'bundle'
+  );
+  // One-time reminder shown when arriving from the Model Selection page's
+  // "Create Deployment" (model+profile) flow, before the user deploys.
+  const [showModelDeployNotice, setShowModelDeployNotice] = useState<boolean>(false);
   const [bundleDeployments, setBundleDeployments] = useState<ModelDeploymentSummary[]>([]);
   const [deploymentToDelete, setDeploymentToDelete] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -288,8 +310,9 @@ export default function ModelDeploymentManager() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
-    // Skip loading saved state if a bundle is specified in the URL query param
-    if (!searchParams.get('bundle')) {
+    // Skip loading saved state if a bundle (or a model+profile) is specified in
+    // the URL query params — those drive the form instead of the saved state.
+    if (!searchParams.get('bundle') && !hasModelParams) {
       loadSavedState();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -343,6 +366,35 @@ export default function ModelDeploymentManager() {
       }
     }
   }, [searchParams, validBundles]);
+
+  // Handle query params for deploying an individual model + profile. When both
+  // `modelPath` and `profileName` are present, generate a `spec.models` inline
+  // deployment (no ModelBundle CR) and default the source selector to "model".
+  useEffect(() => {
+    if (modelPath && profileName) {
+      // Reset section 3 (hide it by clearing monitoredDeployment)
+      setMonitoredDeployment('');
+
+      setDeployMode('model');
+
+      // Auto-suggest deployment name from the model CR name (strip any
+      // ":arch"/":version" suffix), e.g. "md-minimax-m2-7".
+      const suggestedName = deriveModelDeploymentName(modelPath);
+      setDeploymentName(suggestedName);
+
+      // Generate YAML
+      setDeploymentYaml(
+        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+      );
+
+      // Clear deployment result to start fresh
+      setDeploymentResult(null);
+
+      // Remind the user to check for active deployments and review the YAML
+      // before deploying this model+profile.
+      setShowModelDeployNotice(true);
+    }
+  }, [modelPath, profileName]);
 
   // Returns next poll delay based on how long the last fetch took:
   // elapsed < 6s → 6s, elapsed < 12s → 12s, else 24s
@@ -583,6 +635,86 @@ export default function ModelDeploymentManager() {
     return yaml.dump(modelDeployment, { lineWidth: -1 }).trimEnd();
   };
 
+  /**
+   * Derive a deployment name from a model ref. Strips the optional
+   * ":arch"/":version" suffix from "<ModelCRname>[:<arch>][:<version>]" and
+   * prefixes "md-", e.g. "minimax-m2-7:minimax-m2p5:1" → "md-minimax-m2-7".
+   */
+  const deriveModelDeploymentName = (modelRef: string): string => {
+    const crname = modelRef.split(':')[0];
+    return `md-${crname}`.toLowerCase();
+  };
+
+  /**
+   * Generate a `ModelDeployment` document that inlines a single model + named
+   * profile via `spec.models` (rather than referencing a ModelBundle CR).
+   * `modelRef` is a "<ModelCRname>[:<arch>][:<version>]" ref and `profile` is a
+   * ModelProfile's metadata.name. All other deployment knobs match the
+   * bundle-based `generateDeploymentYaml`.
+   */
+  const generateModelDeploymentYaml = (
+    modelRef: string,
+    profile: string,
+    deploymentName: string
+  ): string => {
+    const modelDeployment = {
+      apiVersion: 'sambanova.ai/v1alpha1',
+      kind: 'ModelDeployment',
+      metadata: {
+        name: deploymentName,
+      },
+      spec: {
+        models: {
+          modelConfigs: [
+            {
+              model: modelRef,
+              profile: profile,
+            },
+          ],
+        },
+        groups: [
+          {
+            minReplicas: 1,
+            name: 'default',
+            qosList: ['free'],
+          },
+        ],
+        owner: 'no-reply@sambanova.ai',
+        secretNames: ['sambanova-artifact-reader'],
+        engineConfig: {
+          startupTimeout: 7200,
+        },
+      },
+    };
+
+    return yaml.dump(modelDeployment, { lineWidth: -1 }).trimEnd();
+  };
+
+  /**
+   * Handle the source selector (radio) between "model" and "bundle". Selecting
+   * "model" without both model params in the URL sends the user to the Model
+   * Selection page to pick a model + profile (which will redirect back here
+   * with `modelPath` and `profileName` set).
+   */
+  const handleDeployModeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const mode = event.target.value as 'model' | 'bundle';
+
+    if (mode === 'model' && !hasModelParams) {
+      router.push('/model-selection');
+      return;
+    }
+
+    setDeployMode(mode);
+
+    if (mode === 'model' && modelPath && profileName) {
+      const suggestedName = deriveModelDeploymentName(modelPath);
+      setDeploymentName(suggestedName);
+      setDeploymentYaml(
+        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+      );
+    }
+  };
+
   // Handle bundle selection
   const handleBundleChange = (event: SelectChangeEvent<string>) => {
     const bundleName = event.target.value;
@@ -612,7 +744,11 @@ export default function ModelDeploymentManager() {
     setDeploymentName(newName);
 
     // Regenerate YAML with new deployment name
-    if (selectedBundle && newName) {
+    if (deployMode === 'model' && modelPath && profileName && newName) {
+      setDeploymentYaml(
+        generateModelDeploymentYaml(modelPath, profileName, newName)
+      );
+    } else if (selectedBundle && newName) {
       const yaml = generateDeploymentYaml(selectedBundle, newName);
       setDeploymentYaml(yaml);
     }
@@ -861,6 +997,151 @@ export default function ModelDeploymentManager() {
     setSaveResult(null);
   };
 
+  // Shared editor (deployment name + generated YAML + results + actions), used
+  // by both the "model" and "bundle" source modes once a source is selected.
+  const deploymentEditor = (
+    <Box>
+      <TextField
+        fullWidth
+        label="Deployment Name"
+        value={deploymentName}
+        onChange={(e) => handleDeploymentNameChange(e.target.value)}
+        helperText="Enter the name for this model deployment (e.g., md-your-bundle-name)"
+        variant="outlined"
+        sx={{ mb: 3 }}
+      />
+      {deploymentName && deploymentName !== deploymentName.toLowerCase() && (
+        <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: -2, mb: 2 }}>
+          Warning: Deployment name should be in lowercase
+        </Typography>
+      )}
+      {arePodNamesShortened(deploymentName) && (
+        <Typography variant="caption" sx={{ color: 'warning.main', display: 'block', mt: -2, mb: 2 }}>
+          Warning: This name is long enough that the operator will shorten the pod
+          names (truncate + hash) to satisfy Kubernetes naming limits. The deployment
+          name itself is unchanged, but the pod names will be shortened as follows:
+          {(() => {
+            if (!predictedPodNames) return ' (resolving…)';
+            // Only surface pods the operator actually shortened — compare
+            // the resolved name against the naive `inf-<name>-…` form.
+            const shortened = [
+              { label: 'cache', name: predictedPodNames.cache, naive: `inf-${deploymentName}-cache-0` },
+              { label: 'default', name: predictedPodNames.default, naive: `inf-${deploymentName}-q-default-n-0` },
+            ].filter((pod) => pod.name !== pod.naive);
+            return shortened.map((pod) => (
+              <span key={pod.label} style={{ display: 'block', fontFamily: 'monospace' }}>
+                {pod.label}: {pod.name}
+              </span>
+            ));
+          })()}
+        </Typography>
+      )}
+
+      {/* Generated YAML */}
+      <Box>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+            Generated YAML
+          </Typography>
+          <Button
+            startIcon={<ContentCopyIcon />}
+            onClick={handleCopyYaml}
+            size="small"
+            disabled={!deploymentYaml}
+            sx={{
+              color: copiedYaml ? 'success.main' : 'primary.main',
+            }}
+          >
+            {copiedYaml ? 'Copied!' : 'Copy'}
+          </Button>
+        </Box>
+        <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
+          Feel free to edit the YAML below as needed or use it as-is
+        </Typography>
+        <TextField
+          fullWidth
+          multiline
+          rows={15}
+          value={deploymentYaml}
+          onChange={(e) => setDeploymentYaml(e.target.value)}
+          variant="outlined"
+          sx={{
+            '& .MuiInputBase-root': {
+              fontFamily: 'monospace',
+              fontSize: '0.875rem',
+            },
+          }}
+        />
+      </Box>
+
+      {/* Deployment Result */}
+      {deploymentResult && (
+        <Box sx={{ mt: 2 }}>
+          <Alert
+            severity={deploymentResult.success ? 'success' : 'error'}
+            onClose={() => setDeploymentResult(null)}
+          >
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: deploymentResult.output ? 1 : 0 }}>
+              {deploymentResult.message}
+            </Typography>
+            {deploymentResult.output && (
+              <Box
+                component="pre"
+                sx={{
+                  mt: 1,
+                  p: 1.5,
+                  bgcolor: 'rgba(0, 0, 0, 0.05)',
+                  borderRadius: 1,
+                  fontSize: '0.75rem',
+                  overflow: 'auto',
+                  maxHeight: '150px',
+                }}
+              >
+                {deploymentResult.output}
+              </Box>
+            )}
+          </Alert>
+        </Box>
+      )}
+
+      {/* Save Result */}
+      {saveResult && (
+        <Box sx={{ mt: 2 }}>
+          <Alert
+            severity={saveResult.success ? 'success' : 'error'}
+            onClose={() => setSaveResult(null)}
+          >
+            {saveResult.message}
+          </Alert>
+        </Box>
+      )}
+
+      {/* Save and Deploy Buttons */}
+      <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
+        <Button
+          variant="outlined"
+          color="primary"
+          size="large"
+          onClick={handleSaveClick}
+          disabled={isSaving || !deploymentYaml || !deploymentName}
+          startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
+        >
+          {isSaving ? 'Saving...' : 'Save'}
+        </Button>
+        <Button
+          variant="contained"
+          color="primary"
+          size="large"
+          startIcon={deploying ? <CircularProgress size={20} color="inherit" /> : <RocketLaunchIcon />}
+          onClick={handleDeploy}
+          disabled={deploying || !deploymentYaml}
+        >
+          {deploying ? 'Deploying...' : 'Deploy'}
+        </Button>
+      </Box>
+    </Box>
+  );
+
   return (
     <Box>
       {/* Documentation Panel */}
@@ -968,200 +1249,102 @@ export default function ModelDeploymentManager() {
       {/* Section 2: Deploy a Model Bundle */}
       <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
         <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
-          2. Deploy a Model Bundle
+          2. Deploy a Model/Bundle
         </Typography>
 
-        {/* Loading State */}
-        {loadingBundles && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
-            <CircularProgress />
-          </Box>
-        )}
+        {/* Source selector — deploy an individual model (+ profile) or a bundle. */}
+        <RadioGroup
+          row
+          aria-label="deployment source"
+          value={deployMode}
+          onChange={handleDeployModeChange}
+          sx={{ mb: 2 }}
+        >
+          <FormControlLabel value="model" control={<Radio />} label="Model" />
+          <FormControlLabel value="bundle" control={<Radio />} label="Model Bundle" />
+        </RadioGroup>
 
-        {/* Empty State */}
-        {!loadingBundles && validBundles.length === 0 && (
-          <Alert severity="info">
-            No valid model bundles found. Please create and validate a model bundle first.
-          </Alert>
-        )}
-
-        {/* Bundle Selection Form */}
-        {!loadingBundles && validBundles.length > 0 && (
-          <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
-              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                Select a valid model bundle to deploy
-              </Typography>
-              <Tooltip
-                title="Only model bundles for which validation succeeded are listed here. If you would like to deploy a different model bundle or if you want to see which models/configurations are available in one of the listed model bundles, please use the 'load' feature at the top of the Model Selection page and select 'Remote Environment' as the source."
-                arrow
-              >
-                <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
-              </Tooltip>
+        {/* Model mode: deploy a single model + named profile inline (spec.models). */}
+        {deployMode === 'model' && (
+          hasModelParams ? (
+            <Box>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  Deploying model{' '}
+                  <Box component="span" sx={{ fontFamily: 'monospace', color: 'text.primary' }}>
+                    {modelPath}
+                  </Box>{' '}
+                  with profile{' '}
+                  <Box component="span" sx={{ fontFamily: 'monospace', color: 'text.primary' }}>
+                    {profileName}
+                  </Box>
+                  .
+                </Typography>
+              </Box>
+              {deploymentEditor}
             </Box>
+          ) : (
+            <Alert severity="info">
+              Select a model and profile on the Model Selection page to deploy an individual model.
+            </Alert>
+          )
+        )}
 
-            {/* Bundle Dropdown */}
-            <FormControl fullWidth sx={{ mb: 3 }}>
-              <InputLabel id="bundle-select-label">Model Bundle</InputLabel>
-              <Select
-                labelId="bundle-select-label"
-                id="bundle-select"
-                value={selectedBundle}
-                onChange={handleBundleChange}
-                label="Model Bundle"
-              >
-                {validBundles.map((bundle) => (
-                  <MenuItem key={bundle.name} value={bundle.name}>
-                    {bundle.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            {/* Deployment Name */}
-            {selectedBundle && (
-              <Box>
-                <TextField
-                  fullWidth
-                  label="Deployment Name"
-                  value={deploymentName}
-                  onChange={(e) => handleDeploymentNameChange(e.target.value)}
-                  helperText="Enter the name for this model deployment (e.g., md-your-bundle-name)"
-                  variant="outlined"
-                  sx={{ mb: 3 }}
-                />
-                {deploymentName && deploymentName !== deploymentName.toLowerCase() && (
-                  <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: -2, mb: 2 }}>
-                    Warning: Deployment name should be in lowercase
-                  </Typography>
-                )}
-                {arePodNamesShortened(deploymentName) && (
-                  <Typography variant="caption" sx={{ color: 'warning.main', display: 'block', mt: -2, mb: 2 }}>
-                    Warning: This name is long enough that the operator will shorten the pod
-                    names (truncate + hash) to satisfy Kubernetes naming limits. The deployment
-                    name itself is unchanged, but the pod names will be shortened as follows:
-                    {(() => {
-                      if (!predictedPodNames) return ' (resolving…)';
-                      // Only surface pods the operator actually shortened — compare
-                      // the resolved name against the naive `inf-<name>-…` form.
-                      const shortened = [
-                        { label: 'cache', name: predictedPodNames.cache, naive: `inf-${deploymentName}-cache-0` },
-                        { label: 'default', name: predictedPodNames.default, naive: `inf-${deploymentName}-q-default-n-0` },
-                      ].filter((pod) => pod.name !== pod.naive);
-                      return shortened.map((pod) => (
-                        <span key={pod.label} style={{ display: 'block', fontFamily: 'monospace' }}>
-                          {pod.label}: {pod.name}
-                        </span>
-                      ));
-                    })()}
-                  </Typography>
-                )}
-
-                {/* Generated YAML */}
-                <Box>
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                      Generated YAML
-                    </Typography>
-                    <Button
-                      startIcon={<ContentCopyIcon />}
-                      onClick={handleCopyYaml}
-                      size="small"
-                      disabled={!deploymentYaml}
-                      sx={{
-                        color: copiedYaml ? 'success.main' : 'primary.main',
-                      }}
-                    >
-                      {copiedYaml ? 'Copied!' : 'Copy'}
-                    </Button>
-                  </Box>
-                  <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
-                    Feel free to edit the YAML below as needed or use it as-is
-                  </Typography>
-                  <TextField
-                    fullWidth
-                    multiline
-                    rows={15}
-                    value={deploymentYaml}
-                    onChange={(e) => setDeploymentYaml(e.target.value)}
-                    variant="outlined"
-                    sx={{
-                      '& .MuiInputBase-root': {
-                        fontFamily: 'monospace',
-                        fontSize: '0.875rem',
-                      },
-                    }}
-                  />
-                </Box>
-
-                {/* Deployment Result */}
-                {deploymentResult && (
-                  <Box sx={{ mt: 2 }}>
-                    <Alert
-                      severity={deploymentResult.success ? 'success' : 'error'}
-                      onClose={() => setDeploymentResult(null)}
-                    >
-                      <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: deploymentResult.output ? 1 : 0 }}>
-                        {deploymentResult.message}
-                      </Typography>
-                      {deploymentResult.output && (
-                        <Box
-                          component="pre"
-                          sx={{
-                            mt: 1,
-                            p: 1.5,
-                            bgcolor: 'rgba(0, 0, 0, 0.05)',
-                            borderRadius: 1,
-                            fontSize: '0.75rem',
-                            overflow: 'auto',
-                            maxHeight: '150px',
-                          }}
-                        >
-                          {deploymentResult.output}
-                        </Box>
-                      )}
-                    </Alert>
-                  </Box>
-                )}
-
-                {/* Save Result */}
-                {saveResult && (
-                  <Box sx={{ mt: 2 }}>
-                    <Alert
-                      severity={saveResult.success ? 'success' : 'error'}
-                      onClose={() => setSaveResult(null)}
-                    >
-                      {saveResult.message}
-                    </Alert>
-                  </Box>
-                )}
-
-                {/* Save and Deploy Buttons */}
-                <Box sx={{ mt: 3, display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
-                  <Button
-                    variant="outlined"
-                    color="primary"
-                    size="large"
-                    onClick={handleSaveClick}
-                    disabled={isSaving || !deploymentYaml || !deploymentName}
-                    startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
-                  >
-                    {isSaving ? 'Saving...' : 'Save'}
-                  </Button>
-                  <Button
-                    variant="contained"
-                    color="primary"
-                    size="large"
-                    startIcon={deploying ? <CircularProgress size={20} color="inherit" /> : <RocketLaunchIcon />}
-                    onClick={handleDeploy}
-                    disabled={deploying || !deploymentYaml}
-                  >
-                    {deploying ? 'Deploying...' : 'Deploy'}
-                  </Button>
-                </Box>
+        {/* Bundle mode: reference an existing ModelBundle CR by name (spec.bundle). */}
+        {deployMode === 'bundle' && (
+          <>
+            {/* Loading State */}
+            {loadingBundles && (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
+                <CircularProgress />
               </Box>
             )}
-          </Box>
+
+            {/* Empty State */}
+            {!loadingBundles && validBundles.length === 0 && (
+              <Alert severity="info">
+                No valid model bundles found. Please create and validate a model bundle first.
+              </Alert>
+            )}
+
+            {/* Bundle Selection Form */}
+            {!loadingBundles && validBundles.length > 0 && (
+              <Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
+                  <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                    Select a valid model bundle to deploy
+                  </Typography>
+                  <Tooltip
+                    title="Only model bundles for which validation succeeded are listed here. If you would like to deploy a different model bundle or if you want to see which models/configurations are available in one of the listed model bundles, please use the 'load' feature at the top of the Model Selection page and select 'Remote Environment' as the source."
+                    arrow
+                  >
+                    <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+                  </Tooltip>
+                </Box>
+
+                {/* Bundle Dropdown */}
+                <FormControl fullWidth sx={{ mb: 3 }}>
+                  <InputLabel id="bundle-select-label">Model Bundle</InputLabel>
+                  <Select
+                    labelId="bundle-select-label"
+                    id="bundle-select"
+                    value={selectedBundle}
+                    onChange={handleBundleChange}
+                    label="Model Bundle"
+                  >
+                    {validBundles.map((bundle) => (
+                      <MenuItem key={bundle.name} value={bundle.name}>
+                        {bundle.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+
+                {/* Deployment Name + generated YAML + actions */}
+                {selectedBundle && deploymentEditor}
+              </Box>
+            )}
+          </>
         )}
       </Paper>
 
@@ -1515,6 +1698,25 @@ export default function ModelDeploymentManager() {
           </Button>
           <Button onClick={handleDeleteConfirm} color="error" variant="contained">
             Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Model+profile deploy reminder (shown when arriving from Model Selection) */}
+      <Dialog
+        open={showModelDeployNotice}
+        onClose={() => setShowModelDeployNotice(false)}
+      >
+        <DialogTitle>Before you deploy</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Confirm that no deployments are currently active and review the model
+            deployment settings in the YAML.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowModelDeployNotice(false)} color="primary" variant="contained">
+            Got it
           </Button>
         </DialogActions>
       </Dialog>

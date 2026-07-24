@@ -36,6 +36,12 @@ export interface ModelBundleSelection {
   batchingConfigOverride?: BatchingConfig;
   isDraftFor?: string;
   swappable?: boolean;
+  /**
+   * Checkpoint version pin from app-config.json `checkpoint_overrides`
+   * (keyed by model display name). When set, the model ref uses this version
+   * instead of the model's latest checkpoint version.
+   */
+  versionOverride?: string;
 }
 
 /**
@@ -80,12 +86,29 @@ export function getHighestVersion(model: Model, arch: string): string {
  * `<crname>:<version>` when the Model CR has exactly one checkpoint arch,
  * else `<crname>:<arch>:<version>` (arch pinned via the Step-2 dropdown).
  */
-export function formatModelRef(model: Model, arch: string): string {
-  const version = getHighestVersion(model, arch);
+export function formatModelRef(model: Model, arch: string, versionOverride?: string): string {
+  const version = versionOverride ?? getHighestVersion(model, arch);
   const archCount = Object.keys(model.spec.checkpoints).length;
   return archCount === 1
     ? `${model.metadata.name}:${version}`
     : `${model.metadata.name}:${arch}:${version}`;
+}
+
+/**
+ * Formats a `modelConfigs[].model` ref for the single-model quick-deploy path,
+ * WITHOUT pinning a checkpoint version — SambaWiz always deploys the latest, and
+ * the operator resolves the highest version when the ref omits it (see
+ * `validate_checkpoint_ref` in fast-coe). Arch is included only for multi-arch
+ * Model CRs, since the operator resolves the checkpoint arch from the ref alone
+ * (independently of the chosen profile) and errors on an omitted arch when the
+ * model has more than one: `<crname>` for single-arch, `<crname>:<arch>` otherwise.
+ */
+export function formatModelRefLatest(model: Model, arch: string, versionOverride?: string): string {
+  const archCount = Object.keys(model.spec.checkpoints).length;
+  const base = archCount === 1 ? model.metadata.name : `${model.metadata.name}:${arch}`;
+  // With an explicit version override, pin that version; otherwise omit it so
+  // the operator resolves the latest checkpoint version at deploy time.
+  return versionOverride ? `${base}:${versionOverride}` : base;
 }
 
 /**
@@ -201,7 +224,7 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
     // (model, profile, modelSettings, batchingConfig), matching v3plan.md's
     // worked spec-decoding example.
     const entry: ModelConfigEntry = {
-      model: formatModelRef(selection.model, selection.arch),
+      model: formatModelRef(selection.model, selection.arch, selection.versionOverride),
       profile: selection.profile.metadata.name,
     };
 

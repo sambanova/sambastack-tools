@@ -3,10 +3,21 @@ import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-utils';
 import ModelDeploymentManager, { getBundleDeploymentStatus, isPodProbeFailure } from '../../components/ModelDeploymentManager';
 
-// Mock next/navigation
+// Mock next/navigation. `mockNav` is read lazily (only when the hooks are
+// invoked during render), so tests can set query params and inspect router
+// navigation per case. Prefixed `mock*` so Jest allows it inside the factory.
+const mockNav = {
+  params: {} as Record<string, string | null>,
+  push: jest.fn(),
+};
 jest.mock('next/navigation', () => ({
   useSearchParams: () => ({
-    get: jest.fn(() => null),
+    get: (key: string) => mockNav.params[key] ?? null,
+  }),
+  useRouter: () => ({
+    push: mockNav.push,
+    replace: jest.fn(),
+    prefetch: jest.fn(),
   }),
 }));
 
@@ -16,6 +27,7 @@ global.fetch = jest.fn();
 describe('Model Deployment Manager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockNav.params = {};
     jest.useFakeTimers();
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
@@ -191,7 +203,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Model Bundle');
+    const bundleSelect = await screen.findByRole('combobox', { name: 'Model Bundle' });
     await user.click(bundleSelect);
 
     expect(await screen.findByRole('option', { name: 'valid-bundle' })).toBeInTheDocument();
@@ -235,7 +247,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Model Bundle');
+    const bundleSelect = await screen.findByRole('combobox', { name: 'Model Bundle' });
     await user.click(bundleSelect);
     await user.click(await screen.findByRole('option', { name: 'my-bundle' }));
 
@@ -250,6 +262,70 @@ describe('Model Deployment Manager', () => {
     expect(generatedYaml).toContain('startupTimeout: 7200');
     expect(generatedYaml).toContain('owner: no-reply@sambanova.ai');
     expect(generatedYaml).toContain('sambanova-artifact-reader');
+
+    jest.useFakeTimers();
+  });
+
+  it('generates a model + profile ModelDeployment (spec.models) when modelPath and profileName query params are set', async () => {
+    jest.useRealTimers();
+    mockNav.params = { modelPath: 'minimax-m2-7:minimax-m2p5:1', profileName: 'deepseek-cb' };
+
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, bundleDeployments: [], bundles: [] }),
+    });
+
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    // Section header renamed for the model/bundle choice.
+    expect(await screen.findByText('2. Deploy a Model/Bundle')).toBeInTheDocument();
+
+    // Arriving from Model Selection shows the pre-deploy reminder dialog.
+    expect(
+      await screen.findByText(/Confirm that no deployments are currently active/)
+    ).toBeInTheDocument();
+
+    const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+    const generatedYaml = yamlField.value;
+
+    expect(generatedYaml).toContain('apiVersion: sambanova.ai/v1alpha1');
+    expect(generatedYaml).toContain('kind: ModelDeployment');
+    // Inline spec.models with a single model + named profile, no bundle ref.
+    expect(generatedYaml).toMatch(/^\s*models:/m);
+    expect(generatedYaml).toContain('modelConfigs:');
+    expect(generatedYaml).toContain('model: minimax-m2-7:minimax-m2p5:1');
+    expect(generatedYaml).toContain('profile: deepseek-cb');
+    expect(generatedYaml).not.toMatch(/^\s*bundle:/m);
+    // Deployment name derived from the model CR name (suffix stripped).
+    expect(generatedYaml).toContain('name: md-minimax-m2-7');
+    // Deployment knobs carry over from the bundle path.
+    expect(generatedYaml).toContain('engineConfig:');
+    expect(generatedYaml).toContain('startupTimeout: 7200');
+    expect(generatedYaml).toContain('owner: no-reply@sambanova.ai');
+    expect(generatedYaml).toContain('sambanova-artifact-reader');
+
+    jest.useFakeTimers();
+  });
+
+  it('redirects to the Model Selection page when "Model" is chosen without model params', async () => {
+    jest.useRealTimers();
+    // No modelPath/profileName → defaults to bundle mode.
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, bundleDeployments: [], bundles: [] }),
+    });
+
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const user = userEvent.setup();
+    const modelRadio = await screen.findByRole('radio', { name: 'Model' });
+    await user.click(modelRadio);
+
+    expect(mockNav.push).toHaveBeenCalledWith('/model-selection');
 
     jest.useFakeTimers();
   });
@@ -302,7 +378,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Model Bundle');
+    const bundleSelect = await screen.findByRole('combobox', { name: 'Model Bundle' });
     await user.click(bundleSelect);
     await user.click(await screen.findByRole('option', { name: 'my-bundle' }));
 

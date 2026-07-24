@@ -20,7 +20,6 @@ jest.mock('child_process', () => ({
 
 describe('generate-model-profiles route', () => {
   const mockAppConfig = {
-    checkpointsDir: 'gs://my-bucket/',
     currentKubeconfig: 'dev',
     kubeconfigs: {
       dev: {

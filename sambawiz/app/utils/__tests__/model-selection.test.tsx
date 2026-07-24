@@ -41,10 +41,17 @@ function toProfileEntry(profile: ModelProfile): ModelProfilesCache[string] {
   };
 }
 
-function mockCaches(checkpointMapping: CheckpointMappingV3, modelProfiles: ModelProfilesCache) {
+function mockCaches(
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache,
+  checkpointOverrides: Record<string, string> = {}
+) {
   (global.fetch as jest.Mock).mockImplementation((url: string) => {
     if (url === '/api/checkpoint-mapping') {
-      return Promise.resolve({ ok: true, json: async () => ({ success: true, data: checkpointMapping }) });
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ success: true, data: checkpointMapping, checkpointOverrides }),
+      });
     }
     if (url === '/api/model-profiles') {
       return Promise.resolve({ ok: true, json: async () => ({ success: true, data: modelProfiles }) });
@@ -56,8 +63,12 @@ function mockCaches(checkpointMapping: CheckpointMappingV3, modelProfiles: Model
   });
 }
 
-async function renderModelSelection(checkpointMapping: CheckpointMappingV3, modelProfiles: ModelProfilesCache) {
-  mockCaches(checkpointMapping, modelProfiles);
+async function renderModelSelection(
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache,
+  checkpointOverrides: Record<string, string> = {}
+) {
+  mockCaches(checkpointMapping, modelProfiles, checkpointOverrides);
   await act(async () => {
     renderWithProviders(<ModelSelection />);
   });
@@ -283,6 +294,10 @@ describe('ModelSelection (V3)', () => {
     const user = userEvent.setup();
     await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
 
+    // Single non-spec-decoding model shows the quick-deploy buttons; opt into
+    // Advanced Settings to reveal Steps 3 & 4 (the bundle route).
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
+
     await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
 
     // Step 3 is optional and collapsed by default — expand it before interacting with the grid.
@@ -341,6 +356,10 @@ describe('ModelSelection (V3)', () => {
     await renderModelSelection(checkpointMapping, modelProfiles);
     const user = userEvent.setup();
     await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    // Single non-spec-decoding model shows the quick-deploy buttons; opt into
+    // Advanced Settings to reveal Steps 3 & 4 (the bundle route).
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
 
     await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
@@ -441,11 +460,131 @@ describe('ModelSelection (V3)', () => {
     const user = userEvent.setup();
     await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
 
+    // Single non-spec-decoding model shows the quick-deploy buttons; opt into
+    // Advanced Settings to reveal Step 4 (the ModelBundle YAML).
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
+
     await waitFor(() => {
       const text = getYamlText();
       expect(text).toContain('apiVersion: sambanova.ai/v1alpha1');
       expect(text).toContain('kind: ModelBundle');
       expect(text).toContain(`profile: ${mockSpecDecodingDraftProfile.metadata.name}`);
     });
+  });
+
+  it('offers quick "Create Deployment"/"Advanced Settings" for a single non-spec-decoding model and routes to the model+profile deploy', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    // Quick buttons appear once the (single) profile auto-resolves; Steps 3 & 4 stay hidden.
+    const deployButton = await screen.findByRole('button', { name: 'Create Deployment' });
+    expect(screen.getByRole('button', { name: 'Advanced Settings' })).toBeInTheDocument();
+    expect(screen.queryByText('3. Advanced Options')).not.toBeInTheDocument();
+    expect(screen.queryByText('4. Save & Validate Selections')).not.toBeInTheDocument();
+
+    await user.click(deployButton);
+
+    // Single-arch model → bare crname (no arch, no version); profile is the CR name.
+    expect(mockPush).toHaveBeenCalledWith(
+      `/model-deployment?modelPath=${encodeURIComponent('meta-llama-3-2-1b-instruct')}` +
+        `&profileName=${encodeURIComponent('llama-3p1-1b')}`
+    );
+  });
+
+  it('applies an app-config checkpoint_overrides version to both the deploy modelPath and the bundle YAML', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+    // Pin version "2" for this model (keyed by its display name).
+    const checkpointOverrides = { [mockSpecDecodingDraftModel.spec.name]: '2' };
+
+    await renderModelSelection(checkpointMapping, modelProfiles, checkpointOverrides);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    // Quick deploy modelPath carries the overridden version (done before opening
+    // Advanced Settings, which replaces the quick buttons with Steps 3 & 4).
+    await user.click(await screen.findByRole('button', { name: 'Create Deployment' }));
+    expect(mockPush).toHaveBeenCalledWith(
+      `/model-deployment?modelPath=${encodeURIComponent('meta-llama-3-2-1b-instruct:2')}` +
+        `&profileName=${encodeURIComponent('llama-3p1-1b')}`
+    );
+
+    // Bundle YAML (Advanced Settings) pins the overridden version, not the latest.
+    await user.click(screen.getByRole('button', { name: 'Advanced Settings' }));
+    await waitFor(() => {
+      expect(getYamlText()).toContain('model: meta-llama-3-2-1b-instruct:2');
+    });
+  });
+
+  it('"Advanced Settings" reveals Steps 3 & 4 and hides the quick-deploy buttons (single model)', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
+
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
+    expect(screen.getByText('4. Save & Validate Selections')).toBeInTheDocument();
+    // The single-model quick action bar is gone (its unique signal is the
+    // "Advanced Settings" button); Step 4 keeps its own bundle "Create Deployment".
+    expect(screen.queryByRole('button', { name: 'Advanced Settings' })).not.toBeInTheDocument();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bundle route (no quick buttons) when multiple models are selected', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+      [embeddingHighThroughputProfile.metadata.name]: toProfileEntry(embeddingHighThroughputProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name, mockEmbeddingModel.spec.name]);
+
+    // Two top-level models → Steps 3 & 4 show directly, no single-model quick
+    // action bar (its unique signal is the "Advanced Settings" button).
+    await waitFor(() => expect(screen.getByText('4. Save & Validate Selections')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Advanced Settings' })).not.toBeInTheDocument();
+  });
+
+  it('forces the bundle route (no quick buttons) for a single spec-decoding model', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingTargetModel.spec.name]: toCheckpointEntry(mockSpecDecodingTargetModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingTargetProfile.metadata.name]: toProfileEntry(mockSpecDecodingTargetProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingTargetModel.spec.name]);
+
+    // Spec-decoding needs a target+draft pair → forced to Steps 3 & 4, no quick
+    // action bar (its unique signal is the "Advanced Settings" button).
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Advanced Settings' })).not.toBeInTheDocument();
   });
 });

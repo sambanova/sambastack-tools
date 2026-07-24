@@ -91,7 +91,6 @@ export const mockEnvironments = {
   environments: ['dev', 'staging', 'production'],
   currentEnvironment: 'dev',
   namespace: 'default',
-  checkpointsDir: 'gs://my-bucket/checkpoints/',
 };
 
 export const mockBundleList = [

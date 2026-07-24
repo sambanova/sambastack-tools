@@ -57,6 +57,7 @@ import {
   getDisplayName,
   isSpecDecodingProfile,
   generateModelBundleYaml,
+  formatModelRefLatest,
   parseTierKey,
 } from '../utils/bundle-yaml-generator';
 import {
@@ -476,12 +477,23 @@ export default function ModelSelection() {
 
   const [checkpointMapping, setCheckpointMapping] = useState<CheckpointMappingV3>({});
   const [modelProfiles, setModelProfiles] = useState<ModelProfilesCache>({});
+  // Optional checkpoint version pins from app-config.json `checkpoint_overrides`,
+  // keyed by model display name. When set for a model, its ref uses this version
+  // instead of the latest.
+  const [checkpointOverrides, setCheckpointOverrides] = useState<Record<string, string>>({});
   const [selection, setSelection] = useState<BuilderSelectionState>({ selectedModels: [], modelStates: {} });
   const [bundleName, setBundleName] = useState<string>('bundle1');
   const [generatedYaml, setGeneratedYaml] = useState<string>('');
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [copiedToClipboard, setCopiedToClipboard] = useState<boolean>(false);
   const [overrideExpanded, setOverrideExpanded] = useState<boolean>(false);
+  // Single-model flow: once a (non-spec-decoding) profile is picked we offer
+  // "Deploy Model" (quick model+profile deploy) and "Advanced Settings". Clicking
+  // "Advanced Settings" flips this and reveals Steps 3 & 4 (forcing the bundle
+  // route). Ephemeral by design — never persisted to model-selection-state, so a
+  // page refresh returns to the quick buttons; reset whenever the top-level model
+  // selection changes.
+  const [advancedMode, setAdvancedMode] = useState<boolean>(false);
   const [pendingLoad, setPendingLoad] = useState<ParsedModelBundleState | null>(null);
   const [validationResult, setValidationResult] = useState<{
     success: boolean;
@@ -522,6 +534,7 @@ export default function ModelSelection() {
         } else {
           setCheckpointMapping({});
         }
+        setCheckpointOverrides(result.checkpointOverrides ?? {});
       } catch (error) {
         console.warn('Failed to load checkpoint_mapping.json:', error);
         setCheckpointMapping({});
@@ -589,6 +602,10 @@ export default function ModelSelection() {
         modelConfigs: customEvent.detail.modelConfigs,
         specDecodingPairs: customEvent.detail.specDecodingPairs ?? [],
       });
+      // Loading an existing bundle is inherently a bundle-route action — keep
+      // Steps 3 & 4 (and the loaded YAML) visible even for a single-model bundle,
+      // rather than collapsing into the single-model quick-deploy buttons.
+      setAdvancedMode(true);
       setValidationResult(null);
     };
 
@@ -690,6 +707,9 @@ export default function ModelSelection() {
   // ---------------------------------------------------------------------
 
   function applyTopLevelModels(models: string[]) {
+    // Changing the top-level model selection exits Advanced Settings (back to the
+    // quick "Deploy Model" / "Advanced Settings" choice for single-model flows).
+    setAdvancedMode(false);
     setSelection((prev) => {
       const removed = prev.selectedModels.filter((m) => !models.includes(m));
       let nextSelectedModels = [...models];
@@ -856,6 +876,7 @@ export default function ModelSelection() {
         profile,
         batchingConfigOverride: state.override,
         swappable: state.swappable,
+        versionOverride: checkpointOverrides[displayName],
       };
       if (draftForMap[displayName]) {
         sel.isDraftFor = draftForMap[displayName];
@@ -863,7 +884,7 @@ export default function ModelSelection() {
       selections.push(sel);
     }
     return selections;
-  }, [selection, availableByDisplayName, checkpointMapping]);
+  }, [selection, availableByDisplayName, checkpointMapping, checkpointOverrides]);
 
   useEffect(() => {
     if (isLoadingFromSavedState.current) return;
@@ -1016,6 +1037,47 @@ export default function ModelSelection() {
     router.push(`/model-deployment?bundle=${encodeURIComponent(bundleNameToPass)}`);
   };
 
+  // Top-level models (excluding nested spec-decoding draft entries) drive the
+  // single- vs multi-model branch.
+  const topLevelModels = selection.selectedModels.filter(
+    (displayName) => !selection.modelStates[displayName]?.draftForDisplayName
+  );
+  const isSingleModel = topLevelModels.length === 1;
+
+  // The single top-level model's fully-resolved selection (arch + profile), or
+  // null until a profile is picked. `modelSelections` is null until every
+  // selection resolves, and the top-level entry is the one without `isDraftFor`.
+  const singleModelSelection = useMemo(
+    () => (isSingleModel && modelSelections ? modelSelections.find((s) => !s.isDraftFor) ?? null : null),
+    [isSingleModel, modelSelections]
+  );
+  const singleIsSpecDecoding = singleModelSelection
+    ? isSpecDecodingProfile(singleModelSelection.profile)
+    : false;
+
+  // Quick-deploy buttons show for a single, non-spec-decoding model with a
+  // resolved profile. Spec-decoding needs a target+draft pair, which the inline
+  // single model+profile deployment can't express, so it's forced to the bundle
+  // route (Steps 3 & 4). Steps 3 & 4 also show for multi-model or once the user
+  // opts into Advanced Settings.
+  const quickDeployAvailable = isSingleModel && !!singleModelSelection && !singleIsSpecDecoding;
+  const showAdvancedSteps = advancedMode || !isSingleModel || singleIsSpecDecoding;
+
+  // Quick "Deploy Model": hand the model ref + profile name to the Model
+  // Deployment page, which generates the inline `spec.models` deployment.
+  const handleDeployModel = () => {
+    if (!singleModelSelection) return;
+    const modelPath = formatModelRefLatest(
+      singleModelSelection.model,
+      singleModelSelection.arch,
+      singleModelSelection.versionOverride
+    );
+    const profileName = singleModelSelection.profile.metadata.name;
+    router.push(
+      `/model-deployment?modelPath=${encodeURIComponent(modelPath)}&profileName=${encodeURIComponent(profileName)}`
+    );
+  };
+
   // Models with a resolved profile, in selection order, for the override editor (Step 3).
   const modelsWithResolvedProfile = useMemo(() => {
     return selection.selectedModels
@@ -1165,11 +1227,35 @@ export default function ModelSelection() {
                 </Box>
               );
             })}
+
+          {/* Single-model action bar: quick model+profile deploy, or drop into
+              Advanced Settings (Steps 3 & 4, the bundle route). */}
+          {quickDeployAvailable && !advancedMode && (
+            <Box sx={{ mt: 1, display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
+              <Button
+                variant="outlined"
+                color="primary"
+                size="large"
+                onClick={() => setAdvancedMode(true)}
+              >
+                Advanced Settings
+              </Button>
+              <Button
+                variant="contained"
+                color="primary"
+                size="large"
+                startIcon={<RocketLaunchIcon />}
+                onClick={handleDeployModel}
+              >
+                Create Deployment
+              </Button>
+            </Box>
+          )}
         </Paper>
       )}
 
       {/* Step 3: Advanced Options — per-model batching-config override + swappable (optional, collapsed by default) */}
-      {modelsWithResolvedProfile.length > 0 && (
+      {showAdvancedSteps && modelsWithResolvedProfile.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Box
             onClick={() => setOverrideExpanded((v) => !v)}
@@ -1237,7 +1323,7 @@ export default function ModelSelection() {
       )}
 
       {/* Step 4: ModelBundle YAML */}
-      {modelSelections && modelSelections.length > 0 && (
+      {showAdvancedSteps && modelSelections && modelSelections.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
             4. Save & Validate Selections

@@ -16,7 +16,6 @@ jest.mock('child_process', () => ({
 
 describe('pef-config-generator', () => {
   const mockAppConfig = {
-    checkpointsDir: 'gs://my-bucket/',
     currentKubeconfig: 'dev',
     kubeconfigs: {
       dev: {

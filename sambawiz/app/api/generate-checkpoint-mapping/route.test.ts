@@ -28,7 +28,6 @@ jest.mock('../../utils/pef-config-generator', () => ({
 
 describe('generate-checkpoint-mapping route', () => {
   const mockAppConfig = {
-    checkpointsDir: 'gs://my-bucket/',
     currentKubeconfig: 'dev',
     kubeconfigs: {
       dev: {
