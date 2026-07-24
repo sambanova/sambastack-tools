@@ -22,7 +22,7 @@ interface PodStatus {
 }
 
 /**
- * GET - Fetch pod status for a bundle deployment
+ * GET - Fetch pod status for a model deployment
  */
 export async function GET(request: NextRequest) {
   try {

@@ -26,7 +26,7 @@ interface AppConfig {
 const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'model-deployment-state.json');
 
 /**
- * GET - Load the saved bundle deployment state
+ * GET - Load the saved model deployment state
  */
 export async function GET() {
   try {
@@ -134,7 +134,7 @@ export async function GET() {
       state,
     });
   } catch (error) {
-    console.error('Error loading bundle deployment state:', error);
+    console.error('Error loading model deployment state:', error);
     return NextResponse.json(
       {
         success: false,
@@ -147,7 +147,7 @@ export async function GET() {
 }
 
 /**
- * POST - Save the bundle deployment state
+ * POST - Save the model deployment state
  */
 export async function POST(request: NextRequest) {
   try {
@@ -200,10 +200,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: 'Bundle deployment state saved successfully',
+      message: 'Model deployment state saved successfully',
     });
   } catch (error) {
-    console.error('Error saving bundle deployment state:', error);
+    console.error('Error saving model deployment state:', error);
     return NextResponse.json(
       {
         success: false,
@@ -216,7 +216,7 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * DELETE - Clear the saved bundle deployment state
+ * DELETE - Clear the saved model deployment state
  */
 export async function DELETE() {
   try {
@@ -226,10 +226,10 @@ export async function DELETE() {
 
     return NextResponse.json({
       success: true,
-      message: 'Bundle deployment state cleared successfully',
+      message: 'Model deployment state cleared successfully',
     });
   } catch (error) {
-    console.error('Error clearing bundle deployment state:', error);
+    console.error('Error clearing model deployment state:', error);
     return NextResponse.json(
       {
         success: false,

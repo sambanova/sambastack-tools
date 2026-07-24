@@ -25,7 +25,9 @@ import type {
  * models). `batchingConfigOverride`, if present, is the Step-3 bundle-level
  * override; otherwise the profile's own effective default is used.
  * `isDraftFor`, when set, is the *target* model's crname, marking this
- * selection as a spec-decoding draft.
+ * selection as a spec-decoding draft. `swappable` is the Step-3 Advanced
+ * Options toggle; it defaults to `true` and is only emitted (as
+ * `modelSettings.swappable: false`) when the user explicitly turns it off.
  */
 export interface ModelBundleSelection {
   model: Model;
@@ -33,15 +35,17 @@ export interface ModelBundleSelection {
   profile: ModelProfile;
   batchingConfigOverride?: BatchingConfig;
   isDraftFor?: string;
+  swappable?: boolean;
 }
 
 /**
  * Parses a batching-config tier key (`8k`, `32k`, `448`, `10t`) into a
- * comparable number, so the smallest tier can be found. Adapted from the old
- * V2 `parseExpertKey`, extended to accept the `t` (codes-length) suffix
- * mentioned in v3plan.md alongside the `k` suffix.
+ * comparable number, so tiers can be ordered by sequence length (e.g. the
+ * smallest tier can be found, or the UI can list them descending). Adapted
+ * from the old V2 `parseExpertKey`, extended to accept the `t` (codes-length)
+ * suffix mentioned in v3plan.md alongside the `k` suffix.
  */
-function parseTierKey(key: string): number {
+export function parseTierKey(key: string): number {
   const match = key.match(/^(\d+(?:\.\d+)?)([kt])?$/i);
   if (!match) {
     return parseFloat(key);
@@ -99,6 +103,21 @@ export function isEmbeddingModel(model: Model): boolean {
  */
 export function getEffectiveBatchingConfig(profile: ModelProfile): BatchingConfig {
   return profile.spec.defaultBatchingConfig ?? profile.status?.batchingConfig ?? {};
+}
+
+/**
+ * Drops any tier whose `batch_sizes` is an empty array (all batch sizes were
+ * unchecked in the Step-3 override): a tier with no selected batch sizes is
+ * omitted from the emitted config entirely rather than serialized as
+ * `batch_sizes: []`. The `'*'` sentinel is never empty, so it's preserved.
+ */
+export function dropEmptyTiers(batchingConfig: BatchingConfig): BatchingConfig {
+  const result: BatchingConfig = {};
+  for (const [tier, cfg] of Object.entries(batchingConfig)) {
+    if (Array.isArray(cfg.batch_sizes) && cfg.batch_sizes.length === 0) continue;
+    result[tier] = cfg;
+  }
+  return result;
 }
 
 /**
@@ -173,7 +192,9 @@ export function isSpecDecodingProfile(profile: ModelProfile): boolean {
  */
 export function buildModelBundleObject(bundleName: string, selections: ModelBundleSelection[]): ModelBundle {
   const modelConfigs: ModelConfigEntry[] = selections.map((selection) => {
-    const baseBatchingConfig = selection.batchingConfigOverride ?? getEffectiveBatchingConfig(selection.profile);
+    const baseBatchingConfig = dropEmptyTiers(
+      selection.batchingConfigOverride ?? getEffectiveBatchingConfig(selection.profile)
+    );
     const batchingConfig = deriveIsDefaultTier(baseBatchingConfig, isEmbeddingModel(selection.model));
 
     // Insertion order matters here: it drives the emitted YAML key order
@@ -184,8 +205,19 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
       profile: selection.profile.metadata.name,
     };
 
+    // modelSettings only appears when something diverges from the operator
+    // defaults: routable is inverted to false for spec-decoding drafts, and
+    // swappable is emitted only when the user turns off the (default-true)
+    // Advanced Options toggle.
+    const modelSettings: NonNullable<ModelConfigEntry['modelSettings']> = {};
     if (selection.isDraftFor) {
-      entry.modelSettings = { routable: false };
+      modelSettings.routable = false;
+    }
+    if (selection.swappable === false) {
+      modelSettings.swappable = false;
+    }
+    if (Object.keys(modelSettings).length > 0) {
+      entry.modelSettings = modelSettings;
     }
 
     entry.batchingConfig = batchingConfig;

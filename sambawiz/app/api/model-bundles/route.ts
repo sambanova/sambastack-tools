@@ -87,8 +87,18 @@ export async function GET() {
 
     const data = JSON.parse(output);
 
+    // Only surface `ModelBundle` CRs. The query above already targets the
+    // `modelbundles.sambanova.ai` resource, but the deprecated V2 `Bundle`
+    // (`bundles.sambanova.ai`) is a separate kind that must never appear in the
+    // picker — so we also drop anything whose `kind` is explicitly not
+    // `ModelBundle` as a belt-and-suspenders guard. List items may omit `kind`
+    // altogether depending on the API server, so a missing kind is kept.
+    const modelBundleItems = (data.items || []).filter(
+      (item: { kind?: string }) => !item.kind || item.kind === 'ModelBundle'
+    );
+
     // Transform the data to a more usable format
-    const bundles: ModelBundleSummary[] = data.items.map((item: {
+    const bundles: ModelBundleSummary[] = modelBundleItems.map((item: {
       metadata: { name: string; namespace: string; creationTimestamp: string };
       spec: { modelConfigs?: Array<{ model: string; profile?: string }> };
       status?: {

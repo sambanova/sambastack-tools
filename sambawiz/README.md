@@ -7,7 +7,7 @@
 
 # SambaWiz
 
-SambaWiz is a GUI wizard that accelerates the creation and deployment of model bundles on [SambaStack](https://docs.sambanova.ai/docs/en/admin/overview/sambastack-overview).
+SambaWiz is a GUI wizard that accelerates the creation and deployment of model bundles on [SambaStack](https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction).
 
 ## Contents
 
@@ -23,7 +23,7 @@ SambaWiz is a GUI wizard that accelerates the creation and deployment of model b
 - [Features](#features)
   - [1. Home](#1-home)
   - [2. Bundle Builder](#2-bundle-builder)
-  - [3. Bundle Deployment](#3-bundle-deployment)
+  - [3. Model Deployment](#3-model-deployment)
   - [4. Playground](#4-playground)
 - [Project Structure](#project-structure)
 - [API Endpoints](#api-endpoints)
@@ -52,7 +52,7 @@ SambaWiz provides an intuitive interface to:
 
 ## Prerequisites
 
-- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
+- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
 - Valid `kubeconfig.yaml` for your SambaStack environment
 - Node.js 18+ and npm
 - `checkpointsDir`, which is the root directory for checkpoints (provided by your SambaNova contact and goes into app-config.json)
@@ -183,13 +183,13 @@ npm start
 ![Bundle Builder - YAML Preview](images/bundlebuilder2.png)
 *Review and edit generated YAML before validation*
 
-### 3. Bundle Deployment
+### 3. Model Deployment
 - **Deployment Management**: Deploy validated bundles to your Kubernetes cluster
 - **Status Monitoring**: Real-time monitoring of deployment status including pod readiness
 - **Error Reporting**: View detailed error messages and status conditions from the cluster
 - **Deployment History**: Track all deployed bundles with creation timestamps
 
-![Bundle Deployment](images/bundledeployment.png)
+![Model Deployment](images/bundledeployment.png)
 *Monitor deployment status and manage bundle lifecycle*
 
 ### 4. Playground

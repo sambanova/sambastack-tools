@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Box,
@@ -33,11 +33,15 @@ import {
   TableRow,
   TableCell,
   Collapse,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import SaveIcon from '@mui/icons-material/Save';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import type {
   CheckpointMappingV3,
   ModelProfilesCache,
@@ -53,6 +57,7 @@ import {
   getDisplayName,
   isSpecDecodingProfile,
   generateModelBundleYaml,
+  parseTierKey,
 } from '../utils/bundle-yaml-generator';
 import {
   getAvailableModels,
@@ -75,6 +80,8 @@ interface PerModelState {
   profileName?: string;
   expanded: boolean;
   override: BatchingConfig;
+  /** Advanced Options "Swappable" toggle. Defaults to true (undefined is treated as true); only `false` is emitted to the YAML. */
+  swappable?: boolean;
   /** 'skip' or the display name of the chosen draft model (only meaningful when the selected profile is spec-decoding). */
   draftChoice?: string;
   /** Set when this model entry only exists because it was auto-added as a draft for another model. */
@@ -183,7 +190,19 @@ function ProfileCard({
 }) {
   const title = getDisplayName(profile, siblingProfiles);
   const batching = getEffectiveBatchingConfig(profile);
-  const tierEntries = Object.entries(batching);
+  // Sequence-length tiers, largest first, each reduced to its max supported batch size for a
+  // compact "Context : Max Batch Size" summary. '*' means every batch size is supported.
+  const tierRows = Object.entries(batching)
+    .sort(([a], [b]) => parseTierKey(b) - parseTierKey(a))
+    .map(([tier, cfg]) => {
+      const maxBatchSize =
+        cfg.batch_sizes === '*'
+          ? 'All'
+          : Array.isArray(cfg.batch_sizes) && cfg.batch_sizes.length > 0
+            ? Math.max(...cfg.batch_sizes)
+            : '—';
+      return { tier, maxBatchSize };
+    });
   const features = profile.spec.features ?? [];
 
   return (
@@ -206,19 +225,34 @@ function ProfileCard({
           {title}
         </Typography>
         <Box sx={{ mb: 1 }}>
-          {tierEntries.length === 0 && (
+          {tierRows.length === 0 ? (
             <Typography variant="caption" color="text.secondary">
               No batching config
             </Typography>
+          ) : (
+            <Box sx={{ display: 'grid', gridTemplateColumns: 'auto auto', columnGap: 2, rowGap: 0.25 }}>
+              <Typography variant="caption" sx={{ fontWeight: 700 }}>
+                Context
+              </Typography>
+              <Typography variant="caption" sx={{ fontWeight: 700, textAlign: 'right' }}>
+                Max Batch Size
+              </Typography>
+              {tierRows.map(({ tier, maxBatchSize }) => (
+                <Fragment key={tier}>
+                  <Typography variant="caption">{tier}</Typography>
+                  <Typography variant="caption" sx={{ textAlign: 'right' }}>
+                    {maxBatchSize}
+                  </Typography>
+                </Fragment>
+              ))}
+            </Box>
           )}
-          {tierEntries.map(([tier, cfg]) => (
-            <Typography key={tier} variant="caption" sx={{ display: 'block' }}>
-              {tier}: {cfg.batch_sizes === '*' ? 'all batch sizes' : `[${cfg.batch_sizes.join(', ')}]`}
-            </Typography>
-          ))}
         </Box>
         <Typography variant="caption" color="text.secondary">
-          Features: {features.length === 0 ? 'default' : features.join(', ')}
+          <Box component="span" sx={{ fontWeight: 700 }}>
+            Special Features:
+          </Box>{' '}
+          {features.length === 0 ? 'none' : features.join(', ')}
         </Typography>
       </CardContent>
     </Card>
@@ -231,13 +265,15 @@ const BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
 /**
  * Editable batching-config override for a single model, rendered as a checkbox grid.
  *
- * Rows are the profile's context-length tiers; columns are "All" + BATCH_COLUMNS. A cell is
- * enabled only when that batch size is supported for the tier by the profile (`universe` — the
- * profile's effective config, which is the complete universe of supported tiers × batch sizes).
- * "All" reflects/controls every supported cell in its row: checking it selects all supported
- * (stored as `'*'`), and it auto-checks when every supported cell is checked. The current
- * selection lives in `override` and flows to the generator; `is_default` is never exposed
- * (auto-derived by the generator).
+ * Rows are the profile's context-length tiers; columns are "All" + the batch-size columns up to
+ * the largest batch size the profile supports anywhere (columns beyond that max are dropped, e.g.
+ * a profile whose highest supported batch size is 32 never shows 64). A cell is supported only
+ * when that batch size is supported for the tier by the profile (`universe` — the profile's
+ * effective config, which is the complete universe of supported tiers × batch sizes); unsupported
+ * cells render blank (no disabled checkbox). "All" reflects/controls every supported cell in its
+ * row: checking it selects all supported (stored as `'*'`), and it auto-checks when every
+ * supported cell is checked. The current selection lives in `override` and flows to the
+ * generator; `is_default` is never exposed (auto-derived by the generator).
  */
 function BatchingOverrideEditor({
   universe,
@@ -265,6 +301,13 @@ function BatchingOverrideEditor({
     return BATCH_COLUMNS.filter((c) => bs.includes(c));
   };
 
+  // Largest batch size supported anywhere in this profile; columns beyond it are dropped entirely.
+  const maxSupported = tiers.reduce((max, tier) => {
+    const supported = supportedFor(tier);
+    return supported.length > 0 ? Math.max(max, ...supported) : max;
+  }, 0);
+  const columns = BATCH_COLUMNS.filter((c) => c <= maxSupported);
+
   const setTier = (tier: string, batch_sizes: BatchingConfig[string]['batch_sizes']) => {
     onChange({ ...override, [tier]: { batch_sizes } });
   };
@@ -274,8 +317,8 @@ function BatchingOverrideEditor({
       <TableHead>
         <TableRow>
           <TableCell sx={{ fontWeight: 600 }}>Context</TableCell>
-          <TableCell align="center" sx={{ fontWeight: 600 }}>All</TableCell>
-          {BATCH_COLUMNS.map((c) => (
+          <TableCell align="center" sx={{ fontWeight: 600 }}>All batch sizes</TableCell>
+          {columns.map((c) => (
             <TableCell key={c} align="center" sx={{ fontWeight: 600 }}>{c}</TableCell>
           ))}
         </TableRow>
@@ -309,17 +352,18 @@ function BatchingOverrideEditor({
                   inputProps={{ 'aria-label': `All batch sizes for ${tier}` }}
                 />
               </TableCell>
-              {BATCH_COLUMNS.map((c) => {
+              {columns.map((c) => {
                 const enabled = supported.includes(c);
                 return (
                   <TableCell key={c} align="center">
-                    <Checkbox
-                      size="small"
-                      disabled={!enabled}
-                      checked={enabled && isChecked(c)}
-                      onChange={(e) => toggleCell(c, e.target.checked)}
-                      inputProps={{ 'aria-label': `Batch size ${c} for ${tier}` }}
-                    />
+                    {enabled && (
+                      <Checkbox
+                        size="small"
+                        checked={isChecked(c)}
+                        onChange={(e) => toggleCell(c, e.target.checked)}
+                        inputProps={{ 'aria-label': `Batch size ${c} for ${tier}` }}
+                      />
+                    )}
                   </TableCell>
                 );
               })}
@@ -616,6 +660,7 @@ export default function ModelSelection() {
         profileName: entry.profile,
         expanded: false,
         override: entry.batchingConfig ?? (profile ? getEffectiveBatchingConfig(profile) : {}),
+        swappable: entry.modelSettings?.swappable,
         draftForDisplayName: draftCrnameSet.has(crname) ? byCrname[targetCrnameForDraft[crname]] : undefined,
       };
     });
@@ -733,6 +778,16 @@ export default function ModelSelection() {
     }));
   };
 
+  const handleSwappableChange = (displayName: string, swappable: boolean) => {
+    setSelection((prev) => ({
+      ...prev,
+      modelStates: {
+        ...prev.modelStates,
+        [displayName]: { ...prev.modelStates[displayName], swappable },
+      },
+    }));
+  };
+
   const handleDraftChoiceChange = (targetDisplayName: string, value: string) => {
     setSelection((prev) => {
       const cascaded = cascadeRemoveDraftFor(targetDisplayName, prev.selectedModels, prev.modelStates);
@@ -800,6 +855,7 @@ export default function ModelSelection() {
         arch,
         profile,
         batchingConfigOverride: state.override,
+        swappable: state.swappable,
       };
       if (draftForMap[displayName]) {
         sel.isDraftFor = draftForMap[displayName];
@@ -1112,7 +1168,7 @@ export default function ModelSelection() {
         </Paper>
       )}
 
-      {/* Step 3: Override the selected profile's batching config (optional, collapsed by default) */}
+      {/* Step 3: Advanced Options — per-model batching-config override + swappable (optional, collapsed by default) */}
       {modelsWithResolvedProfile.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, mb: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Box
@@ -1120,11 +1176,11 @@ export default function ModelSelection() {
             sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
           >
             <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              3. Override Batching Configuration (Optional)
+              3. Advanced Options
             </Typography>
             <IconButton
               size="small"
-              aria-label={overrideExpanded ? 'Collapse batching overrides' : 'Expand batching overrides'}
+              aria-label={overrideExpanded ? 'Collapse advanced options' : 'Expand advanced options'}
               aria-expanded={overrideExpanded}
               onClick={(e) => { e.stopPropagation(); setOverrideExpanded((v) => !v); }}
             >
@@ -1134,15 +1190,45 @@ export default function ModelSelection() {
           <Collapse in={overrideExpanded} unmountOnExit>
             <Box sx={{ mt: 2 }}>
               {modelsWithResolvedProfile.map(({ displayName, state, profile }, idx) => (
-                <Box key={displayName} sx={{ mb: idx < modelsWithResolvedProfile.length - 1 ? 3 : 0 }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                <Box key={displayName} sx={{ mb: idx < modelsWithResolvedProfile.length - 1 ? 4 : 0 }}>
+                  <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1.5 }}>
                     {displayName}
                   </Typography>
+
+                  {/* Subsection: Override Batching Config */}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      Override Batching Config
+                    </Typography>
+                    <Tooltip title="Choose from supported context lengths and batch sizes. If all batch sizes for a context length are unselected, then the context length will be removed from the deployment and the next higher context length with be used to service requests.">
+                      <HelpOutlineIcon fontSize="small" sx={{ color: 'text.secondary', cursor: 'help' }} />
+                    </Tooltip>
+                  </Box>
                   <BatchingOverrideEditor
                     universe={getEffectiveBatchingConfig(profile)}
                     override={state.override}
                     onChange={(next) => handleOverrideChange(displayName, next)}
                   />
+
+                  {/* Subsection: Swappable (default True; only emitted to the YAML when set to False) */}
+                  <Box sx={{ mt: 2 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                        Swappable
+                      </Typography>
+                      <Tooltip title="Choose whether you would like this model to be swapped out for other models in the bundle when required or always keep it resident in high-bandwidth memory to avoid switching latencies.">
+                        <HelpOutlineIcon fontSize="small" sx={{ color: 'text.secondary', cursor: 'help' }} />
+                      </Tooltip>
+                    </Box>
+                    <RadioGroup
+                      row
+                      value={state.swappable === false ? 'false' : 'true'}
+                      onChange={(e) => handleSwappableChange(displayName, e.target.value === 'true')}
+                    >
+                      <FormControlLabel value="true" control={<Radio size="small" />} label="True" />
+                      <FormControlLabel value="false" control={<Radio size="small" />} label="False" />
+                    </RadioGroup>
+                  </Box>
                 </Box>
               ))}
             </Box>

@@ -3,7 +3,7 @@ import { inferencePodNames } from '@/app/utils/inference-pod-names';
 
 /**
  * GET - Resolve the pod names the inference operator would create for a given
- * bundle deployment name.
+ * model deployment name.
  *
  * This is a pure computation (no cluster access needed): the operator's
  * truncate+hash naming relies on Node's `crypto`, which is server-only, so the

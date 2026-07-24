@@ -96,6 +96,23 @@ const embeddingHighThroughputProfile: ModelProfile = {
     pefs: ['gte-qwen2-ss4096-bs1-cb-1:1'],
   },
 };
+// Several context-length tiers with differing batch-size lists, for the card's
+// descending "Context : Max Batch Size" summary.
+const embeddingMultiTierProfile: ModelProfile = {
+  metadata: { name: 'gte-qwen2-multitier' },
+  spec: {
+    model_arch: 'gte-qwen2',
+    features: [],
+    defaultBatchingConfig: {
+      '4k': { batch_sizes: [1, 4] },
+      '8k': { batch_sizes: [1, 4] },
+      '16k': { batch_sizes: [1] },
+      '32k': { batch_sizes: [1] },
+      '128k': { batch_sizes: [1] },
+    },
+    pefs: ['gte-qwen2-multitier:1'],
+  },
+};
 
 // Single profile per arch for the multi-arch model, so each arch auto-selects/collapses.
 const maverickV1Profile: ModelProfile = {
@@ -193,6 +210,39 @@ describe('ModelSelection (V3)', () => {
     expect(within(row).queryByTestId(`profile-card-${embeddingHighInteractivityProfile.metadata.name}`)).not.toBeInTheDocument();
   });
 
+  it('shows a titled "Context / Max Batch Size" summary on each card, largest sequence length first', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    // Two profiles keep the row expanded so the card tiles (and their summaries) render.
+    const modelProfiles: ModelProfilesCache = {
+      [embeddingMultiTierProfile.metadata.name]: toProfileEntry(embeddingMultiTierProfile),
+      [embeddingHighThroughputProfile.metadata.name]: toProfileEntry(embeddingHighThroughputProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockEmbeddingModel.spec.name]);
+
+    const card = await screen.findByTestId(`profile-card-${embeddingMultiTierProfile.metadata.name}`);
+
+    // Column titles are present so the numbers are self-explanatory.
+    expect(within(card).getByText('Context')).toBeInTheDocument();
+    expect(within(card).getByText('Max Batch Size')).toBeInTheDocument();
+
+    // Tiers are listed largest sequence length first.
+    const tierLabels = within(card)
+      .getAllByText(/^(4k|8k|16k|32k|128k)$/)
+      .map((el) => el.textContent);
+    expect(tierLabels).toEqual(['128k', '32k', '16k', '8k', '4k']);
+
+    // Only the max batch size is shown per tier ('4k' supports [1, 4] → "4", never "[1, 4]").
+    expect(within(card).queryByText(/\[/)).not.toBeInTheDocument();
+    const fourKLabel = within(card).getByText('4k');
+    // The value cell sits immediately after its tier label in DOM order.
+    expect(fourKLabel.nextElementSibling?.textContent).toBe('4');
+  });
+
   it('shows the arch dropdown only for models with more than one matching arch', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockMultiArchModel.spec.name]: toCheckpointEntry(mockMultiArchModel),
@@ -233,21 +283,24 @@ describe('ModelSelection (V3)', () => {
     const user = userEvent.setup();
     await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
 
-    await waitFor(() => expect(screen.getByText('3. Override Batching Configuration (Optional)')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
 
     // Step 3 is optional and collapsed by default — expand it before interacting with the grid.
-    await user.click(screen.getByRole('button', { name: 'Expand batching overrides' }));
+    await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
 
-    // The '4k' tier of the profile supports batch sizes [1, 4]. In the grid, cells 1 and 4 are
-    // enabled and (seeded from the profile) checked; an unsupported size like 2 is disabled; and
-    // since every supported cell is checked, the row's "All" checkbox is auto-checked.
+    // This profile's largest supported batch size is 4 (4k: [1,4], 16k: [1]), so columns are
+    // trimmed to [1, 2, 4] — 8/16/32/64 are dropped entirely. The '4k' tier supports [1, 4]: cells
+    // 1 and 4 are (seeded from the profile) checked; an unsupported size like 2 renders blank (no
+    // checkbox at all); and since every supported cell is checked, the row's "All" is auto-checked.
     const cell1 = await screen.findByRole('checkbox', { name: 'Batch size 1 for 4k' });
     const cell4 = screen.getByRole('checkbox', { name: 'Batch size 4 for 4k' });
-    const cell2 = screen.getByRole('checkbox', { name: 'Batch size 2 for 4k' });
     const allCell = screen.getByRole('checkbox', { name: 'All batch sizes for 4k' });
     expect(cell1).toBeChecked();
     expect(cell4).toBeChecked();
-    expect(cell2).toBeDisabled();
+    // Unsupported cell (2) renders blank, and trimmed-away columns (8, 64) have no checkbox.
+    expect(screen.queryByRole('checkbox', { name: 'Batch size 2 for 4k' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Batch size 8 for 4k' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Batch size 64 for 4k' })).not.toBeInTheDocument();
     expect(allCell).toBeChecked();
 
     await waitFor(() => {
@@ -274,6 +327,47 @@ describe('ModelSelection (V3)', () => {
         spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
       };
       expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toBe('*');
+    });
+  });
+
+  it('defaults Swappable to True (omitted from YAML) and emits modelSettings.swappable:false only when set to False', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
+
+    // Default is True: no modelSettings emitted.
+    const trueRadio = await screen.findByRole('radio', { name: 'True' });
+    const falseRadio = screen.getByRole('radio', { name: 'False' });
+    expect(trueRadio).toBeChecked();
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as { spec: { modelConfigs: Array<{ modelSettings?: unknown }> } };
+      expect(doc.spec.modelConfigs[0].modelSettings).toBeUndefined();
+    });
+
+    // Switching to False emits modelSettings.swappable: false.
+    await user.click(falseRadio);
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as {
+        spec: { modelConfigs: Array<{ modelSettings?: { swappable?: boolean } }> };
+      };
+      expect(doc.spec.modelConfigs[0].modelSettings?.swappable).toBe(false);
+    });
+
+    // Switching back to True drops it again.
+    await user.click(screen.getByRole('radio', { name: 'True' }));
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as { spec: { modelConfigs: Array<{ modelSettings?: unknown }> } };
+      expect(doc.spec.modelConfigs[0].modelSettings).toBeUndefined();
     });
   });
 

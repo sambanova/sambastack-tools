@@ -34,22 +34,8 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import { Visibility, VisibilityOff } from '@mui/icons-material';
-import { getBundleDeploymentStatus } from './ModelDeploymentManager';
 import ViewCodeDialog from './ViewCodeDialog';
 import DocumentationPanel from './DocumentationPanel';
-
-interface BundleDeployment {
-  name: string;
-  namespace: string;
-  bundle: string;
-  creationTimestamp: string;
-}
-
-interface PodStatusInfo {
-  ready: number;
-  total: number;
-  status: string;
-}
 
 interface Metrics {
   tokensPerSecond: number | null;
@@ -76,28 +62,16 @@ export default function Playground() {
   const keycloakUsernameId = 'playground-keycloak-username';
   const keycloakPasswordId = 'playground-keycloak-password';
 
-  const [bundleDeployments, setBundleDeployments] = useState<BundleDeployment[]>([]);
-  const [selectedDeployment, setSelectedDeployment] = useState<string>('');
-  const [deploymentStatuses, setDeploymentStatuses] = useState<Record<string, {
-    cachePod: PodStatusInfo | null;
-    defaultPod: PodStatusInfo | null;
-  }>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Refs to access latest state values inside async callbacks without stale closures
-  const bundleDeploymentsRef = useRef<BundleDeployment[]>([]);
-  const deploymentStatusesRef = useRef<Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }>>({});
-  useEffect(() => { bundleDeploymentsRef.current = bundleDeployments; }, [bundleDeployments]);
-  useEffect(() => { deploymentStatusesRef.current = deploymentStatuses; }, [deploymentStatuses]);
+  const [checkpointMapping, setCheckpointMapping] = useState<Record<string, { model_type?: string; capabilities?: string[] }>>({});
 
-  const [checkpointMapping, setCheckpointMapping] = useState<Record<string, { model_type?: string }>>({});
-
-  // Model selection state
+  // Model selection state — the model list comes straight from the current
+  // environment's /v1/models endpoint (the routable models), not from any
+  // model deployment.
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
-  const [loadingModels, setLoadingModels] = useState<boolean>(false);
-  const [modelsError, setModelsError] = useState<string | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<Message[]>([]);
@@ -122,104 +96,39 @@ export default function Playground() {
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [uiDomain, setUiDomain] = useState<string>('');
 
-  // Save playground state to avoid kubectl calls on subsequent page loads
-  const savePlaygroundState = async (
-    deployments: BundleDeployment[],
-    statuses: Record<string, { cachePod: PodStatusInfo | null; defaultPod: PodStatusInfo | null }>,
-    deployment: string,
-    models: string[],
-    model: string,
-  ) => {
-    try {
-      await fetch('/api/playground-state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          state: {
-            bundleDeployments: deployments,
-            deploymentStatuses: statuses,
-            selectedDeployment: deployment,
-            availableModels: models,
-            selectedModel: model,
-          },
-        }),
-      });
-    } catch {
-      // Non-critical — ignore save errors
-    }
-  };
-
-  // Fetch bundle deployments and their statuses
-  const fetchBundleDeployments = async () => {
+  // Fetch the routable models for the current environment from /v1/models.
+  const fetchModels = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      const response = await fetch('/api/model-deployment');
+      const response = await fetch('/api/models');
       const data = await response.json();
 
-      if (data.success) {
-        setBundleDeployments(data.bundleDeployments);
-
-        // Fetch pod statuses for all deployments
-        const statuses: Record<string, {
-          cachePod: PodStatusInfo | null;
-          defaultPod: PodStatusInfo | null;
-        }> = {};
-
-        await Promise.all(
-          data.bundleDeployments.map(async (deployment: BundleDeployment) => {
-            try {
-              const statusResponse = await fetch(`/api/pod-status?deploymentName=${deployment.name}`);
-              const statusData = await statusResponse.json();
-
-              if (statusData.success) {
-                statuses[deployment.name] = statusData.podStatus;
-              } else {
-                statuses[deployment.name] = { cachePod: null, defaultPod: null };
-              }
-            } catch {
-              statuses[deployment.name] = { cachePod: null, defaultPod: null };
-            }
-          })
+      if (data.success && Array.isArray(data.models)) {
+        setAvailableModels(data.models);
+        // Preserve the current selection if it's still available, otherwise
+        // auto-select the first model.
+        setSelectedModel((prev) =>
+          prev && data.models.includes(prev) ? prev : (data.models[0] ?? '')
         );
-
-        setDeploymentStatuses(statuses);
       } else {
-        setError(data.error || 'Failed to fetch bundle deployments');
+        setAvailableModels([]);
+        setSelectedModel('');
+        setError(data.error || 'Failed to fetch models');
       }
     } catch (err) {
+      console.error('Error fetching models:', err);
+      setAvailableModels([]);
+      setSelectedModel('');
       setError('Failed to connect to the server');
-      console.error(err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    const initializePlayground = async () => {
-      try {
-        const stateResponse = await fetch('/api/playground-state');
-        const stateData = await stateResponse.json();
-
-        if (stateData.success && stateData.state) {
-          const saved = stateData.state;
-          setBundleDeployments(saved.bundleDeployments);
-          setDeploymentStatuses(saved.deploymentStatuses);
-          setSelectedDeployment(saved.selectedDeployment);
-          setAvailableModels(saved.availableModels);
-          setSelectedModel(saved.selectedModel);
-          setLoading(false);
-          return;
-        }
-      } catch {
-        // If state check fails, fall through to normal fetch
-      }
-
-      fetchBundleDeployments();
-    };
-
-    initializePlayground();
+    fetchModels();
     fetchEnvironmentConfig();
     fetch('/api/checkpoint-mapping')
       .then((r) => r.json())
@@ -256,93 +165,12 @@ export default function Playground() {
     }
   }, [isSending]);
 
-  // Auto-select deployment when there is only one option
-  useEffect(() => {
-    if (selectedDeployment) return;
-    const deployed = bundleDeployments.filter((deployment) => {
-      const podStatusInfo = deploymentStatuses[deployment.name];
-      if (!podStatusInfo) return false;
-      const status = getBundleDeploymentStatus(podStatusInfo.cachePod, podStatusInfo.defaultPod);
-      return status === 'Deployed';
-    });
-    if (deployed.length === 1) {
-      setSelectedDeployment(deployed[0].name);
-      fetchModelsForDeployment(deployed[0].name);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundleDeployments, deploymentStatuses, selectedDeployment]);
-
-  // Fetch models for a deployment
-  const fetchModelsForDeployment = async (deploymentName: string) => {
-    setLoadingModels(true);
-    setModelsError(null);
-    setAvailableModels([]);
-    setSelectedModel('');
-
-    try {
-      const response = await fetch(`/api/deployment-models?deploymentName=${deploymentName}`);
-      const data = await response.json();
-
-      if (data.success && data.models) {
-        setAvailableModels(data.models);
-        // Auto-select first model if available
-        const firstModel = data.models.length > 0 ? data.models[0] : '';
-        if (firstModel) {
-          setSelectedModel(firstModel);
-        }
-        // Persist state so subsequent page loads skip kubectl calls
-        savePlaygroundState(
-          bundleDeploymentsRef.current,
-          deploymentStatusesRef.current,
-          deploymentName,
-          data.models,
-          firstModel,
-        );
-      } else {
-        setModelsError(data.error || 'Failed to fetch models');
-      }
-    } catch (err) {
-      console.error('Error fetching models:', err);
-      setModelsError('Failed to connect to the server');
-    } finally {
-      setLoadingModels(false);
-    }
-  };
-
-  // Handle deployment selection
-  const handleDeploymentChange = (event: SelectChangeEvent<string>) => {
-    const newDeployment = event.target.value;
-    setSelectedDeployment(newDeployment);
-    // Clear chat history when switching deployments
-    setMessages([]);
-    // Clear previous models
-    setAvailableModels([]);
-    setSelectedModel('');
-    setModelsError(null);
-
-    // Fetch models for the new deployment ONLY if a deployment is selected
-    if (newDeployment) {
-      // Small delay to ensure the dropdown has rendered
-      setTimeout(() => {
-        fetchModelsForDeployment(newDeployment);
-      }, 100);
-    }
-  };
-
   // Handle model selection
   const handleModelChange = (event: SelectChangeEvent<string>) => {
     const newModel = event.target.value;
     setSelectedModel(newModel);
-    // Optionally clear chat history when switching models
+    // Clear chat history when switching models
     setMessages([]);
-    // Persist updated model selection
-    savePlaygroundState(
-      bundleDeploymentsRef.current,
-      deploymentStatusesRef.current,
-      selectedDeployment,
-      availableModels,
-      newModel,
-    );
   };
 
   // Handle clear chat
@@ -350,24 +178,20 @@ export default function Playground() {
     setMessages([]);
   };
 
-  // Get only deployed bundles
-  const deployedBundles = bundleDeployments.filter((deployment) => {
-    const podStatusInfo = deploymentStatuses[deployment.name];
-    if (!podStatusInfo) return false;
-    const status = getBundleDeploymentStatus(
-      podStatusInfo.cachePod,
-      podStatusInfo.defaultPod
-    );
-    return status === 'Deployed';
-  });
-
-  const isEmbeddingModel = selectedModel
-    ? checkpointMapping[selectedModel]?.model_type === 'embedding'
+  // A model is an embedding model when its checkpoint_mapping capabilities
+  // include "embeddings" (the v3 canonical rule; see IsEmbeddingModelFn in
+  // types/bundle.ts). /v1/models doesn't distinguish embedding models, so this
+  // still comes from the bundle-derived checkpoint mapping. The legacy
+  // model_type check is kept as a fallback for older/test data.
+  const selectedModelInfo = selectedModel ? checkpointMapping[selectedModel] : undefined;
+  const isEmbeddingModel = selectedModelInfo
+    ? (selectedModelInfo.capabilities?.includes('embeddings') ?? false) ||
+      selectedModelInfo.model_type === 'embedding'
     : false;
 
   // Handle send message
   const handleSendMessage = async () => {
-    if (!inputMessage.trim() || !selectedDeployment || !selectedModel) {
+    if (!inputMessage.trim() || !selectedModel) {
       return;
     }
 
@@ -584,18 +408,11 @@ export default function Playground() {
     };
   };
 
-  // Handle manual refresh — clears cached state and re-runs kubectl calls
+  // Handle manual refresh — re-fetch the routable models from /v1/models.
   const handleRefresh = async () => {
-    setSelectedDeployment('');
-    setAvailableModels([]);
-    setSelectedModel('');
     setMessages([]);
-    try {
-      await fetch('/api/playground-state', { method: 'DELETE' });
-    } catch {
-      // Non-critical
-    }
-    fetchBundleDeployments();
+    await fetchModels();
+    fetchEnvironmentConfig();
   };
 
   // Handle Enter key press
@@ -643,7 +460,7 @@ export default function Playground() {
           flexDirection: 'column',
         }}
       >
-        {/* Header with Bundle and Model Selectors */}
+        {/* Header with Model Selector */}
         <Box
           sx={{
             p: 2,
@@ -657,87 +474,55 @@ export default function Playground() {
           }}
         >
           <FormControl sx={{ minWidth: 300 }} size="small">
-            <InputLabel id="deployment-select-label">Select Deployed Bundle</InputLabel>
+            <InputLabel id="model-select-label">Select Model</InputLabel>
             <Select
-              labelId="deployment-select-label"
-              id="deployment-select"
-              value={selectedDeployment}
-              onChange={handleDeploymentChange}
-              label="Select Deployed Bundle"
-              disabled={loading || deployedBundles.length === 0}
+              labelId="model-select-label"
+              id="model-select"
+              value={selectedModel}
+              onChange={handleModelChange}
+              label="Select Model"
+              disabled={loading || availableModels.length === 0}
               sx={{ backgroundColor: 'white' }}
             >
-              {deployedBundles.map((deployment) => (
-                <MenuItem key={deployment.name} value={deployment.name}>
-                  {deployment.name}
+              {availableModels.map((model) => (
+                <MenuItem key={model} value={model}>
+                  {model}
                 </MenuItem>
               ))}
             </Select>
           </FormControl>
 
-          {selectedDeployment && (
+          {selectedModel && (
             <>
-              <FormControl sx={{ minWidth: 250 }} size="small">
-                <InputLabel id="model-select-label">Select Model</InputLabel>
-                <Select
-                  labelId="model-select-label"
-                  id="model-select"
-                  value={selectedModel}
-                  onChange={handleModelChange}
-                  label="Select Model"
-                  disabled={loadingModels || availableModels.length === 0}
-                  sx={{ backgroundColor: 'white' }}
-                >
-                  {availableModels.map((model) => (
-                    <MenuItem key={model} value={model}>
-                      {model}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-
-              {selectedModel && (
-                <>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CodeIcon />}
-                    onClick={() => setViewCodeDialogOpen(true)}
-                    sx={{
-                      backgroundColor: 'white',
-                      textTransform: 'none',
-                    }}
-                  >
-                    View Code
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<CleaningServicesIcon />}
-                    onClick={handleClearChat}
-                    disabled={messages.length === 0}
-                    sx={{
-                      backgroundColor: 'white',
-                      textTransform: 'none',
-                    }}
-                  >
-                    Clear Chat
-                  </Button>
-                </>
-              )}
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CodeIcon />}
+                onClick={() => setViewCodeDialogOpen(true)}
+                sx={{
+                  backgroundColor: 'white',
+                  textTransform: 'none',
+                }}
+              >
+                View Code
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<CleaningServicesIcon />}
+                onClick={handleClearChat}
+                disabled={messages.length === 0}
+                sx={{
+                  backgroundColor: 'white',
+                  textTransform: 'none',
+                }}
+              >
+                Clear Chat
+              </Button>
             </>
           )}
 
           {loading && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <CircularProgress size={20} />
-              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                Loading deployments...
-              </Typography>
-            </Box>
-          )}
-
-          {loadingModels && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <CircularProgress size={20} />
               <Typography variant="body2" sx={{ color: 'text.secondary' }}>
@@ -754,26 +539,18 @@ export default function Playground() {
           </Box>
         )}
 
-        {/* Models Error State */}
-        {modelsError && selectedDeployment && (
-          <Box sx={{ p: 2 }}>
-            <Alert severity="warning">
-              Failed to load models: {modelsError}
-            </Alert>
-          </Box>
-        )}
-
-        {/* No Deployed Bundles State */}
-        {!loading && deployedBundles.length === 0 && !error && (
+        {/* No Models State */}
+        {!loading && availableModels.length === 0 && !error && (
           <Box sx={{ p: 3 }}>
             <Alert severity="info">
-              No deployed bundles found. Please deploy a bundle first to use the playground.
+              No models available for this environment. Deploy a bundle (and make sure its models are
+              routable) to use the playground.
             </Alert>
           </Box>
         )}
 
-        {/* Chat Interface - Only show when deployment and model are selected */}
-        {selectedDeployment && selectedModel && (
+        {/* Chat Interface - Only show when a model is selected */}
+        {selectedModel && (
           <>
             {/* Messages Container */}
             <Box
@@ -805,7 +582,7 @@ export default function Playground() {
                   <Typography variant="body2">
                     {isEmbeddingModel
                       ? <>Enter text to embed with <strong>{selectedModel}</strong></>
-                      : <>Chatting with <strong>{selectedModel}</strong> in {selectedDeployment}</>
+                      : <>Chatting with <strong>{selectedModel}</strong></>
                     }
                   </Typography>
                 </Box>
@@ -1192,8 +969,8 @@ export default function Playground() {
           </>
         )}
 
-        {/* Prompt to select model if deployment selected but no model */}
-        {selectedDeployment && !selectedModel && !loadingModels && availableModels.length > 0 && (
+        {/* Prompt to select a model when models are available but none is selected */}
+        {!selectedModel && !loading && !error && availableModels.length > 0 && (
           <Box
             sx={{
               flex: 1,
@@ -1207,33 +984,10 @@ export default function Playground() {
           >
             <SmartToyIcon sx={{ fontSize: 80, mb: 2, opacity: 0.2 }} />
             <Typography variant="h6" sx={{ mb: 1 }}>
-              Select a model to continue
+              Select a model to get started
             </Typography>
             <Typography variant="body2">
               Choose a model from the dropdown above
-            </Typography>
-          </Box>
-        )}
-
-        {/* Prompt to select deployment if none selected */}
-        {!selectedDeployment && !loading && !error && deployedBundles.length > 0 && (
-          <Box
-            sx={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              p: 4,
-              color: 'text.secondary',
-            }}
-          >
-            <SmartToyIcon sx={{ fontSize: 80, mb: 2, opacity: 0.2 }} />
-            <Typography variant="h6" sx={{ mb: 1 }}>
-              Select a deployment to get started
-            </Typography>
-            <Typography variant="body2">
-              Choose a deployed bundle from the dropdown above
             </Typography>
           </Box>
         )}

@@ -6,58 +6,35 @@ The Playground page provides an interactive chat interface to test and interact 
 
 ## What Happens on This Page
 
-1. **Select Deployment**: Choose from deployed bundles (those with status "Deployed")
-2. **Select Model**: Pick a specific model from the selected deployment
-3. **Chat Interface**: Send messages and receive responses from the model
-4. **Performance Metrics**: View tokens/second, total latency, and time to first token
-5. **View Code**: Get code snippets for integrating with the API
+1. **Select Model**: Pick from the models that are routable in the current environment (fetched from the `/v1/models` API)
+2. **Chat Interface**: Send messages and receive responses from the model
+3. **Performance Metrics**: View tokens/second, total latency, and time to first token
+4. **View Code**: Get code snippets for integrating with the API
 
-## kubectl Commands Used
+## Where the Model List Comes From
 
-All commands use the namespace configured on the Home page.
+The Playground does **not** use kubectl or the model deployment to list models. Instead, it calls the environment's OpenAI-compatible `/v1/models` endpoint, which returns exactly the models that are routable (i.e. the ones you can actually send requests to). This avoids showing models that exist in a bundle but aren't served.
 
-### 1. List Bundle Deployments
-```bash
-kubectl -n <namespace> get bundledeployment.sambanova.ai -o json
+### List Models
 ```
-**Purpose**: Retrieves all BundleDeployment resources to populate the deployment selector
-**When**: On page load
-**Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Lists all deployments and filters for those that are fully deployed
-
-### 2. Get Pod Status (for filtering)
-```bash
-kubectl -n <namespace> get pods | grep <deployment-name>
+GET <apiDomain>/v1/models
+Headers:
+  Authorization: Bearer <apiKey>
 ```
-**Purpose**: Checks if the deployment pods are ready before showing in the dropdown
-**When**: For each deployment found
-**Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Verifies that both cache and default pods are in "Running" state with all containers ready
+**Purpose**: Retrieves the routable models for the current environment to populate the model selector
+**When**: On page load and on Refresh
+**Configuration**: Uses the API Domain and API Key from your current environment (set on the Home page)
 
-### 3. Get BundleDeployment Details
-```bash
-kubectl get bundledeployment.sambanova.ai <deployment-name> -n <namespace> -o json
-```
-**Purpose**: Retrieves the bundle reference from the deployment
-**When**: When a deployment is selected
-**Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Gets the bundle name associated with the deployment
+### Embedding vs. Chat Models
 
-### 4. Get Bundle Models
-```bash
-kubectl get bundle.sambanova.ai <bundle-name> -n <namespace> -o json
-```
-**Purpose**: Retrieves the list of models in the bundle
-**When**: After selecting a deployment
-**Namespace**: Uses the namespace from your current environment configuration
-**What It Does**: Extracts the model names from the bundle spec.models field
+`/v1/models` does not indicate whether a model is an embedding model. The Playground determines this from the local `checkpoint_mapping` (a model is an embedding model when its `capabilities` include `"embeddings"`). Embedding models use the `/v1/embeddings` endpoint; all other models use `/v1/chat/completions`.
 
 ## Chat Functionality
 
-The Playground uses the SambaStack API for inference, not kubectl. The API calls use:
+The Playground uses the SambaStack API for inference. The API calls use:
 - **API Domain**: Configured on the Home page (e.g., `https://api.example.com`)
 - **API Key**: Configured on the Home page for authentication
-- **Model Name**: Selected from the dropdown (e.g., `Meta-Llama-3.1-8B-Instruct`)
+- **Model Name**: Selected from the dropdown (e.g., `Meta-Llama-3.3-70B-Instruct`)
 
 ### API Request Format
 ```

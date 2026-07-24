@@ -2,9 +2,9 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** 2026-07-21 — Added 7 `isPodProbeFailure` unit tests: a fresh deployment whose pod is still `PodInitializing`/`ContainerCreating` no longer reports "Deployment failed" (the logs probe's transient "command failed" is now excluded), while genuine failures (not found, no resources, CrashLoopBackOff, ...) still report. Earlier (same date): added a Model Deployment Manager integration test covering the long-name warning — it previews the operator-shortened pod names (fetched from the new `/api/predicted-pod-names` route) and lists only the pods actually truncated+hashed. Earlier still: rewritten for the **v3 bundle** migration (SambaWiz 2.0.0) — the old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
-**Total Tests:** 159 automated across 13 suites + a legacy manual test plan
-**Test Status:** ✅ All 159 tests passing (13/13 suites)
+**Last Updated:** 2026-07-23 — Deprecated the user-facing term "bundle deployment" in favor of "model deployment" throughout the Model Deployment page copy, API response/log messages, doc comments, and docs/README (code identifiers like `getBundleDeploymentStatus`/`bundleDeployments` and the historical `BundleDeployment` CR-kind references are unchanged); no test behavior affected. Earlier (same date): Redesigned the Step-2 profile card's batching summary: a titled "Context / Max Batch Size" two-column layout, tiers sorted by descending sequence length, each tier reduced to just its max batch size (was a raw `tier: [batch sizes]` list); added 1 model-selection test and exported `parseTierKey` from the generator. Earlier (same date): renamed the user-facing "Bundle" term to "Model Bundle" on the Model Deployment page (bundle-picker `InputLabel`/`Select` label, the Section-1 table column header, and the Section-2 empty-state/help copy); the three Model Deployment Manager tests now query the picker via `findByLabelText('Model Bundle')`. Also hardened `/api/model-bundles` to only surface `kind: ModelBundle` items (belt-and-suspenders over the already-ModelBundle-scoped `kubectl get modelbundle.sambanova.ai` query), keeping the deprecated `Bundle` CR out of the picker. No tests added/removed (165 total). Earlier (2026-07-22): Made the Step-3 override drop any sequence-length tier whose batch sizes are all unchecked (no more `batch_sizes: []` in the emitted YAML; the embedding `is_default` re-targets to the smallest remaining tier); added 2 generator tests. Earlier (same date): redesigned Model Selection Section 3 into "Advanced Options": each model now shows an "Override Batching Config" subsection (the existing grid) plus a "Swappable" True/False toggle (default True, only emitted to the YAML as `modelSettings.swappable:false` when set to False); added 4 tests (1 UI toggle test + 3 generator tests) and updated the Section-3 label/aria-label assertions. Earlier (2026-07-21): added 7 `isPodProbeFailure` unit tests: a fresh deployment whose pod is still `PodInitializing`/`ContainerCreating` no longer reports "Deployment failed" (the logs probe's transient "command failed" is now excluded), while genuine failures (not found, no resources, CrashLoopBackOff, ...) still report. Earlier (same date): added a Model Deployment Manager integration test covering the long-name warning — it previews the operator-shortened pod names (fetched from the new `/api/predicted-pod-names` route) and lists only the pods actually truncated+hashed. Earlier still: rewritten for the **v3 bundle** migration (SambaWiz 2.0.0) — the old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
+**Total Tests:** 166 automated across 13 suites + a legacy manual test plan
+**Test Status:** ✅ All 166 tests passing (13/13 suites)
 **Focus:** Core business logic (V3 YAML generation/parsing, model↔profile join, batching config), API/route integration, and CLI parity
 
 ## Table of Contents
@@ -65,13 +65,13 @@ This test suite follows these principles:
 
 | Test | Type | Description |
 |------|------|-------------|
-| should fetch deployments and environments on mount | Core | Verifies the deployment and `/api/environments` endpoints are called on mount |
+| should fetch models, environments, and checkpoint mapping on mount | Core | Verifies `/api/models`, `/api/environments`, and `/api/checkpoint-mapping` are called on mount |
 
 ---
 
 ### Model Selection Page (V3)
 
-**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 8
+**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 10
 
 Real UI-behavior tests for the V3 Model Selection flow (the old suite was a single API-integration
 test). Drives the full flow: pick models → pick one profile per model → override batching → wire spec
@@ -82,8 +82,10 @@ decoding → observe the generated `ModelBundle` YAML.
 | lists only models with a matching profile and warns about excluded models (Q4) | Models with no `model_arch`→profile join are blocked, with a UI warning |
 | auto-selects and collapses the only matching profile for a single-profile model | Single-profile models are auto-selected and their row starts collapsed |
 | renders one card tile per matching profile, single-selects, and collapses on selection | Card-tile row behavior: one tile per profile, single-select, collapse-on-select |
+| shows a titled "Context / Max Batch Size" summary on each card, largest sequence length first | Step-2 card batching summary: titled two-column layout, tiers sorted by descending sequence length, each tier reduced to its max batch size (no raw batch-size list) |
 | shows the arch dropdown only for models with more than one matching arch | Multi-arch models require an arch pick before profiles list (Q3) |
 | renders the override grid seeded from the profile: supported cells enabled, "All" auto-checks, and "*" mode | Step-3 override is a checkbox grid (context-length rows × fixed batch-size columns); cells enable per profile support, "All" auto-checks when every supported cell is checked and collapses the tier to `*` |
+| defaults Swappable to True (omitted from YAML) and emits modelSettings.swappable:false only when set to False | Step-3 Advanced Options "Swappable" toggle defaults to True (no `modelSettings` emitted); switching to False emits `modelSettings.swappable:false`; switching back to True drops it |
 | shows the draft-model dropdown only for spec-decoding profiles | The draft dropdown appears only when the profile has an `sd` PEF |
 | wires a chosen draft model into the generated ModelBundle YAML (routable:false + specDecodingPairs) | End-to-end: draft selection produces `specDecodingPairs` + `modelSettings.routable:false` on the draft |
 
@@ -173,7 +175,7 @@ Covers the shared, React-free `ModelBundle` generator + its helpers (also consum
 | `getDisplayName` | 3 | Features→title ("High Interactivity" default; numbered per model when a type repeats; lone type unnumbered) |
 | `isSpecDecodingProfile` | 2 | True iff a `pef` name contains `"sd"` |
 
-#### `buildModelBundleObject` / `generateModelBundleYaml` (8)
+#### `buildModelBundleObject` / `generateModelBundleYaml` (13)
 
 | Test | Description |
 |------|-------------|
@@ -181,7 +183,12 @@ Covers the shared, React-free `ModelBundle` generator + its helpers (also consum
 | applies is_default to the smallest tier only for embedding models | Embedding is_default derivation (Q2) |
 | never sets is_default for non-embedding models | Negative case |
 | uses batchingConfigOverride instead of the profile default when present | Step-3 override supersedes the profile default |
+| drops tiers whose batch_sizes were fully unchecked in the override (no empty batch_sizes emitted) | A tier with an empty `batch_sizes` array is omitted from the emitted config; `'*'` is preserved |
+| re-targets is_default to the smallest remaining tier after empty tiers are dropped (embedding) | Dropping the smallest tier moves the embedding `is_default:true` to the new smallest remaining tier |
 | builds specDecodingPairs with bare crnames and no experts field, and marks the draft routable:false | Spec-decoding emission (Q12): bare crnames, no `experts`, draft `routable:false` |
+| omits modelSettings when swappable is true, undefined, or unset (the operator default) | Swappable defaults to true → no `modelSettings` emitted |
+| emits modelSettings.swappable:false only when swappable is explicitly false | `modelSettings.swappable:false` emitted only on explicit opt-out |
+| merges routable:false and swappable:false into a single modelSettings for a non-swappable draft | A non-swappable spec-decoding draft merges both into one `modelSettings` |
 | omits specDecodingPairs entirely when there are none | No empty `specDecodingPairs` key |
 | generates a ModelBundle YAML document with apiVersion/kind/metadata.name and no secretNames | Single `kind: ModelBundle` doc, no `secretNames` (Q7) |
 | matches the field order from the worked spec-decoding example (model, profile, modelSettings, batchingConfig) | Field ordering matches the plan's worked example |
@@ -361,9 +368,9 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| **Total automated tests** | **159** | across 13 suites, all passing |
-| UI components (API/behavior) | 28 | home (1), playground (1), model-selection (8), model-deployment (18) |
-| Core utilities | 83 | availability (9), generator (27), parser (10), pef-config (26), inference-pod-names (8), pod-name-limits (3) |
+| **Total automated tests** | **166** | across 13 suites, all passing |
+| UI components (API/behavior) | 30 | home (1), playground (1), model-selection (10), model-deployment (18) |
+| Core utilities | 88 | availability (9), generator (32), parser (10), pef-config (26), inference-pod-names (8), pod-name-limits (3) |
 | API route handlers | 24 | generate-checkpoint-mapping (13), generate-model-profiles (11) |
 | CLI | 24 | bin/__tests__/cli.test.ts |
 
@@ -373,10 +380,10 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 |------|-------|-------|
 | home.test.tsx | 1 | API integration on mount |
 | playground.test.tsx | 1 | API integration on mount |
-| model-selection.test.tsx | 8 | V3 selection flow (cards, arch dropdown, overrides, spec decoding → ModelBundle) |
+| model-selection.test.tsx | 10 | V3 selection flow (cards + batching summary, arch dropdown, overrides, swappable, spec decoding → ModelBundle) |
 | model-deployment.test.tsx | 18 | Deployment status logic (6) + probe-failure logic (7) + ModelDeployment integration (5) |
 | model-availability.test.ts | 9 | V3 model↔profile join, no-profile guard, embedding detection |
-| bundle-yaml-generator.test.ts | 27 | V3 ModelBundle generator + helpers |
+| bundle-yaml-generator.test.ts | 32 | V3 ModelBundle generator + helpers |
 | parse-bundle-yaml.test.ts | 10 | V3 ModelBundle parser (round-trip, V2 rejection) |
 | pef-config-generator.test.ts | 26 | kubectl PEF cache generation + DYT logic (no `pef_mapping.json`) |
 | inference-pod-names.test.ts | 8 | Pod-name derivation |
@@ -384,7 +391,7 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 | api/generate-checkpoint-mapping/route.test.ts | 13 | Multi-arch checkpoint capture + capabilities (V3) |
 | api/generate-model-profiles/route.test.ts | 11 | ModelProfile cache generation + batching fallback + non-v3-backend detection (V3) |
 | bin/__tests__/cli.test.ts | 24 | V3 CLI: cache→CR conversion, join, shared-generator parity |
-| **Total** | **151** | |
+| **Total** | **158** | |
 
 ---
 

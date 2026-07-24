@@ -30,7 +30,7 @@ describe('inference pod names (port of fast-coe operator naming)', () => {
   });
 
   // Regression: the customer-reported llama-4-maverick case.
-  // Bundle deployment: bd-llama-4-maverick-17b-128e-instruct-alcf
+  // Model deployment: bd-llama-4-maverick-17b-128e-instruct-alcf
   // The default (q-default) StatefulSet is truncated+hashed; the cache pod is not.
   describe('bd-llama-4-maverick-17b-128e-instruct-alcf', () => {
     const name = 'bd-llama-4-maverick-17b-128e-instruct-alcf';

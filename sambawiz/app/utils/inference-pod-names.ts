@@ -6,7 +6,7 @@ import { STATEFULSET_NAME_LIMIT, DEFAULT_POD_SUFFIX } from './pod-name-limits';
  * Kubernetes-compliant name generation for inference deployment pods.
  *
  * The inference operator (fast-coe `server/pycommon/api/inference_deployment.py`)
- * derives StatefulSet / pod names from the bundle deployment name. When a derived
+ * derives StatefulSet / pod names from the model deployment name. When a derived
  * name would exceed the relevant length limit it is NOT simply concatenated:
  * the operator truncates the base name and appends a short sha256 hash so the
  * result stays unique and within the Kubernetes limit (see `make_kube_name` /
@@ -16,7 +16,7 @@ import { STATEFULSET_NAME_LIMIT, DEFAULT_POD_SUFFIX } from './pod-name-limits';
  * (`inf-${name}-q-default-n-0`), which silently diverged from the real pod name
  * for any deployment whose name was long enough to trigger truncation, e.g.:
  *
- *   bundle deployment : bd-llama-4-maverick-17b-128e-instruct-alcf
+ *   model deployment : bd-llama-4-maverick-17b-128e-instruct-alcf
  *   sambawiz expected : inf-bd-llama-4-maverick-17b-128e-instruct-alcf-q-default-n-0
  *   actual pod        : inf-bd-llama-4-maverick-17b-128-f0968391-q-default-n-0
  *
@@ -61,7 +61,7 @@ export function makeKubeName(
 
 /**
  * The inference deployment resource name (`InferenceDeployment.deployment_name`):
- * the bundle deployment name with an `inf-` prefix, truncated to 63 chars.
+ * the model deployment name with an `inf-` prefix, truncated to 63 chars.
  */
 export function inferenceDeploymentName(deploymentName: string): string {
   return makeKubeName(deploymentName, { prefix: 'inf-' });

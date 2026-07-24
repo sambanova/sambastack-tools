@@ -7,7 +7,7 @@
  * decide *whether* truncation happens, which a client can compute on its own.
  */
 
-/** Prefix the operator wraps around the bundle deployment name (`inf-<name>`). */
+/** Prefix the operator wraps around the model deployment name (`inf-<name>`). */
 export const INFERENCE_POD_PREFIX = 'inf-';
 
 /**

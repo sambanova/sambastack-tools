@@ -6,7 +6,7 @@ The Model Deployment page manages the deployment lifecycle of validated bundles.
 
 ## What Happens on This Page
 
-### Section 1: Check Existing Bundle Deployments
+### Section 1: Check Existing Model Deployments
 - Lists all ModelDeployment resources in your namespace
 - Shows deployment status (Deployed, Deploying, Not Deployed)
 - Allows you to delete deployments

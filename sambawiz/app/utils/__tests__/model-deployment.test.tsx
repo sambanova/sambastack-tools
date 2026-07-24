@@ -191,7 +191,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Bundle');
+    const bundleSelect = await screen.findByLabelText('Model Bundle');
     await user.click(bundleSelect);
 
     expect(await screen.findByRole('option', { name: 'valid-bundle' })).toBeInTheDocument();
@@ -235,7 +235,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Bundle');
+    const bundleSelect = await screen.findByLabelText('Model Bundle');
     await user.click(bundleSelect);
     await user.click(await screen.findByRole('option', { name: 'my-bundle' }));
 
@@ -302,7 +302,7 @@ describe('Model Deployment Manager', () => {
     });
 
     const user = userEvent.setup();
-    const bundleSelect = await screen.findByLabelText('Bundle');
+    const bundleSelect = await screen.findByLabelText('Model Bundle');
     await user.click(bundleSelect);
     await user.click(await screen.findByRole('option', { name: 'my-bundle' }));
 

@@ -10,7 +10,7 @@ export default function ModelDeploymentPage() {
           Model Deployment
         </Typography>
         <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
-          Manage and monitor your bundle deployments
+          Manage and monitor your model deployments
         </Typography>
 
         <ModelDeploymentManager />

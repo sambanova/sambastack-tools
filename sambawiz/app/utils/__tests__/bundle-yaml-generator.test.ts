@@ -228,6 +228,48 @@ describe('bundle-yaml-generator', () => {
       expect(bundle.spec.modelConfigs[0].batchingConfig).toEqual({ '8k': { batch_sizes: [1], is_default: true } });
     });
 
+    it('drops tiers whose batch_sizes were fully unchecked in the override (no empty batch_sizes emitted)', () => {
+      const override = {
+        '8k': { batch_sizes: [] as number[] },
+        '32k': { batch_sizes: [2, 4] as number[] },
+        '64k': { batch_sizes: '*' as const },
+      };
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: override,
+        },
+      ];
+      const batchingConfig = buildModelBundleObject('drop-empty-bundle', selections).spec.modelConfigs[0].batchingConfig!;
+      expect(batchingConfig).not.toHaveProperty('8k');
+      expect(batchingConfig['32k'].batch_sizes).toEqual([2, 4]);
+      expect(batchingConfig['64k'].batch_sizes).toBe('*');
+    });
+
+    it('re-targets is_default to the smallest remaining tier after empty tiers are dropped (embedding)', () => {
+      // mockEmbeddingModel's profile has tiers 8k/32k/64k/128k; unchecking 8k should move is_default to 32k.
+      const override = {
+        '8k': { batch_sizes: [] as number[] },
+        '32k': { batch_sizes: [1] as number[] },
+        '64k': { batch_sizes: [1] as number[] },
+        '128k': { batch_sizes: [1] as number[] },
+      };
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockEmbeddingModel,
+          arch: 'gte-qwen2',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: override,
+        },
+      ];
+      const batchingConfig = buildModelBundleObject('drop-empty-embed', selections).spec.modelConfigs[0].batchingConfig!;
+      expect(batchingConfig).not.toHaveProperty('8k');
+      expect(batchingConfig['32k'].is_default).toBe(true);
+      expect(batchingConfig['64k'].is_default).toBeUndefined();
+    });
+
     it('builds specDecodingPairs with bare crnames and no experts field, and marks the draft routable:false', () => {
       const selections: ModelBundleSelection[] = [
         {
@@ -253,6 +295,46 @@ describe('bundle-yaml-generator', () => {
       const targetEntry = bundle.spec.modelConfigs.find((c) => c.model.startsWith('meta-llama-3-3-70b-instruct'));
       expect(draftEntry?.modelSettings).toEqual({ routable: false });
       expect(targetEntry?.modelSettings).toBeUndefined();
+    });
+
+    it('omits modelSettings when swappable is true, undefined, or unset (the operator default)', () => {
+      const cases: ModelBundleSelection[] = [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: true },
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: undefined },
+      ];
+      cases.forEach((selection) => {
+        const bundle = buildModelBundleObject('swap-default-bundle', [selection]);
+        expect(bundle.spec.modelConfigs[0].modelSettings).toBeUndefined();
+      });
+    });
+
+    it('emits modelSettings.swappable:false only when swappable is explicitly false', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: false },
+      ];
+      const bundle = buildModelBundleObject('swap-off-bundle', selections);
+      expect(bundle.spec.modelConfigs[0].modelSettings).toEqual({ swappable: false });
+    });
+
+    it('merges routable:false and swappable:false into a single modelSettings for a non-swappable draft', () => {
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockSpecDecodingDraftModel,
+          arch: 'llama-3p2-1b',
+          profile: mockSpecDecodingDraftProfile,
+          isDraftFor: mockSpecDecodingTargetModel.metadata.name,
+          swappable: false,
+        },
+        {
+          model: mockSpecDecodingTargetModel,
+          arch: 'llama-3p3-70b',
+          profile: mockSpecDecodingTargetProfile,
+        },
+      ];
+      const bundle = buildModelBundleObject('draft-noswap-bundle', selections);
+      const draftEntry = bundle.spec.modelConfigs.find((c) => c.model.startsWith('meta-llama-3-2-1b-instruct'));
+      expect(draftEntry?.modelSettings).toEqual({ routable: false, swappable: false });
     });
 
     it('omits specDecodingPairs entirely when there are none', () => {

@@ -284,7 +284,7 @@ export default function ModelDeploymentManager() {
     }
   };
 
-  // Load bundle deployments on mount
+  // Load model deployments on mount
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
@@ -669,7 +669,7 @@ export default function ModelDeploymentManager() {
       if (response.ok && data.success) {
         setDeploymentResult({
           success: true,
-          message: 'Bundle deployment applied successfully!',
+          message: 'Model deployment applied successfully!',
           output: data.output,
         });
         // Set the monitored deployment to start log monitoring
@@ -680,7 +680,7 @@ export default function ModelDeploymentManager() {
           next.add(deploymentName);
           return next;
         });
-        // Refresh the bundle deployments list
+        // Refresh the model deployments list
         await fetchBundleDeployments();
       } else {
         setDeploymentResult({
@@ -753,7 +753,7 @@ export default function ModelDeploymentManager() {
       // Refresh the list
       await fetchBundleDeployments();
     } catch (err) {
-      setError('Failed to delete bundle deployment');
+      setError('Failed to delete model deployment');
       console.error(err);
     } finally {
       setDeleting(false);
@@ -828,7 +828,7 @@ export default function ModelDeploymentManager() {
       if (response.ok && data.success) {
         setSaveResult({
           success: true,
-          message: `Bundle deployment saved successfully to saved_artifacts/${fileName}`,
+          message: `Model deployment saved successfully to saved_artifacts/${fileName}`,
         });
       } else if (response.status === 409 && data.fileExists) {
         // File exists, show overwrite dialog
@@ -836,7 +836,7 @@ export default function ModelDeploymentManager() {
       } else {
         setSaveResult({
           success: false,
-          message: data.error || 'Failed to save bundle deployment',
+          message: data.error || 'Failed to save model deployment',
         });
       }
     } catch {
@@ -904,18 +904,18 @@ export default function ModelDeploymentManager() {
         {/* Empty State */}
         {!loading && bundleDeployments.length === 0 && (
           <Alert severity="info">
-            No bundle deployments found in the namespace
+            No model deployments found in the namespace
           </Alert>
         )}
 
-        {/* Bundle Deployments Table */}
+        {/* Model Deployments Table */}
         {!loading && bundleDeployments.length > 0 && (
           <TableContainer>
             <Table size="small" sx={{ border: '1px solid', borderColor: 'divider' }}>
               <TableHead>
                 <TableRow sx={{ bgcolor: 'grey.50' }}>
                   <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
-                  <TableCell sx={{ fontWeight: 600 }}>Bundle</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Model Bundle</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Created</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Actions</TableCell>
@@ -981,7 +981,7 @@ export default function ModelDeploymentManager() {
         {/* Empty State */}
         {!loadingBundles && validBundles.length === 0 && (
           <Alert severity="info">
-            No valid bundles found. Please create and validate a bundle first.
+            No valid model bundles found. Please create and validate a model bundle first.
           </Alert>
         )}
 
@@ -990,10 +990,10 @@ export default function ModelDeploymentManager() {
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 2 }}>
               <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                Select a valid bundle to deploy
+                Select a valid model bundle to deploy
               </Typography>
               <Tooltip
-                title="Only bundles for which validation succeeded are listed here. If you would like to deploy a different bundle or if you want to see which models/configurations are available in one of the listed bundles, please use the 'load' feature at the top of the Model Selection page and select 'Remote Environment' as the source."
+                title="Only model bundles for which validation succeeded are listed here. If you would like to deploy a different model bundle or if you want to see which models/configurations are available in one of the listed model bundles, please use the 'load' feature at the top of the Model Selection page and select 'Remote Environment' as the source."
                 arrow
               >
                 <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
@@ -1002,13 +1002,13 @@ export default function ModelDeploymentManager() {
 
             {/* Bundle Dropdown */}
             <FormControl fullWidth sx={{ mb: 3 }}>
-              <InputLabel id="bundle-select-label">Bundle</InputLabel>
+              <InputLabel id="bundle-select-label">Model Bundle</InputLabel>
               <Select
                 labelId="bundle-select-label"
                 id="bundle-select"
                 value={selectedBundle}
                 onChange={handleBundleChange}
-                label="Bundle"
+                label="Model Bundle"
               >
                 {validBundles.map((bundle) => (
                   <MenuItem key={bundle.name} value={bundle.name}>
@@ -1026,7 +1026,7 @@ export default function ModelDeploymentManager() {
                   label="Deployment Name"
                   value={deploymentName}
                   onChange={(e) => handleDeploymentNameChange(e.target.value)}
-                  helperText="Enter the name for this bundle deployment (e.g., md-your-bundle-name)"
+                  helperText="Enter the name for this model deployment (e.g., md-your-bundle-name)"
                   variant="outlined"
                   sx={{ mb: 3 }}
                 />
@@ -1506,7 +1506,7 @@ export default function ModelDeploymentManager() {
         <DialogTitle>Confirm Deletion</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Are you sure you want to delete the bundle deployment: <strong>{deploymentToDelete}</strong>?
+            Are you sure you want to delete the model deployment: <strong>{deploymentToDelete}</strong>?
           </DialogContentText>
         </DialogContent>
         <DialogActions>
