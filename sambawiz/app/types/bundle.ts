@@ -130,7 +130,7 @@ export interface ModelConfigEntry {
   model: string; // <crname>[:<arch>][:<version>] — see ModelRefFormatFn
   profile?: string; // named ModelProfile reference (what the builder emits)
   profileDefinition?: unknown; // inline ModelProfileSpec (builder never emits this)
-  batchingConfig?: BatchingConfig; // always emitted in full by the builder (Q1)
+  batchingConfig?: BatchingConfig; // omitted when it matches the profile default; else full, ordered by descending seq length
   modelSettings?: {
     properties?: Record<string, unknown>;
     swappable?: boolean;

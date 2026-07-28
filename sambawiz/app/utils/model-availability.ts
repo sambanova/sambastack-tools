@@ -29,6 +29,7 @@ export interface AvailableModel {
   displayName: string; // Model.spec.name — what the user selects
   resourceName: string; // Model.metadata.name — the crname used in modelConfigs[].model refs
   isEmbedding: boolean; // via isEmbeddingModel (Q10: spec.metadata.capabilities includes "embeddings")
+  capabilities: string[]; // Model.spec.metadata.capabilities, e.g. ["text", "vision"] — shown in the model picker
   /** Only archs with >= 1 matching profile are included. Multi-entry => Step-2 arch dropdown (Q3). */
   archs: AvailableModelArch[];
 }
@@ -123,6 +124,7 @@ export function getAvailableModels(
       displayName,
       resourceName: entry.resource_name,
       isEmbedding: isEmbeddingModel(toModelLike(displayName, entry)),
+      capabilities: entry.capabilities ?? [],
       archs,
     });
   }

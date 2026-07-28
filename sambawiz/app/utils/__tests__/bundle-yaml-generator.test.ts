@@ -5,6 +5,8 @@ import {
   isEmbeddingModel,
   getEffectiveBatchingConfig,
   deriveIsDefaultTier,
+  batchingConfigsEqual,
+  orderBatchingConfigDescending,
   getDisplayName,
   isSpecDecodingProfile,
   buildModelBundleObject,
@@ -163,6 +165,35 @@ describe('bundle-yaml-generator', () => {
     });
   });
 
+  describe('batchingConfigsEqual', () => {
+    it('is true regardless of tier order and batch-size order', () => {
+      const a = { '8k': { batch_sizes: [2, 4] as number[] }, '32k': { batch_sizes: [1] as number[] } };
+      const b = { '32k': { batch_sizes: [1] as number[] }, '8k': { batch_sizes: [4, 2] as number[] } };
+      expect(batchingConfigsEqual(a, b)).toBe(true);
+    });
+
+    it('is false when tiers, batch sizes, or is_default differ', () => {
+      const base = { '8k': { batch_sizes: [1] as number[] } };
+      expect(batchingConfigsEqual(base, { '8k': { batch_sizes: [1, 2] as number[] } })).toBe(false);
+      expect(batchingConfigsEqual(base, { '8k': { batch_sizes: [1] as number[] }, '32k': { batch_sizes: [1] as number[] } })).toBe(false);
+      expect(batchingConfigsEqual(base, { '8k': { batch_sizes: [1] as number[], is_default: true } })).toBe(false);
+      expect(batchingConfigsEqual({ '8k': { batch_sizes: '*' as const } }, { '8k': { batch_sizes: [1] as number[] } })).toBe(false);
+    });
+  });
+
+  describe('orderBatchingConfigDescending', () => {
+    it('reinserts tiers in descending sequence-length order', () => {
+      const config = {
+        '128k': { batch_sizes: [2] as number[] },
+        '8k': { batch_sizes: [2] as number[] },
+        '192k': { batch_sizes: [2] as number[] },
+        '32k': { batch_sizes: [2] as number[] },
+        '64k': { batch_sizes: [2] as number[] },
+      };
+      expect(Object.keys(orderBatchingConfigDescending(config))).toEqual(['192k', '128k', '64k', '32k', '8k']);
+    });
+  });
+
   describe('getDisplayName', () => {
     it('maps continuous_batching to "High Throughput"', () => {
       expect(getDisplayName(mockContinuousBatchingProfile, [mockContinuousBatchingProfile])).toBe(
@@ -206,7 +237,7 @@ describe('bundle-yaml-generator', () => {
   });
 
   describe('buildModelBundleObject / generateModelBundleYaml', () => {
-    it('emits one modelConfigs entry per selection, with full batchingConfig always present', () => {
+    it('emits one modelConfigs entry per selection (batchingConfig present here since the embedding is_default diverges from the profile default)', () => {
       const selections: ModelBundleSelection[] = [
         { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
       ];
@@ -217,6 +248,8 @@ describe('bundle-yaml-generator', () => {
       const entry = bundle.spec.modelConfigs[0];
       expect(entry.model).toBe('e5-mistral-7b-instruct:1');
       expect(entry.profile).toBe('gpt-oss-fp8-dyt');
+      // mockSingleArchModel is an embedding model, so is_default is added to the
+      // smallest tier — a divergence from the profile default that forces emission.
       expect(entry.batchingConfig).toBeDefined();
       expect(entry.modelSettings).toBeUndefined();
     });
@@ -235,11 +268,102 @@ describe('bundle-yaml-generator', () => {
 
     it('never sets is_default for non-embedding models', () => {
       const selections: ModelBundleSelection[] = [
-        { model: mockMultiArchModel, arch: 'llama-4-maverick', profile: mockHighInteractivityProfile },
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          // Diverge from the profile default so batchingConfig is emitted.
+          batchingConfigOverride: { '8k': { batch_sizes: [2] } },
+        },
       ];
       const bundle = buildModelBundleObject('non-embed-bundle', selections);
       const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig!;
       Object.values(batchingConfig).forEach((tier) => expect(tier.is_default).toBeUndefined());
+    });
+
+    it('omits batchingConfig when it matches the profile default (non-embedding, no override)', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockMultiArchModel, arch: 'llama-4-maverick', profile: mockHighInteractivityProfile },
+      ];
+      const bundle = buildModelBundleObject('default-bundle', selections);
+      expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+
+    it('omits batchingConfig when an override exactly matches the profile default', () => {
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: { ...mockHighInteractivityProfile.spec.defaultBatchingConfig },
+        },
+      ];
+      const bundle = buildModelBundleObject('default-bundle', selections);
+      expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+
+    it('drops a model entirely when all its batching tiers are cleared in Step 3', () => {
+      const selections: ModelBundleSelection[] = [
+        { model: mockMultiArchModel, arch: 'llama-4-maverick', profile: mockHighInteractivityProfile },
+        {
+          model: mockSingleArchModel,
+          arch: 'e5-mistral',
+          profile: mockHighInteractivityProfile,
+          // Every tier unchecked → empty override, while the profile default was non-empty.
+          batchingConfigOverride: { '8k': { batch_sizes: [] }, '32k': { batch_sizes: [] } },
+        },
+      ];
+      const bundle = buildModelBundleObject('drop-bundle', selections);
+      expect(bundle.spec.modelConfigs).toHaveLength(1);
+      expect(bundle.spec.modelConfigs[0].model).toBe('llama-4-maverick-17b-128e-instruct:llama-4-maverick:1');
+    });
+
+    it('prunes a spec-decoding pair whose target model was dropped', () => {
+      const selections: ModelBundleSelection[] = [
+        {
+          // Target model: batching fully cleared → dropped.
+          model: mockSpecDecodingTargetModel,
+          arch: 'llama-3p3-70b',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: { '8k': { batch_sizes: [] } },
+        },
+        {
+          // Draft model referencing the (now-dropped) target.
+          model: mockSpecDecodingDraftModel,
+          arch: 'llama-3p2-1b',
+          profile: mockSpecDecodingDraftProfile,
+          isDraftFor: mockSpecDecodingTargetModel.metadata.name,
+        },
+      ];
+      const bundle = buildModelBundleObject('sd-drop-bundle', selections);
+      expect(bundle.spec.modelConfigs.map((c) => c.model)).toEqual(['meta-llama-3-2-1b-instruct:1']);
+      expect(bundle.spec.specDecodingPairs).toBeUndefined();
+    });
+
+    it('orders an emitted batchingConfig by descending sequence length in the YAML', () => {
+      const override = {
+        '8k': { batch_sizes: [2, 4] as number[] },
+        '128k': { batch_sizes: [2] as number[] },
+        '32k': { batch_sizes: [2, 4] as number[] },
+        '64k': { batch_sizes: [2] as number[] },
+        '192k': { batch_sizes: [2] as number[] },
+      };
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: override,
+        },
+      ];
+      const yamlStr = generateModelBundleYaml('order-bundle', selections);
+      // Word-boundary match so "8k:" doesn't match inside "128k:".
+      const indices = ['192k', '128k', '64k', '32k', '8k'].map((tier) =>
+        yamlStr.search(new RegExp(`\\b${tier}:`))
+      );
+      indices.forEach((idx) => expect(idx).toBeGreaterThan(-1));
+      // Tiers appear in strictly descending-seq-length order → indices ascending.
+      expect(indices).toEqual([...indices].sort((a, b) => a - b));
     });
 
     it('uses batchingConfigOverride instead of the profile default when present', () => {
@@ -396,6 +520,9 @@ describe('bundle-yaml-generator', () => {
           arch: 'llama-3p2-1b',
           profile: mockSpecDecodingDraftProfile,
           isDraftFor: mockSpecDecodingTargetModel.metadata.name,
+          // Diverge from the profile default so batchingConfig is emitted (a config
+          // matching the default is now omitted).
+          batchingConfigOverride: { '4k': { batch_sizes: [1] } },
         },
       ];
       const yamlStr = generateModelBundleYaml('order-bundle', selections);

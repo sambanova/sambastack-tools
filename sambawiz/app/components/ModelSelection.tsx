@@ -285,7 +285,8 @@ function BatchingOverrideEditor({
   override: BatchingConfig;
   onChange: (next: BatchingConfig) => void;
 }) {
-  const tiers = Object.keys(universe);
+  // Rows are ordered by descending context length (e.g. 192k, 128k, …, 8k).
+  const tiers = Object.keys(universe).sort((a, b) => parseTierKey(b) - parseTierKey(a));
 
   if (tiers.length === 0) {
     return (
@@ -1142,6 +1143,14 @@ export default function ModelSelection() {
               <MenuItem key={model.displayName} value={model.displayName}>
                 <Checkbox checked={selection.selectedModels.indexOf(model.displayName) > -1} />
                 <ListItemText primary={model.displayName} />
+                {/* Model capabilities (e.g. text, vision) shown to the right of the name. */}
+                {model.capabilities.length > 0 && (
+                  <Box sx={{ display: 'flex', gap: 0.5, ml: 2, flexShrink: 0 }}>
+                    {model.capabilities.map((capability) => (
+                      <Chip key={capability} label={capability} size="small" variant="outlined" />
+                    ))}
+                  </Box>
+                )}
               </MenuItem>
             ))}
           </Select>

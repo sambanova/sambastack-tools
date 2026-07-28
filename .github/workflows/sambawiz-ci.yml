@@ -11,8 +11,12 @@ on:
       - 'sambawiz/**'
 
 jobs:
-  lint-and-test:
+  sambawiz-lint-and-test:
     runs-on: ubuntu-latest
+    # Fail fast instead of running until the 6-hour GitHub default if a step
+    # ever hangs (e.g. a resource-starved test runner) — a hung job then shows
+    # up as a red timeout rather than "never completes".
+    timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@v4
@@ -27,8 +31,13 @@ jobs:
     - name: Install dependencies
       run: npm ci --prefix sambawiz
 
+    # Run Jest in CI mode with a bounded worker count. The default worker count
+    # (cores - 1) combined with ts-jest's per-worker type-checking can exhaust
+    # memory on the 2-core GitHub runner, making the job thrash and appear to
+    # hang. `--ci` disables the interactive watch/prompt paths and `--forceExit`
+    # guarantees the process exits even if a stray async handle lingers.
     - name: Run tests
-      run: npm test --prefix sambawiz
+      run: npm test --prefix sambawiz -- --ci --maxWorkers=2 --forceExit
 
     - name: Run linter
       run: npm run lint --prefix sambawiz

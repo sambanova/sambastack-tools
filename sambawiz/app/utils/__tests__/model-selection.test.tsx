@@ -78,7 +78,9 @@ async function renderModelSelection(
 async function selectModels(user: ReturnType<typeof userEvent.setup>, names: string[]) {
   await user.click(screen.getByLabelText('Models'));
   for (const name of names) {
-    await user.click(await screen.findByRole('option', { name }));
+    // Each option's accessible name is the model display name followed by its
+    // capability chips (e.g. "…-Instruct text vision"), so match by prefix.
+    await user.click(await screen.findByRole('option', { name: (n) => n.startsWith(name) }));
   }
   await user.keyboard('{Escape}');
 }
@@ -164,13 +166,38 @@ describe('ModelSelection (V3)', () => {
     const user = userEvent.setup();
     await user.click(screen.getByLabelText('Models'));
 
-    expect(await screen.findByRole('option', { name: mockSpecDecodingDraftModel.spec.name })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: mockEmbeddingModel.spec.name })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole('option', { name: (n) => n.startsWith(mockSpecDecodingDraftModel.spec.name) })
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('option', { name: (n) => n.startsWith(mockEmbeddingModel.spec.name) })
+    ).not.toBeInTheDocument();
     await user.keyboard('{Escape}');
 
     expect(
       screen.getByText(new RegExp(`No matching model profile was found for: ${mockEmbeddingModel.spec.name}`))
     ).toBeInTheDocument();
+  });
+
+  it('shows each model\'s capabilities as chips in the model picker', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await user.click(screen.getByLabelText('Models'));
+
+    const option = await screen.findByRole('option', {
+      name: (n) => n.startsWith(mockSpecDecodingDraftModel.spec.name),
+    });
+    // capabilities (["text"]) render as chips to the right of the model name.
+    mockSpecDecodingDraftModel.spec.metadata.capabilities?.forEach((capability) => {
+      expect(within(option).getByText(capability)).toBeInTheDocument();
+    });
   });
 
   it('auto-selects and collapses the only matching profile for a single-profile model', async () => {
@@ -318,14 +345,17 @@ describe('ModelSelection (V3)', () => {
     expect(screen.queryByRole('checkbox', { name: 'Batch size 64 for 4k' })).not.toBeInTheDocument();
     expect(allCell).toBeChecked();
 
+    // The grid is seeded from the profile default, so the emitted config matches
+    // the default and batchingConfig is omitted entirely.
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
-        spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
+        spec: { modelConfigs: Array<{ batchingConfig?: Record<string, { batch_sizes: unknown }> }> };
       };
-      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([1, 4]);
+      expect(doc.spec.modelConfigs[0].batchingConfig).toBeUndefined();
     });
 
-    // Unchecking a supported cell drops it from the list and clears "All".
+    // Unchecking a supported cell diverges from the default, so batchingConfig is
+    // now emitted with the reduced list, and "All" clears.
     await user.click(cell4);
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {

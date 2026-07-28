@@ -665,13 +665,17 @@ export default function ModelDeploymentManager() {
 
   // Whether the currently-selected model/bundle supports prompt caching, which
   // gates the "Enable prompt caching" checkbox. In "model" mode we check the
-  // single selected profile; in "bundle" mode, any profile the bundle references.
+  // single selected profile. In "bundle" mode the bundle must contain exactly
+  // one model whose profile supports it: KV cache management (ENABLE_KV_CACHE_MANAGER)
+  // rejects a multi-model bundle whose experts span more than one ckpt_sharing_uuid.
   const promptCachingAvailable = useMemo(() => {
     if (deployMode === 'model') {
       return profileHasPromptCaching(profileName || undefined);
     }
     const bundle = validBundles.find((b) => b.name === selectedBundle);
-    return Boolean(bundle?.modelConfigs?.some((mc) => profileHasPromptCaching(mc.profile)));
+    return Boolean(
+      bundle?.modelConfigs?.length === 1 && profileHasPromptCaching(bundle.modelConfigs[0].profile)
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deployMode, profileName, selectedBundle, validBundles, modelProfileFeatures]);
 

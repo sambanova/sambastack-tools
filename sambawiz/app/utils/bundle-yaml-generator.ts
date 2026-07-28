@@ -144,6 +144,49 @@ export function dropEmptyTiers(batchingConfig: BatchingConfig): BatchingConfig {
 }
 
 /**
+ * Normalizes a tier's `batch_sizes` to a comparison key: the `'*'` sentinel as
+ * itself, else a sorted, comma-joined list (so element order never affects
+ * equality).
+ */
+function batchSizesKey(batchSizes: number[] | '*'): string {
+  return batchSizes === '*' ? '*' : [...batchSizes].sort((a, b) => a - b).join(',');
+}
+
+/**
+ * Deep, order-independent equality for two batching configs: same set of tiers,
+ * and for each tier the same batch sizes and the same `is_default` flag.
+ */
+export function batchingConfigsEqual(a: BatchingConfig, b: BatchingConfig): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const ac = a[key];
+    const bc = b[key];
+    if (!bc) return false;
+    if (batchSizesKey(ac.batch_sizes) !== batchSizesKey(bc.batch_sizes)) return false;
+    if (Boolean(ac.is_default) !== Boolean(bc.is_default)) return false;
+  }
+  return true;
+}
+
+/**
+ * Returns a copy of `batchingConfig` with its tiers reinserted in descending
+ * sequence-length order (e.g. 192k, 128k, 64k, 32k, 8k), so the emitted YAML
+ * lists longest-context experts first. Object key insertion order drives the
+ * `js-yaml` output order (dumped with `sortKeys` off).
+ */
+export function orderBatchingConfigDescending(batchingConfig: BatchingConfig): BatchingConfig {
+  const ordered: BatchingConfig = {};
+  Object.keys(batchingConfig)
+    .sort((a, b) => parseTierKey(b) - parseTierKey(a))
+    .forEach((key) => {
+      ordered[key] = batchingConfig[key];
+    });
+  return ordered;
+}
+
+/**
  * Returns a copy of `batchingConfig` with `is_default` stripped from every
  * tier, then re-applied to exactly the smallest tier — but only when
  * `isEmbedding` is true (Q2). Non-embedding models never get `is_default` set.
@@ -214,11 +257,25 @@ export function isSpecDecodingProfile(profile: ModelProfile): boolean {
  * re-parse YAML.
  */
 export function buildModelBundleObject(bundleName: string, selections: ModelBundleSelection[]): ModelBundle {
-  const modelConfigs: ModelConfigEntry[] = selections.map((selection) => {
-    const baseBatchingConfig = dropEmptyTiers(
-      selection.batchingConfigOverride ?? getEffectiveBatchingConfig(selection.profile)
-    );
-    const batchingConfig = deriveIsDefaultTier(baseBatchingConfig, isEmbeddingModel(selection.model));
+  const modelConfigs: ModelConfigEntry[] = [];
+  // Track which models survived (by crname) so spec-decoding pairs referencing a
+  // dropped model can be pruned.
+  const keptCrnames = new Set<string>();
+  const keptDrafts: (ModelBundleSelection & { isDraftFor: string })[] = [];
+
+  for (const selection of selections) {
+    const isEmbedding = isEmbeddingModel(selection.model);
+    const profileDefault = getEffectiveBatchingConfig(selection.profile);
+    const baseBatchingConfig = dropEmptyTiers(selection.batchingConfigOverride ?? profileDefault);
+
+    // Drop the model from the bundle entirely when its batching config was fully
+    // cleared in Step 3 — i.e. it's empty now, but the profile had a non-empty
+    // default to clear (a profile with no batching config to begin with is kept).
+    if (Object.keys(baseBatchingConfig).length === 0 && Object.keys(profileDefault).length > 0) {
+      continue;
+    }
+
+    const batchingConfig = deriveIsDefaultTier(baseBatchingConfig, isEmbedding);
 
     // Insertion order matters here: it drives the emitted YAML key order
     // (model, profile, modelSettings, batchingConfig), matching v3plan.md's
@@ -243,13 +300,23 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
       entry.modelSettings = modelSettings;
     }
 
-    entry.batchingConfig = batchingConfig;
+    // Only emit batchingConfig when it diverges from what the operator would use
+    // by default (the profile's effective batching config); an identical config
+    // is redundant. When emitted, order tiers by descending sequence length.
+    if (!batchingConfigsEqual(batchingConfig, profileDefault)) {
+      entry.batchingConfig = orderBatchingConfigDescending(batchingConfig);
+    }
 
-    return entry;
-  });
+    modelConfigs.push(entry);
+    keptCrnames.add(selection.model.metadata.name);
+    if (selection.isDraftFor) {
+      keptDrafts.push(selection as ModelBundleSelection & { isDraftFor: string });
+    }
+  }
 
-  const specDecodingPairs: SpecDecodingPair[] = selections
-    .filter((selection): selection is ModelBundleSelection & { isDraftFor: string } => Boolean(selection.isDraftFor))
+  const specDecodingPairs: SpecDecodingPair[] = keptDrafts
+    // Prune pairs whose target model was dropped (the draft itself is kept by construction).
+    .filter((selection) => keptCrnames.has(selection.isDraftFor))
     .map((selection) => ({
       draft: selection.model.metadata.name,
       target: selection.isDraftFor,

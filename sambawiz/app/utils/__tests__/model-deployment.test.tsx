@@ -413,6 +413,114 @@ describe('Model Deployment Manager', () => {
     jest.useFakeTimers();
   });
 
+  it('offers "Enable prompt caching" for a single-model bundle whose profile supports it', async () => {
+    jest.useRealTimers();
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-bundles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            bundles: [
+              {
+                name: 'single-bundle',
+                namespace: 'default',
+                creationTimestamp: '2024-01-01T00:00:00Z',
+                isValid: true,
+                validationReason: 'ValidationSucceeded',
+                validationMessage: '',
+                modelConfigs: [{ model: 'minimax-m2-7:minimax-m2p5:1', profile: 'pc-profile' }],
+              },
+            ],
+          }),
+        });
+      }
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            data: { 'pc-profile': { model_arch: 'minimax-m2p5', features: ['prompt_caching'], batchingConfig: {}, pefs: [] } },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [], bundles: [] }) });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const bundleSelect = await screen.findByRole('combobox', { name: 'Model Bundle' });
+    await user.click(bundleSelect);
+    await user.click(await screen.findByRole('option', { name: 'single-bundle' }));
+
+    expect(await screen.findByRole('checkbox', { name: 'Enable prompt caching' })).toBeInTheDocument();
+
+    jest.useFakeTimers();
+  });
+
+  it('does NOT offer "Enable prompt caching" for a multi-model bundle (KV cache spans multiple experts)', async () => {
+    jest.useRealTimers();
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-bundles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            bundles: [
+              {
+                name: 'multi-bundle',
+                namespace: 'default',
+                creationTimestamp: '2024-01-01T00:00:00Z',
+                isValid: true,
+                validationReason: 'ValidationSucceeded',
+                validationMessage: '',
+                // Two models — even though the first profile supports prompt
+                // caching, KV cache management rejects a multi-expert bundle.
+                modelConfigs: [
+                  { model: 'minimax-m2-7:minimax-m2p5:1', profile: 'pc-profile' },
+                  { model: 'gemma-4-31b:gemma:1', profile: 'plain-profile' },
+                ],
+              },
+            ],
+          }),
+        });
+      }
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            data: {
+              'pc-profile': { model_arch: 'minimax-m2p5', features: ['prompt_caching'], batchingConfig: {}, pefs: [] },
+              'plain-profile': { model_arch: 'gemma', features: [], batchingConfig: {}, pefs: [] },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [], bundles: [] }) });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const bundleSelect = await screen.findByRole('combobox', { name: 'Model Bundle' });
+    await user.click(bundleSelect);
+    await user.click(await screen.findByRole('option', { name: 'multi-bundle' }));
+
+    // Editor renders (a bundle is selected) but the checkbox must not appear.
+    await screen.findByDisplayValue(/kind: ModelDeployment/);
+    expect(screen.queryByRole('checkbox', { name: 'Enable prompt caching' })).not.toBeInTheDocument();
+
+    jest.useFakeTimers();
+  });
+
   it('redirects to the Model Selection page when "Model" is chosen without model params', async () => {
     jest.useRealTimers();
     // No modelPath/profileName → defaults to bundle mode.
