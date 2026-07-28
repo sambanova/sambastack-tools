@@ -16,14 +16,18 @@ interface AppConfig {
 
 /**
  * Summary of a `ModelDeployment` CR (replaces the old `BundleDeployment`).
- * `bundle` comes from `spec.bundle` — same field name as the old
- * `BundleDeployment.spec.bundle`, since SambaWiz always emits a named
- * `spec.bundle` reference (never inline `spec.models`, per v3plan.md Q6).
+ * A deployment is either bundle-based (`spec.bundle` — a named `ModelBundle`
+ * reference) or model-based (`spec.models.modelConfigs[]` — an inline model +
+ * profile). For model-based deployments `spec.bundle` is empty, so we instead
+ * resolve the referenced Model CR's display name (`spec.name`) into `model`.
  */
 interface ModelDeploymentSummary {
   name: string;
   namespace: string;
+  /** `spec.bundle` (a `ModelBundle` name), or '' for a model-based deployment. */
   bundle: string;
+  /** The Model CR's `spec.name` for a model-based deployment; undefined for a bundle. */
+  model?: string;
   creationTimestamp: string;
   status?: {
     conditions?: Array<{
@@ -90,18 +94,67 @@ export async function GET() {
 
     const data = JSON.parse(output);
 
-    // Transform the data to a more usable format
-    const bundleDeployments: ModelDeploymentSummary[] = data.items.map((item: {
+    interface ModelDeploymentItem {
       metadata: { name: string; namespace: string; creationTimestamp: string };
-      spec: { bundle: string };
+      spec: {
+        bundle?: string;
+        models?: { modelConfigs?: Array<{ model?: string }> };
+      };
       status?: ModelDeploymentSummary['status'];
-    }) => ({
-      name: item.metadata.name,
-      namespace: item.metadata.namespace,
-      bundle: item.spec.bundle,
-      creationTimestamp: item.metadata.creationTimestamp,
-      status: item.status,
-    }));
+    }
+
+    const items: ModelDeploymentItem[] = data.items || [];
+
+    // A model-based deployment inlines models via `spec.models.modelConfigs`
+    // (see generateModelDeploymentYaml) and leaves `spec.bundle` empty.
+    const isModelBased = (item: ModelDeploymentItem) =>
+      !item.spec?.bundle &&
+      Array.isArray(item.spec?.models?.modelConfigs) &&
+      item.spec.models!.modelConfigs!.length > 0;
+
+    // Resolve Model CR `metadata.name` (crname) -> `spec.name` (display name),
+    // but only if there's actually a model-based deployment to name (avoids the
+    // extra kubectl call otherwise). A `modelConfigs[].model` ref is
+    // "<crname>[:<arch>][:<version>]"; the crname is the part before the first ":".
+    const modelNameByResource: Record<string, string> = {};
+    if (items.some(isModelBased)) {
+      try {
+        const modelsOutput = execSync(`kubectl -n ${namespace} get models -o json`, {
+          encoding: 'utf-8',
+          env,
+          timeout: 30000,
+        });
+        const modelsData = JSON.parse(modelsOutput);
+        for (const m of modelsData.items || []) {
+          const resource = m?.metadata?.name;
+          const display = m?.spec?.name;
+          if (resource && display) modelNameByResource[resource] = display;
+        }
+      } catch (modelsError) {
+        // Non-fatal: fall back to the raw crname from the model ref below.
+        console.error('Failed to fetch models for deployment name resolution:', modelsError);
+      }
+    }
+
+    // Transform the data to a more usable format
+    const bundleDeployments: ModelDeploymentSummary[] = items.map((item) => {
+      let model: string | undefined;
+      if (isModelBased(item)) {
+        const names = item.spec.models!.modelConfigs!
+          .map((mc) => String(mc.model || '').split(':')[0])
+          .filter(Boolean)
+          .map((crname) => modelNameByResource[crname] || crname);
+        if (names.length > 0) model = Array.from(new Set(names)).join(', ');
+      }
+      return {
+        name: item.metadata.name,
+        namespace: item.metadata.namespace,
+        bundle: item.spec?.bundle || '',
+        model,
+        creationTimestamp: item.metadata.creationTimestamp,
+        status: item.status,
+      };
+    });
 
     return NextResponse.json({
       success: true,

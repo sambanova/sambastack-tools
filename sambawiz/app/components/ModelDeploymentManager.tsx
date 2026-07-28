@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
   Box,
@@ -32,6 +32,7 @@ import {
   Radio,
   RadioGroup,
   FormControlLabel,
+  Checkbox,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -48,14 +49,16 @@ import { arePodNamesShortened } from '../utils/pod-name-limits';
 
 /**
  * A deployed `ModelDeployment` CR summary, as returned by
- * `/api/model-deployment` (`spec.bundle` is the same field name as the old
- * V2 `BundleDeployment.spec.bundle`, since SambaWiz always emits a named
- * `spec.bundle` reference — see v3plan.md Q6).
+ * `/api/model-deployment`. A deployment is either bundle-based (`bundle`, from
+ * `spec.bundle`) or model-based (`model`, the referenced Model CR's display
+ * name `spec.name` — resolved server-side since model-based deployments leave
+ * `spec.bundle` empty).
  */
 interface ModelDeploymentSummary {
   name: string;
   namespace: string;
   bundle: string;
+  model?: string;
   creationTimestamp: string;
   status?: {
     conditions?: Array<{
@@ -87,6 +90,30 @@ interface PodStatusInfo {
   total: number;
   status: string;
 }
+
+/**
+ * The `ModelProfile` feature (`spec.features[]`) that gates prompt caching.
+ * A deployment supports prompt caching when its selected profile — or, for a
+ * bundle, any of the profiles its `modelConfigs` reference — lists this feature.
+ */
+const PROMPT_CACHING_FEATURE = 'prompt_caching';
+
+/**
+ * The `engineConfig.env_vars` that turn on prompt (KV) caching. Injected into
+ * the deployment YAML's `spec.engineConfig` when the "Enable prompt caching"
+ * box is checked. String values (not booleans) so they serialize as quoted
+ * `"true"`, matching what the engine expects.
+ */
+const PROMPT_CACHING_ENV_VARS = {
+  ENABLE_KV_CACHE_MANAGER: 'true',
+  KV_CACHE_INCLUDE_STATS_IN_RESPONSE: 'true',
+} as const;
+
+/**
+ * The features cache served by `/api/model-profiles` (the `model_profiles.json`
+ * cache), keyed by ModelProfile `metadata.name`. Only `features` is needed here.
+ */
+type ModelProfileFeatures = Record<string, { features?: string[] }>;
 
 /**
  * Determines the deployment status of a bundle based on its cache and default pod status.
@@ -181,6 +208,12 @@ export default function ModelDeploymentManager() {
   const [deploymentName, setDeploymentName] = useState<string>('');
   const [loadingBundles, setLoadingBundles] = useState<boolean>(false);
   const [deploymentYaml, setDeploymentYaml] = useState<string>('');
+  // ModelProfile features (from /api/model-profiles), used to decide whether the
+  // current model/bundle supports prompt caching. `enablePromptCaching` is the
+  // "Enable prompt caching" checkbox; it resets on each new model/bundle
+  // selection and injects `engineConfig.env_vars` into the YAML when checked.
+  const [modelProfileFeatures, setModelProfileFeatures] = useState<ModelProfileFeatures>({});
+  const [enablePromptCaching, setEnablePromptCaching] = useState<boolean>(false);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -310,6 +343,7 @@ export default function ModelDeploymentManager() {
   useEffect(() => {
     fetchBundleDeployments();
     fetchBundles();
+    fetchModelProfileFeatures();
     // Skip loading saved state if a bundle (or a model+profile) is specified in
     // the URL query params — those drive the form instead of the saved state.
     if (!searchParams.get('bundle') && !hasModelParams) {
@@ -329,6 +363,10 @@ export default function ModelDeploymentManager() {
         setDeploymentName(data.state.deploymentName || '');
         setDeploymentYaml(data.state.deploymentYaml || '');
         setMonitoredDeployment(data.state.monitoredDeployment || '');
+        // Reflect prompt caching if the restored YAML already carries the env var.
+        setEnablePromptCaching(
+          (data.state.deploymentYaml || '').includes('ENABLE_KV_CACHE_MANAGER')
+        );
       }
     } catch (error) {
       console.error('Failed to load saved deployment state:', error);
@@ -357,6 +395,9 @@ export default function ModelDeploymentManager() {
         }
         setDeploymentName(suggestedName);
 
+        // New selection → prompt caching starts unchecked.
+        setEnablePromptCaching(false);
+
         // Generate YAML
         const yaml = generateDeploymentYaml(bundleParam, suggestedName);
         setDeploymentYaml(yaml);
@@ -365,6 +406,7 @@ export default function ModelDeploymentManager() {
         setDeploymentResult(null);
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, validBundles]);
 
   // Handle query params for deploying an individual model + profile. When both
@@ -382,6 +424,9 @@ export default function ModelDeploymentManager() {
       const suggestedName = deriveModelDeploymentName(modelPath);
       setDeploymentName(suggestedName);
 
+      // New selection → prompt caching starts unchecked.
+      setEnablePromptCaching(false);
+
       // Generate YAML
       setDeploymentYaml(
         generateModelDeploymentYaml(modelPath, profileName, suggestedName)
@@ -394,6 +439,7 @@ export default function ModelDeploymentManager() {
       // before deploying this model+profile.
       setShowModelDeployNotice(true);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelPath, profileName]);
 
   // Returns next poll delay based on how long the last fetch took:
@@ -598,6 +644,85 @@ export default function ModelDeploymentManager() {
     }
   };
 
+  // Fetch the ModelProfile features cache (used to decide prompt-caching
+  // support). Missing/empty cache is fine — the checkbox just stays hidden.
+  const fetchModelProfileFeatures = async () => {
+    try {
+      const response = await fetch('/api/model-profiles');
+      const data = await response.json();
+      if (data.success && data.data && typeof data.data === 'object') {
+        setModelProfileFeatures(data.data as ModelProfileFeatures);
+      }
+    } catch (err) {
+      console.error('Failed to fetch model profiles:', err);
+    }
+  };
+
+  // A ModelProfile supports prompt caching when its `features` includes
+  // `prompt_caching` (see the ModelProfile example in the deployment docs).
+  const profileHasPromptCaching = (profile?: string): boolean =>
+    Boolean(profile && modelProfileFeatures[profile]?.features?.includes(PROMPT_CACHING_FEATURE));
+
+  // Whether the currently-selected model/bundle supports prompt caching, which
+  // gates the "Enable prompt caching" checkbox. In "model" mode we check the
+  // single selected profile; in "bundle" mode, any profile the bundle references.
+  const promptCachingAvailable = useMemo(() => {
+    if (deployMode === 'model') {
+      return profileHasPromptCaching(profileName || undefined);
+    }
+    const bundle = validBundles.find((b) => b.name === selectedBundle);
+    return Boolean(bundle?.modelConfigs?.some((mc) => profileHasPromptCaching(mc.profile)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deployMode, profileName, selectedBundle, validBundles, modelProfileFeatures]);
+
+  /**
+   * Parse `deploymentYaml` and add or remove the prompt-caching
+   * `engineConfig.env_vars` (see PROMPT_CACHING_ENV_VARS), preserving any other
+   * edits the user has made. Used when the checkbox is toggled so we don't
+   * regenerate the whole document (and lose those edits). `env_vars` is written
+   * first within `engineConfig` for readability; when disabling, only the two
+   * caching vars are removed (and `env_vars` is dropped if that empties it).
+   */
+  const applyPromptCaching = (yamlStr: string, enabled: boolean): string => {
+    if (!yamlStr.trim()) return yamlStr;
+    try {
+      const doc = yaml.load(yamlStr) as { spec?: { engineConfig?: Record<string, unknown> } };
+      if (!doc || typeof doc !== 'object') return yamlStr;
+      doc.spec = doc.spec || {};
+      const engineConfig = { ...(doc.spec.engineConfig || {}) };
+      const existingEnv = { ...(engineConfig.env_vars as Record<string, string> | undefined) };
+
+      if (enabled) {
+        // Keep any user-added env vars; ensure the caching vars are set to ours.
+        engineConfig.env_vars = { ...existingEnv, ...PROMPT_CACHING_ENV_VARS };
+      } else {
+        delete existingEnv.ENABLE_KV_CACHE_MANAGER;
+        delete existingEnv.KV_CACHE_INCLUDE_STATS_IN_RESPONSE;
+        if (Object.keys(existingEnv).length > 0) {
+          engineConfig.env_vars = existingEnv;
+        } else {
+          delete engineConfig.env_vars;
+        }
+      }
+
+      // Rebuild engineConfig with env_vars first (if present), then the rest.
+      const { env_vars, ...restEngineConfig } = engineConfig;
+      doc.spec.engineConfig = {
+        ...(env_vars ? { env_vars } : {}),
+        ...restEngineConfig,
+      };
+      return yaml.dump(doc, { lineWidth: -1, quotingType: '"' }).trimEnd();
+    } catch {
+      return yamlStr;
+    }
+  };
+
+  // Toggle prompt caching: flip the checkbox and patch the current YAML in place.
+  const handleTogglePromptCaching = (checked: boolean) => {
+    setEnablePromptCaching(checked);
+    setDeploymentYaml((current) => applyPromptCaching(current, checked));
+  };
+
   /**
    * Generate a `ModelDeployment` document (replaces the old hand-built
    * `BundleDeployment` template-literal string). Serialized with `js-yaml`'s
@@ -608,7 +733,18 @@ export default function ModelDeploymentManager() {
    * knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) carry
    * over unchanged from the V2 `BundleDeployment` defaults.
    */
-  const generateDeploymentYaml = (bundleName: string, deploymentName: string): string => {
+  // Build the `spec.engineConfig`, prepending the prompt-caching env vars when
+  // requested (env_vars first for readability, then the default startupTimeout).
+  const buildEngineConfig = (withPromptCaching: boolean) => ({
+    ...(withPromptCaching ? { env_vars: { ...PROMPT_CACHING_ENV_VARS } } : {}),
+    startupTimeout: 7200,
+  });
+
+  const generateDeploymentYaml = (
+    bundleName: string,
+    deploymentName: string,
+    withPromptCaching = false
+  ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
       kind: 'ModelDeployment',
@@ -626,13 +762,11 @@ export default function ModelDeploymentManager() {
         ],
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
-        engineConfig: {
-          startupTimeout: 7200,
-        },
+        engineConfig: buildEngineConfig(withPromptCaching),
       },
     };
 
-    return yaml.dump(modelDeployment, { lineWidth: -1 }).trimEnd();
+    return yaml.dump(modelDeployment, { lineWidth: -1, quotingType: '"' }).trimEnd();
   };
 
   /**
@@ -655,7 +789,8 @@ export default function ModelDeploymentManager() {
   const generateModelDeploymentYaml = (
     modelRef: string,
     profile: string,
-    deploymentName: string
+    deploymentName: string,
+    withPromptCaching = false
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -681,13 +816,11 @@ export default function ModelDeploymentManager() {
         ],
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
-        engineConfig: {
-          startupTimeout: 7200,
-        },
+        engineConfig: buildEngineConfig(withPromptCaching),
       },
     };
 
-    return yaml.dump(modelDeployment, { lineWidth: -1 }).trimEnd();
+    return yaml.dump(modelDeployment, { lineWidth: -1, quotingType: '"' }).trimEnd();
   };
 
   /**
@@ -705,6 +838,8 @@ export default function ModelDeploymentManager() {
     }
 
     setDeployMode(mode);
+    // Switching source → prompt caching starts unchecked.
+    setEnablePromptCaching(false);
 
     if (mode === 'model' && modelPath && profileName) {
       const suggestedName = deriveModelDeploymentName(modelPath);
@@ -719,6 +854,9 @@ export default function ModelDeploymentManager() {
   const handleBundleChange = (event: SelectChangeEvent<string>) => {
     const bundleName = event.target.value;
     setSelectedBundle(bundleName);
+
+    // New selection → prompt caching starts unchecked.
+    setEnablePromptCaching(false);
 
     // Auto-suggest deployment name
     let suggestedName = '';
@@ -743,13 +881,15 @@ export default function ModelDeploymentManager() {
   const handleDeploymentNameChange = (newName: string) => {
     setDeploymentName(newName);
 
-    // Regenerate YAML with new deployment name
+    // Regenerate YAML with new deployment name, preserving the prompt-caching
+    // choice (only meaningful when the selection actually supports it).
+    const withPromptCaching = enablePromptCaching && promptCachingAvailable;
     if (deployMode === 'model' && modelPath && profileName && newName) {
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, newName)
+        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching)
       );
     } else if (selectedBundle && newName) {
-      const yaml = generateDeploymentYaml(selectedBundle, newName);
+      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching);
       setDeploymentYaml(yaml);
     }
   };
@@ -1037,6 +1177,22 @@ export default function ModelDeploymentManager() {
         </Typography>
       )}
 
+      {/* Prompt caching — only offered when the selected model/bundle's
+          profile(s) advertise the `prompt_caching` feature. Checking it injects
+          the KV-cache env vars into the deployment's engineConfig. */}
+      {promptCachingAvailable && (
+        <FormControlLabel
+          sx={{ mb: 1 }}
+          control={
+            <Checkbox
+              checked={enablePromptCaching}
+              onChange={(e) => handleTogglePromptCaching(e.target.checked)}
+            />
+          }
+          label="Enable prompt caching"
+        />
+      )}
+
       {/* Generated YAML */}
       <Box>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -1196,7 +1352,7 @@ export default function ModelDeploymentManager() {
               <TableHead>
                 <TableRow sx={{ bgcolor: 'grey.50' }}>
                   <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
-                  <TableCell sx={{ fontWeight: 600 }}>Model Bundle</TableCell>
+                  <TableCell sx={{ fontWeight: 600 }}>Model / Bundle</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Created</TableCell>
                   <TableCell sx={{ fontWeight: 600 }}>Actions</TableCell>
@@ -1208,7 +1364,7 @@ export default function ModelDeploymentManager() {
                   return (
                     <TableRow key={deployment.name} hover>
                       <TableCell>{deployment.name}</TableCell>
-                      <TableCell>{deployment.bundle}</TableCell>
+                      <TableCell>{deployment.bundle || deployment.model || '—'}</TableCell>
                       <TableCell>
                         <Typography sx={{ color: status.color, fontWeight: 500 }}>
                           {status.text}

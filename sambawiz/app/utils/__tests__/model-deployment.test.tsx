@@ -309,6 +309,110 @@ describe('Model Deployment Manager', () => {
     jest.useFakeTimers();
   });
 
+  it('offers "Enable prompt caching" and injects the KV-cache env vars when the profile supports it', async () => {
+    jest.useRealTimers();
+    mockNav.params = { modelPath: 'minimax-m2-7:minimax-m2p5:1', profileName: 'minimax-m2p5-dyt-pc-cd' };
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            data: {
+              'minimax-m2p5-dyt-pc-cd': {
+                model_arch: 'minimax-m2p5',
+                features: ['prompt_caching', 'constrained_decoding'],
+                batchingConfig: {},
+                pefs: [],
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ success: true, bundleDeployments: [], bundles: [] }),
+      });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+    // Unchecked by default → no KV-cache env vars in the YAML yet.
+    expect(yamlField.value).not.toContain('ENABLE_KV_CACHE_MANAGER');
+
+    // Dismiss the pre-deploy reminder dialog so its modal backdrop stops
+    // hiding Section 2 from the accessibility tree.
+    await user.click(await screen.findByRole('button', { name: 'Got it' }));
+
+    // The checkbox appears because the profile advertises `prompt_caching`.
+    const checkbox = await screen.findByRole('checkbox', { name: 'Enable prompt caching' });
+    await user.click(checkbox);
+
+    // Checking it injects all three engineConfig env lines.
+    await waitFor(() =>
+      expect(yamlField.value).toMatch(/ENABLE_KV_CACHE_MANAGER:\s*["']true["']/)
+    );
+    expect(yamlField.value).toMatch(/KV_CACHE_INCLUDE_STATS_IN_RESPONSE:\s*["']true["']/);
+    expect(yamlField.value).toContain('env_vars:');
+    expect(yamlField.value).toContain('startupTimeout: 7200');
+
+    // Unchecking removes them again.
+    await user.click(checkbox);
+    await waitFor(() => expect(yamlField.value).not.toContain('ENABLE_KV_CACHE_MANAGER'));
+    expect(yamlField.value).not.toContain('env_vars:');
+    // startupTimeout survives the removal.
+    expect(yamlField.value).toContain('startupTimeout: 7200');
+
+    jest.useFakeTimers();
+  });
+
+  it('does NOT offer "Enable prompt caching" when no selected profile supports it', async () => {
+    jest.useRealTimers();
+    mockNav.params = { modelPath: 'minimax-m2-7:minimax-m2p5:1', profileName: 'plain-profile' };
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            data: {
+              'plain-profile': {
+                model_arch: 'minimax-m2p5',
+                features: ['constrained_decoding'],
+                batchingConfig: {},
+                pefs: [],
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ success: true, bundleDeployments: [], bundles: [] }),
+      });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    // The YAML editor renders, but the profile has no `prompt_caching` feature,
+    // so the checkbox must not be offered.
+    await screen.findByDisplayValue(/kind: ModelDeployment/);
+    // Dismiss the reminder dialog so its backdrop isn't what's hiding the checkbox.
+    await user.click(await screen.findByRole('button', { name: 'Got it' }));
+    expect(screen.queryByRole('checkbox', { name: 'Enable prompt caching' })).not.toBeInTheDocument();
+
+    jest.useFakeTimers();
+  });
+
   it('redirects to the Model Selection page when "Model" is chosen without model params', async () => {
     jest.useRealTimers();
     // No modelPath/profileName → defaults to bundle mode.
@@ -468,6 +572,52 @@ describe('Model Deployment Manager', () => {
         expect.objectContaining({ method: 'DELETE' })
       );
     });
+
+    jest.useFakeTimers();
+  });
+
+  it('shows the resolved Model name in the "Model / Bundle" column for a model-based deployment', async () => {
+    jest.useRealTimers();
+
+    // A model-based deployment reports an empty `bundle` and the referenced
+    // Model CR's display name in `model` (resolved server-side from spec.name).
+    (global.fetch as jest.Mock)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          bundleDeployments: [
+            {
+              name: 'md-minimax-m2-7',
+              namespace: 'default',
+              bundle: '',
+              model: 'MiniMax-M2',
+              creationTimestamp: '2024-01-01T00:00:00Z',
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, podStatus: { cachePod: null, defaultPod: null } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, bundles: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: false }),
+      });
+
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    // Column header was renamed from "Model Bundle" to "Model / Bundle".
+    expect(await screen.findByText('Model / Bundle')).toBeInTheDocument();
+    // The model display name (not a blank cell) is shown for the deployment.
+    expect(await screen.findByText('MiniMax-M2')).toBeInTheDocument();
 
     jest.useFakeTimers();
   });

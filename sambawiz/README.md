@@ -139,7 +139,33 @@ npm start
 
 ## Key Concepts
 
-SambaWiz 2.0 works with SambaStack's v3 custom resources (all `apiVersion: sambanova.ai/v1alpha1`):
+SambaWiz 2.0 works with SambaStack's v3 custom resources (all `apiVersion: sambanova.ai/v1alpha1`). The diagram below shows how they relate — and, crucially, which ones already live in the cluster versus which ones SambaWiz generates for you:
+
+```mermaid
+graph TD
+    PEF["PEF<br/><small>references to versioned executables</small>"]
+    MP["ModelProfile<br/><small>set&nbsp;of&nbsp;feature‑compatible&nbsp;PEFs&nbsp;for&nbsp;a&nbsp;model&nbsp;arch<br/>+&nbsp;default&nbsp;batching&nbsp;configuration</small>"]
+    M["Model<br/><small>checkpoints per architecture</small>"]
+    MB["ModelBundle<br/><small>reusable,&nbsp;shareable&nbsp;set&nbsp;of<br/>models&nbsp;+&nbsp;profiles</small>"]
+    MD["ModelDeployment<br/><small>routable inference endpoint, replicas &amp; QoS, backed by serving pods</small>"]
+    JP("<i>ModelProfile & Model Pair</i><br/><small>implicit pairing, not a CR<br/>joined by model_arch</small>")
+
+    PEF -->|"referenced by"| MP
+    MP --- JP
+    M --- JP
+    JP -->|"referenced by"| MB
+    MB ==>|"bundle deploy"| MD
+    JP -.->|"direct deploy"| MD
+
+    classDef cluster fill:#eef2f7,stroke:#8aa0bd,color:#1a2b45;
+    classDef authored fill:#cfe2f3,stroke:#2f6fb0,color:#0d2c4d,stroke-width:2px;
+    classDef config fill:#fbe7c6,stroke:#c9871f,color:#5c3d00;
+    class PEF,MP,M cluster;
+    class MB,MD authored;
+    class JP config;
+```
+
+<sub>**Light boxes** are CRs that already exist in the cluster (SambaWiz only *references* them); **darker boxes** are the CRs SambaWiz *generates and applies*; the **italic amber box** is an *implicit* pairing of a `Model` and a `ModelProfile` — not a standalone CR, it corresponds to a single entry in `spec.modelConfigs`. The dashed arrow marks the direct-deploy path (no bundle); the thick arrow is the bundle-based deploy path. `referenced by` points from a component to the resource that references it — a `ModelProfile` lists many `PEF`s, and a `ModelBundle` groups many model + profile pairings.</sub>
 
 - **`Model`** — the source of checkpoints. A `Model` CR holds the checkpoint versions for each architecture it supports. Checkpoints are resolved by the operator from the referenced `Model` at reconcile time; they are never authored in the bundle.
 - **`ModelProfile`** — defines the runtime shape for a **single** model: which PEFs it uses, its per-tier batching configuration, and its `model_arch` (the join key back to a `Model`'s checkpoint architecture). Profiles are reusable and are expected to already exist in the cluster; SambaWiz does not author them.
