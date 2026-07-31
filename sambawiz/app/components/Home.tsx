@@ -253,10 +253,25 @@ export default function Home() {
 
         if (data.success) {
           setInstallerLogs(data.logs);
-          // Check if installation is complete (last line contains "configure_default_ingress")
+          // Check if installation is complete. The final installer step differs
+          // between SambaStack helm versions:
+          // - 1.x: the last step is `configure_default_ingress`, so its marker
+          //   appears on the last log line.
+          // - 2.x: the installer continues past ingress configuration with a
+          //   `create_keycloak_user` step, so completion is signalled once that
+          //   step reaches a terminal state (service user created or already
+          //   present) rather than by the ingress line being last.
           const lines = data.logs.trim().split('\n');
           const lastLine = lines[lines.length - 1];
-          if (lastLine && lastLine.includes('configure_default_ingress')) {
+          const oneXComplete = Boolean(
+            lastLine && lastLine.includes('configure_default_ingress')
+          );
+          const twoXComplete = lines.some(
+            (line: string) =>
+              line.includes('create_keycloak_user') &&
+              /already exists|created/i.test(line)
+          );
+          if (oneXComplete || twoXComplete) {
             setInstallationComplete(true);
             setYamlModifiedAfterInstall(false); // Require YAML modification before next install
           }

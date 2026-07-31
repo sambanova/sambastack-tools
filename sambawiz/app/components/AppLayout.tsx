@@ -48,6 +48,8 @@ export default function AppLayout({ children }: AppLayoutProps) {
     errorDetails,
     helmVersionError,
     hasNonNumericalSuffix,
+    fullVersion,
+    minimumVersion,
   } = useAppContext();
 
   const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
@@ -391,7 +393,9 @@ export default function AppLayout({ children }: AppLayoutProps) {
         >
           {validationError && (
             <Alert severity="error" sx={{ mb: 3 }}>
-              {validationError}
+              {helmVersionError
+                ? `SambaWiz version ${appVersion ?? 'unknown'} requires a minimum SambaStack Helm version of ${minimumVersion ?? 'unknown'}. The current helm version ${fullVersion ?? 'unknown'} is not supported.`
+                : validationError}
             </Alert>
           )}
           {children}

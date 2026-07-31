@@ -2947,8 +2947,18 @@ async function installSambaStackMenu(rl: any, namespace: string) {
 
       process.stdout.write('\r\x1b[K');
       if (logs) {
-        logs.split('\n').forEach(l => process.stdout.write(chalk.reset(`  ${l}\n`)));
-        if (logs.includes('configure_default_ingress')) {
+        const logLines = logs.split('\n');
+        logLines.forEach(l => process.stdout.write(chalk.reset(`  ${l}\n`)));
+        // Completion markers differ between SambaStack helm versions:
+        // - 1.x: the final step is `configure_default_ingress` (last line).
+        // - 2.x: the installer continues with a `create_keycloak_user` step,
+        //   which finishes once the service user is created or already exists.
+        const lastLine = logLines[logLines.length - 1] || '';
+        const oneXComplete = lastLine.includes('configure_default_ingress');
+        const twoXComplete = logLines.some(
+          l => l.includes('create_keycloak_user') && /already exists|created/i.test(l)
+        );
+        if (oneXComplete || twoXComplete) {
           successMsg('SambaStack installation complete!');
           done = true;
           break;

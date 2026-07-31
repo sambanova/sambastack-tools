@@ -6,6 +6,7 @@ import {
   getEffectiveBatchingConfig,
   deriveIsDefaultTier,
   batchingConfigsEqual,
+  collapseTiersToWildcard,
   orderBatchingConfigDescending,
   getDisplayName,
   isSpecDecodingProfile,
@@ -178,6 +179,32 @@ describe('bundle-yaml-generator', () => {
       expect(batchingConfigsEqual(base, { '8k': { batch_sizes: [1] as number[] }, '32k': { batch_sizes: [1] as number[] } })).toBe(false);
       expect(batchingConfigsEqual(base, { '8k': { batch_sizes: [1] as number[], is_default: true } })).toBe(false);
       expect(batchingConfigsEqual({ '8k': { batch_sizes: '*' as const } }, { '8k': { batch_sizes: [1] as number[] } })).toBe(false);
+    });
+  });
+
+  describe('collapseTiersToWildcard', () => {
+    const profileDefault = {
+      '8k': { batch_sizes: [2, 4, 6, 8] as number[] },
+      '32k': { batch_sizes: [2, 4] as number[] },
+    };
+
+    it("replaces a tier's batch_sizes with '*' when they match the profile default (order-independent)", () => {
+      const result = collapseTiersToWildcard({ '8k': { batch_sizes: [8, 6, 4, 2] } }, profileDefault);
+      expect(result['8k'].batch_sizes).toBe('*');
+    });
+
+    it('leaves batch_sizes untouched when they differ from the default or the default has no such tier', () => {
+      const result = collapseTiersToWildcard(
+        { '8k': { batch_sizes: [2, 4] }, '128k': { batch_sizes: [1] } },
+        profileDefault
+      );
+      expect(result['8k'].batch_sizes).toEqual([2, 4]);
+      expect(result['128k'].batch_sizes).toEqual([1]);
+    });
+
+    it('preserves is_default while collapsing the matching tier', () => {
+      const result = collapseTiersToWildcard({ '8k': { batch_sizes: [2, 4, 6, 8], is_default: true } }, profileDefault);
+      expect(result['8k']).toEqual({ batch_sizes: '*', is_default: true });
     });
   });
 
@@ -364,6 +391,39 @@ describe('bundle-yaml-generator', () => {
       indices.forEach((idx) => expect(idx).toBeGreaterThan(-1));
       // Tiers appear in strictly descending-seq-length order → indices ascending.
       expect(indices).toEqual([...indices].sort((a, b) => a - b));
+    });
+
+    it('renders batch_sizes as flow-style arrays and collapses tiers matching the profile default to "*"', () => {
+      // mockHighInteractivityProfile default: 8k [2,4,6,8], 32k [2,4,6,8], 64k [2,4], 128k [2].
+      const override = {
+        '8k': { batch_sizes: [2, 4, 6, 8] as number[] }, // matches default → '*'
+        '32k': { batch_sizes: [1] as number[] }, // differs → [1]
+        '64k': { batch_sizes: [2, 4] as number[] }, // matches default → '*'
+        '128k': { batch_sizes: [1, 2] as number[] }, // differs → [1, 2]
+      };
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel, // non-embedding → no is_default noise
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: override,
+        },
+      ];
+      const yamlStr = generateModelBundleYaml('flow-bundle', selections);
+
+      // Flow-style arrays, one line each (no block "- 1" list items under batch_sizes).
+      expect(yamlStr).toContain('batch_sizes: [1]');
+      expect(yamlStr).toContain('batch_sizes: [1, 2]');
+      expect(yamlStr).not.toMatch(/batch_sizes:\n\s+-/);
+      // Tiers left at the profile default collapse to the '*' sentinel.
+      expect(yamlStr).toContain("batch_sizes: '*'");
+      // The YAML still parses back to the ModelBundle shape.
+      const parsed = yaml.load(yamlStr) as { spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> } };
+      const cfg = parsed.spec.modelConfigs[0].batchingConfig;
+      expect(cfg['8k'].batch_sizes).toBe('*');
+      expect(cfg['32k'].batch_sizes).toEqual([1]);
+      expect(cfg['64k'].batch_sizes).toBe('*');
+      expect(cfg['128k'].batch_sizes).toEqual([1, 2]);
     });
 
     it('uses batchingConfigOverride instead of the profile default when present', () => {

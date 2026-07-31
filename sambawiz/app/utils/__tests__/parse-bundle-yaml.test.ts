@@ -106,12 +106,13 @@ spec:
       expect(parsed.modelConfigs[0].model).toBe('e5-mistral-7b-instruct:1');
       expect(parsed.modelConfigs[0].profile).toBe('gpt-oss-fp8-dyt');
       // mockSingleArchModel is an embedding model, so generation adds is_default:true to the
-      // smallest tier (8k) per Q2 — the round-tripped config is the profile default plus that flag.
+      // smallest tier (8k) per Q2 — the only divergence from the profile default. Every tier's
+      // batch sizes still match the default, so generation collapses each to the '*' sentinel.
       expect(parsed.modelConfigs[0].batchingConfig).toEqual({
-        '8k': { batch_sizes: [2, 4, 6, 8], is_default: true },
-        '32k': { batch_sizes: [2, 4, 6, 8] },
-        '64k': { batch_sizes: [2, 4] },
-        '128k': { batch_sizes: [2] },
+        '8k': { batch_sizes: '*', is_default: true },
+        '32k': { batch_sizes: '*' },
+        '64k': { batch_sizes: '*' },
+        '128k': { batch_sizes: '*' },
       });
       expect(parsed.specDecodingPairs).toEqual([]);
     });

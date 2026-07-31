@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import {
   Box,
   Paper,
@@ -54,8 +53,6 @@ interface Message {
 }
 
 export default function Playground() {
-  const router = useRouter();
-
   const inputRef = useRef<HTMLInputElement>(null);
 
   const inputMessageId = 'playground-input-message';
@@ -95,6 +92,13 @@ export default function Playground() {
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
   const [uiDomain, setUiDomain] = useState<string>('');
+
+  // API key entry state (for saving the newly created key straight from the dialog)
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  const [showApiKeyInput, setShowApiKeyInput] = useState<boolean>(false);
+  const [savingApiKey, setSavingApiKey] = useState<boolean>(false);
+  const [saveApiKeyError, setSaveApiKeyError] = useState<string | null>(null);
+  const [saveApiKeySuccess, setSaveApiKeySuccess] = useState<boolean>(false);
 
   // Fetch the routable models for the current environment from /v1/models.
   const fetchModels = async () => {
@@ -313,6 +317,10 @@ export default function Playground() {
     setKeycloakUsername('');
     setKeycloakPassword('');
     setShowPassword(false);
+    setApiKeyInput('');
+    setShowApiKeyInput(false);
+    setSaveApiKeyError(null);
+    setSaveApiKeySuccess(false);
 
     try {
       // Get current environment from bundleDeployments
@@ -348,6 +356,43 @@ export default function Playground() {
       setCredentialsError('Failed to retrieve credentials');
     } finally {
       setLoadingCredentials(false);
+    }
+  };
+
+  // Save the API key entered in the dialog to app-config.json for the current
+  // environment, then keep the user on the Playground with the new key active.
+  const handleSaveApiKey = async () => {
+    if (!apiKeyInput.trim()) {
+      setSaveApiKeyError('Please enter an API key');
+      return;
+    }
+
+    setSavingApiKey(true);
+    setSaveApiKeyError(null);
+    setSaveApiKeySuccess(false);
+
+    try {
+      const response = await fetch('/api/save-api-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: apiKeyInput.trim() }),
+      });
+
+      const data = await response.json();
+
+      if (!data.success) {
+        setSaveApiKeyError(data.error || 'Failed to save API key');
+        return;
+      }
+
+      // Update the in-memory key so subsequent requests use it immediately.
+      setApiKey(apiKeyInput.trim());
+      setSaveApiKeySuccess(true);
+    } catch (error) {
+      console.error('Error saving API key:', error);
+      setSaveApiKeyError('Failed to save API key');
+    } finally {
+      setSavingApiKey(false);
     }
   };
 
@@ -713,7 +758,7 @@ export default function Playground() {
                                           color: 'text.primary',
                                         }}
                                       >
-                                        Please{' '}
+                                        Please update your API key by clicking{' '}
                                         <Link
                                           component="button"
                                           onClick={handleGetApiKey}
@@ -726,9 +771,9 @@ export default function Playground() {
                                             },
                                           }}
                                         >
-                                          get your API key
+                                          this link
                                         </Link>
-                                        {' '}and update it on the Home page.
+                                        .
                                       </Typography>
                                     </Box>
                                   )}
@@ -1133,13 +1178,67 @@ export default function Playground() {
               Please select an environment with a UI domain configured.
             </Alert>
           )}
+
+          {/* API Key entry — paste the key created via the instructions above and
+              save it without leaving the Playground. */}
+          {!loadingCredentials && (
+            <Box sx={{ mt: 3, pt: 3, borderTop: '1px solid', borderColor: 'divider' }}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                Paste your API key:
+              </Typography>
+              <TextField
+                fullWidth
+                type={showApiKeyInput ? 'text' : 'password'}
+                value={apiKeyInput}
+                onChange={(e) => {
+                  setApiKeyInput(e.target.value);
+                  setSaveApiKeySuccess(false);
+                  setSaveApiKeyError(null);
+                }}
+                placeholder="Enter your API key"
+                variant="outlined"
+                size="small"
+                disabled={savingApiKey}
+                slotProps={{
+                  input: {
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showApiKeyInput ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  },
+                }}
+              />
+              {saveApiKeyError && (
+                <Alert severity="error" sx={{ mt: 2 }}>
+                  {saveApiKeyError}
+                </Alert>
+              )}
+              {saveApiKeySuccess && (
+                <Alert severity="success" sx={{ mt: 2 }}>
+                  API key saved successfully!
+                </Alert>
+              )}
+            </Box>
+          )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => {
-            setShowApiKeyInstructionsDialog(false);
-            router.push('/');
-          }} autoFocus>
+          <Button onClick={() => setShowApiKeyInstructionsDialog(false)}>
             Close
+          </Button>
+          <Button
+            onClick={handleSaveApiKey}
+            variant="contained"
+            disabled={savingApiKey || !apiKeyInput.trim()}
+            startIcon={savingApiKey ? <CircularProgress size={16} color="inherit" /> : null}
+          >
+            {savingApiKey ? 'Saving...' : 'Save'}
           </Button>
         </DialogActions>
       </Dialog>

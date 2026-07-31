@@ -153,6 +153,29 @@ function batchSizesKey(batchSizes: number[] | '*'): string {
 }
 
 /**
+ * Returns a copy of `batchingConfig` with each tier's `batch_sizes` collapsed
+ * to the `'*'` sentinel when it exactly matches that same tier's batch sizes in
+ * `profileDefault` (order-independent, via `batchSizesKey`). This is a
+ * YAML-shrinking convenience only: `'*'` means "the profile default's batch
+ * sizes for this tier", so emitting it instead of the explicit list keeps the
+ * document compact when a tier was left at its default while sibling tiers were
+ * overridden. `is_default` (and any other tier field) is preserved. Tiers with
+ * no matching default, or already `'*'`, are passed through unchanged.
+ */
+export function collapseTiersToWildcard(
+  batchingConfig: BatchingConfig,
+  profileDefault: BatchingConfig
+): BatchingConfig {
+  const result: BatchingConfig = {};
+  for (const [tier, cfg] of Object.entries(batchingConfig)) {
+    const def = profileDefault[tier];
+    const matchesDefault = def !== undefined && batchSizesKey(cfg.batch_sizes) === batchSizesKey(def.batch_sizes);
+    result[tier] = matchesDefault ? { ...cfg, batch_sizes: '*' } : cfg;
+  }
+  return result;
+}
+
+/**
  * Deep, order-independent equality for two batching configs: same set of tiers,
  * and for each tier the same batch sizes and the same `is_default` flag.
  */
@@ -340,12 +363,34 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
 export function generateModelBundleYaml(bundleName: string, selections: ModelBundleSelection[]): string {
   const bundle = buildModelBundleObject(bundleName, selections);
 
+  // Map each emitted modelConfigs entry (by its model ref) back to its profile's
+  // effective default batching config, so tiers left at the default can be
+  // collapsed to the `'*'` sentinel purely for a shorter YAML document. This is
+  // a serialization-only step: `buildModelBundleObject` keeps the explicit
+  // batch-size lists so callers wanting the plain object still see real arrays.
+  const profileDefaultsByRef = new Map<string, BatchingConfig>();
+  for (const selection of selections) {
+    const ref = formatModelRef(selection.model, selection.arch, selection.versionOverride);
+    profileDefaultsByRef.set(ref, getEffectiveBatchingConfig(selection.profile));
+  }
+
+  const modelConfigs = bundle.spec.modelConfigs.map((entry) =>
+    entry.batchingConfig
+      ? { ...entry, batchingConfig: collapseTiersToWildcard(entry.batchingConfig, profileDefaultsByRef.get(entry.model) ?? {}) }
+      : entry
+  );
+
   const document = {
     apiVersion: 'sambanova.ai/v1alpha1',
     kind: 'ModelBundle',
     metadata: bundle.metadata,
-    spec: bundle.spec,
+    spec: { ...bundle.spec, modelConfigs },
   };
 
-  return yaml.dump(document, { noRefs: true, lineWidth: -1 });
+  // flowLevel: 6 renders the deepest collections — the per-tier `batch_sizes`
+  // arrays — in flow style (`[1, 4]`) while leaving every shallower mapping and
+  // the specDecodingPairs list in block style. This shape is specific to the
+  // ModelBundle document produced above (batch_sizes is the only level-6+
+  // collection); revisit the level if the emitted structure gains depth.
+  return yaml.dump(document, { noRefs: true, lineWidth: -1, flowLevel: 6 });
 }

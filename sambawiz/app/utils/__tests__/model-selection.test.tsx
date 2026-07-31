@@ -127,6 +127,18 @@ const embeddingMultiTierProfile: ModelProfile = {
   },
 };
 
+// A prompt_caching profile for the embedding arch. prompt_caching profiles can
+// only be deployed on their own, so they're disabled once >1 model is selected.
+const embeddingPromptCachingProfile: ModelProfile = {
+  metadata: { name: 'gte-qwen2-pc' },
+  spec: {
+    model_arch: 'gte-qwen2',
+    features: ['prompt_caching'],
+    defaultBatchingConfig: { '4k': { batch_sizes: [1] } },
+    pefs: ['gte-qwen2-pc:1'],
+  },
+};
+
 // Single profile per arch for the multi-arch model, so each arch auto-selects/collapses.
 const maverickV1Profile: ModelProfile = {
   metadata: { name: 'maverick-v1-hi' },
@@ -246,6 +258,59 @@ describe('ModelSelection (V3)', () => {
     // Collapse-on-select: tiles gone, summary chip shows the chosen profile's display name.
     expect(await within(row).findByText('Profile: High Throughput')).toBeInTheDocument();
     expect(within(row).queryByTestId(`profile-card-${embeddingHighInteractivityProfile.metadata.name}`)).not.toBeInTheDocument();
+  });
+
+  it('leaves prompt_caching profiles selectable when only one model is selected', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [embeddingHighInteractivityProfile.metadata.name]: toProfileEntry(embeddingHighInteractivityProfile),
+      [embeddingPromptCachingProfile.metadata.name]: toProfileEntry(embeddingPromptCachingProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockEmbeddingModel.spec.name]);
+
+    const row = await screen.findByTestId(`model-row-${mockEmbeddingModel.spec.name}`);
+    const pcCard = within(row).getByTestId(`profile-card-${embeddingPromptCachingProfile.metadata.name}`);
+    // Single model → not disabled, and selectable (collapses the row on select).
+    expect(pcCard).not.toHaveAttribute('aria-disabled');
+    await user.click(pcCard);
+    expect(await within(row).findByText(/^Profile:/)).toBeInTheDocument();
+  });
+
+  it('disables prompt_caching profiles (with an explanatory tooltip) once more than one model is selected', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [embeddingHighInteractivityProfile.metadata.name]: toProfileEntry(embeddingHighInteractivityProfile),
+      [embeddingPromptCachingProfile.metadata.name]: toProfileEntry(embeddingPromptCachingProfile),
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockEmbeddingModel.spec.name, mockSpecDecodingDraftModel.spec.name]);
+
+    const row = await screen.findByTestId(`model-row-${mockEmbeddingModel.spec.name}`);
+    const pcCard = within(row).getByTestId(`profile-card-${embeddingPromptCachingProfile.metadata.name}`);
+    // The non-prompt_caching sibling stays enabled.
+    expect(within(row).getByTestId(`profile-card-${embeddingHighInteractivityProfile.metadata.name}`)).not.toHaveAttribute(
+      'aria-disabled'
+    );
+    // The prompt_caching tile is disabled and clicking it does not select it (row stays expanded).
+    expect(pcCard).toHaveAttribute('aria-disabled', 'true');
+    await user.click(pcCard);
+    expect(within(row).queryByText(/^Profile:/)).not.toBeInTheDocument();
+    expect(within(row).getByTestId(`profile-card-${embeddingPromptCachingProfile.metadata.name}`)).toBeInTheDocument();
+
+    // Hovering the disabled tile surfaces the restriction tooltip.
+    await user.hover(pcCard);
+    expect(await screen.findByText(/prompt caching can only be deployed on their own/i)).toBeInTheDocument();
   });
 
   it('shows a titled "Context / Max Batch Size" summary on each card, largest sequence length first', async () => {

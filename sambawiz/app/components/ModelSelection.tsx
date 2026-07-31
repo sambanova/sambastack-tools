@@ -177,16 +177,34 @@ function buildProfileFromCache(profileName: string, modelProfiles: ModelProfiles
   };
 }
 
+/**
+ * A profile uses prompt caching when its `spec.features` include
+ * `prompt_caching`. Such profiles can only be deployed on their own (a
+ * single-model bundle), so they're disabled once more than one model is
+ * selected.
+ */
+function hasPromptCaching(profile: ModelProfile): boolean {
+  return profile.spec.features?.includes('prompt_caching') ?? false;
+}
+
+/** Tooltip shown on a prompt_caching profile tile that's disabled because the bundle has more than one model. */
+const PROMPT_CACHING_DISABLED_MESSAGE =
+  'Profiles with prompt caching can only be deployed on their own (a single-model bundle). Remove the other selected models to choose this profile.';
+
 /** A single profile card tile: display name (never metadata.name), effective batching tiers, and features. */
 function ProfileCard({
   profile,
   siblingProfiles,
   selected,
+  disabled = false,
+  disabledTooltip,
   onSelect,
 }: {
   profile: ModelProfile;
   siblingProfiles: ModelProfile[];
   selected: boolean;
+  disabled?: boolean;
+  disabledTooltip?: string;
   onSelect: () => void;
 }) {
   const title = getDisplayName(profile, siblingProfiles);
@@ -206,16 +224,18 @@ function ProfileCard({
     });
   const features = profile.spec.features ?? [];
 
-  return (
+  const card = (
     <Card
       variant="outlined"
-      onClick={onSelect}
+      onClick={disabled ? undefined : onSelect}
       data-testid={`profile-card-${profile.metadata.name}`}
+      aria-disabled={disabled || undefined}
       sx={{
         minWidth: 220,
         maxWidth: 260,
         flex: '0 0 auto',
-        cursor: 'pointer',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
         borderColor: selected ? 'primary.main' : 'divider',
         borderWidth: selected ? 2 : 1,
         bgcolor: selected ? 'action.selected' : 'background.paper',
@@ -258,6 +278,10 @@ function ProfileCard({
       </CardContent>
     </Card>
   );
+
+  // When disabled, wrap in a Tooltip explaining the restriction. The Card keeps
+  // pointer events (only its onClick is dropped), so hover still surfaces the tip.
+  return disabled && disabledTooltip ? <Tooltip title={disabledTooltip}>{card}</Tooltip> : card;
 }
 
 /** Fixed batch-size columns for the override grid (plus a leading "All" column). */
@@ -384,6 +408,7 @@ function ModelProfileRow({
   rawEntry,
   state,
   isDraftRow,
+  multiModelSelected,
   onArchChange,
   onProfileSelect,
   onToggleExpand,
@@ -393,6 +418,8 @@ function ModelProfileRow({
   rawEntry: CheckpointMappingV3[string] | undefined;
   state: PerModelState;
   isDraftRow?: boolean;
+  /** When more than one model is in the bundle, prompt_caching profiles are disabled (they can only deploy singly). */
+  multiModelSelected: boolean;
   onArchChange: (arch: string) => void;
   onProfileSelect: (profile: ModelProfile) => void;
   onToggleExpand: () => void;
@@ -455,15 +482,23 @@ function ModelProfileRow({
 
       {resolvedArch && state.expanded && (
         <Box sx={{ display: 'flex', gap: 2, overflowX: 'auto', pb: 1 }}>
-          {matchingProfiles.map((profile) => (
-            <ProfileCard
-              key={profile.metadata.name}
-              profile={profile}
-              siblingProfiles={matchingProfiles}
-              selected={state.profileName === profile.metadata.name}
-              onSelect={() => onProfileSelect(profile)}
-            />
-          ))}
+          {matchingProfiles.map((profile) => {
+            // prompt_caching profiles deploy only as a single-model bundle, so
+            // they're greyed out (with an explanatory tooltip) once the bundle
+            // holds more than one model.
+            const disabled = multiModelSelected && hasPromptCaching(profile);
+            return (
+              <ProfileCard
+                key={profile.metadata.name}
+                profile={profile}
+                siblingProfiles={matchingProfiles}
+                selected={state.profileName === profile.metadata.name}
+                disabled={disabled}
+                disabledTooltip={disabled ? PROMPT_CACHING_DISABLED_MESSAGE : undefined}
+                onSelect={() => onProfileSelect(profile)}
+              />
+            );
+          })}
         </Box>
       )}
     </Box>
@@ -1045,6 +1080,11 @@ export default function ModelSelection() {
   );
   const isSingleModel = topLevelModels.length === 1;
 
+  // The bundle holds more than one model (multiple top-level selections, or a
+  // spec-decoding target + its draft). prompt_caching profiles can't be part of
+  // a multi-model bundle, so their tiles are disabled in this case.
+  const multiModelSelected = selection.selectedModels.length > 1;
+
   // The single top-level model's fully-resolved selection (arch + profile), or
   // null until a profile is picked. `modelSelections` is null until every
   // selection resolves, and the top-level entry is the one without `isDraftFor`.
@@ -1182,6 +1222,7 @@ export default function ModelSelection() {
                     avail={avail}
                     rawEntry={checkpointMapping[displayName]}
                     state={state}
+                    multiModelSelected={multiModelSelected}
                     onArchChange={(arch) => handleArchChange(displayName, arch)}
                     onProfileSelect={(profile) => handleProfileSelect(displayName, profile)}
                     onToggleExpand={() => handleToggleExpand(displayName)}
@@ -1226,6 +1267,7 @@ export default function ModelSelection() {
                           rawEntry={checkpointMapping[draftDisplayName]}
                           state={draftState}
                           isDraftRow
+                          multiModelSelected={multiModelSelected}
                           onArchChange={(arch) => handleArchChange(draftDisplayName, arch)}
                           onProfileSelect={(profile) => handleProfileSelect(draftDisplayName, profile)}
                           onToggleExpand={() => handleToggleExpand(draftDisplayName)}
