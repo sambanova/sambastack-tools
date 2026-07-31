@@ -1,0 +1,5 @@
+# Gitleaks config for sambastack-tools. Extends the built-in default ruleset.
+title = "sambastack-tools gitleaks config"
+
+[extend]
+useDefault = true
