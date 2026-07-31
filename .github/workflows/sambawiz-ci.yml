@@ -1,17 +1,35 @@
 name: SambaWiz CI
 
+# NOTE: no top-level `paths:` filter. A path-filtered workflow does not trigger
+# at all when the paths don't match, so a required status check pointing at it
+# is never reported and blocks the merge forever ("Expected — waiting for status
+# to be reported"). Instead we always trigger, detect changes inside, skip the
+# real job when sambawiz/** is untouched, and let the always-running gate job
+# report the required status.
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'sambawiz/**'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'sambawiz/**'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      sambawiz: ${{ steps.filter.outputs.sambawiz }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          sambawiz:
+            - 'sambawiz/**'
+            - '.github/workflows/sambawiz-ci.yml'
+
   sambawiz-lint-and-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.sambawiz == 'true' }}
     runs-on: ubuntu-latest
     # Fail fast instead of running until the 6-hour GitHub default if a step
     # ever hangs (e.g. a resource-starved test runner) — a hung job then shows
@@ -41,3 +59,20 @@ jobs:
 
     - name: Run linter
       run: npm run lint --prefix sambawiz
+
+  # Always-running aggregate gate. THIS is the job to mark as a required status
+  # check in the ruleset (context: "sambawiz-ci-gate"), not the path-skipped
+  # job above. It passes when the real job succeeded or was skipped, and fails
+  # only when the real job actually failed or was cancelled.
+  sambawiz-ci-gate:
+    needs: [ sambawiz-lint-and-test ]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check result
+      run: |
+        result="${{ needs.sambawiz-lint-and-test.result }}"
+        echo "sambawiz-lint-and-test result: $result"
+        if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+          exit 1
+        fi
