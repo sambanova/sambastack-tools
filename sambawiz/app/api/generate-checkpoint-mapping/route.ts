@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
+import type { CheckpointMappingV3 } from '../../types/bundle';
 
 interface KubeconfigEntry {
   file: string;
@@ -10,16 +11,15 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
-  checkpoint_overrides?: Record<string, string>;
 }
 
 interface CheckpointVersion {
+  checkpoint_status?: string;
   source: string;
-  vision_embedding_checkpoint?: string;
   tool_support?: boolean;
+  vision_embedding_checkpoint?: string;
 }
 
 interface CheckpointEntry {
@@ -45,29 +45,9 @@ interface KubectlOutput {
   items: ModelItem[];
 }
 
-interface CheckpointMappingEntry {
-  path: string;
-  resource_name: string;
-  vision_embedding_checkpoint?: string;
-  model_type?: string;
-}
-
 function stripGcsPrefix(gcsPath: string): string {
   // Strip gs://bucket-name/ prefix and trailing slash
   return gcsPath.replace(/^gs:\/\/[^/]+\//, '').replace(/\/$/, '');
-}
-
-function getHighestVersion(versions: Record<string, CheckpointVersion>): string {
-  const keys = Object.keys(versions);
-  return keys.sort((a, b) => {
-    const aParts = a.split('.').map(Number);
-    const bParts = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-      const diff = (aParts[i] || 0) - (bParts[i] || 0);
-      if (diff !== 0) return diff;
-    }
-    return 0;
-  })[keys.length - 1];
 }
 
 export async function POST() {
@@ -79,7 +59,6 @@ export async function POST() {
 
     const configContent = await fs.readFile(configPath, 'utf-8');
     const config: AppConfig = JSON.parse(configContent);
-    const checkpointOverrides: Record<string, string> = config.checkpoint_overrides || {};
 
     const currentEnv = config.currentKubeconfig;
     if (currentEnv && config.kubeconfigs[currentEnv]) {
@@ -105,7 +84,7 @@ export async function POST() {
     });
 
     const modelsData: KubectlOutput = JSON.parse(kubectlOutput);
-    const checkpointMapping: Record<string, CheckpointMappingEntry> = {};
+    const checkpointMapping: CheckpointMappingV3 = {};
 
     for (const item of modelsData.items) {
       const modelName = item.spec.name;
@@ -114,38 +93,47 @@ export async function POST() {
 
       if (!modelName || !resourceName || !checkpoints) continue;
 
-      const firstCheckpointKey = Object.keys(checkpoints)[0];
-      if (!firstCheckpointKey) continue;
+      const archs: CheckpointMappingV3[string]['checkpoints'] = {};
 
-      const versions = checkpoints[firstCheckpointKey].versions;
-      if (!versions || Object.keys(versions).length === 0) continue;
+      // Capture ALL checkpoint archs (not just the first one) so the builder
+      // can offer the Step-2 arch dropdown for multi-arch models (v3plan.md).
+      for (const [arch, checkpointEntry] of Object.entries(checkpoints)) {
+        const versions = checkpointEntry?.versions;
+        if (!versions || Object.keys(versions).length === 0) continue;
 
-      const overrideVersion = checkpointOverrides[modelName];
-      const selectedVersion = (overrideVersion && versions[overrideVersion])
-        ? overrideVersion
-        : getHighestVersion(versions);
-      const versionData = versions[selectedVersion];
+        const archVersions: CheckpointEntry['versions'] = {};
+        for (const [version, versionData] of Object.entries(versions)) {
+          if (!versionData?.source) continue;
 
-      if (!versionData?.source) continue;
+          archVersions[version] = {
+            source: stripGcsPrefix(versionData.source),
+            ...(versionData.checkpoint_status ? { checkpoint_status: versionData.checkpoint_status } : {}),
+            ...(versionData.tool_support !== undefined ? { tool_support: versionData.tool_support } : {}),
+            ...(versionData.vision_embedding_checkpoint
+              ? { vision_embedding_checkpoint: stripGcsPrefix(versionData.vision_embedding_checkpoint) }
+              : {}),
+          };
+        }
 
-      const entry: CheckpointMappingEntry = {
-        path: stripGcsPrefix(versionData.source),
-        resource_name: resourceName,
-      };
-
-      if (versionData.vision_embedding_checkpoint) {
-        entry.vision_embedding_checkpoint = stripGcsPrefix(versionData.vision_embedding_checkpoint);
+        if (Object.keys(archVersions).length > 0) {
+          archs[arch] = { versions: archVersions };
+        }
       }
 
-      checkpointMapping[modelName] = entry;
+      if (Object.keys(archs).length === 0) continue;
+
+      checkpointMapping[modelName] = {
+        resource_name: resourceName,
+        checkpoints: archs,
+        capabilities: item.spec.metadata?.capabilities ?? [],
+      };
     }
 
     // Write the generated mapping to app/data/checkpoint_mapping.json
     const outputPath = path.join(process.cwd(), 'app/data/checkpoint_mapping.json');
     await fs.writeFile(outputPath, JSON.stringify(checkpointMapping, null, 2));
 
-    // Re-run PEF config generation so model_type (e.g. "embedding") is populated
-    // on the freshly written checkpoint_mapping.json from PEF spec.metadata.task_name
+    // Re-run PEF config generation (still needed for the PEF SS/BS/version cache).
     const { generatePefConfigs } = await import('../../utils/pef-config-generator');
     await generatePefConfigs();
 

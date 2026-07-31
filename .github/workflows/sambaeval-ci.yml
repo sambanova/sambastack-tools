@@ -1,17 +1,33 @@
 name: SambaEval CI
 
+# See sambawiz-ci.yml for why there is no top-level `paths:` filter: a required
+# status check on a path-filtered workflow never reports when the paths don't
+# match and blocks the merge. We filter inside and gate with an always-running
+# job instead.
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'sambaeval/**'
   pull_request:
     branches: [ main ]
-    paths:
-      - 'sambaeval/**'
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      sambaeval: ${{ steps.filter.outputs.sambaeval }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          sambaeval:
+            - 'sambaeval/**'
+            - '.github/workflows/sambaeval-ci.yml'
+
   backend-tests:
+    needs: changes
+    if: ${{ needs.changes.outputs.sambaeval == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -33,3 +49,19 @@ jobs:
 
     - name: Run backend tests
       run: uv run python -m pytest tests/ -v
+
+  # Always-running aggregate gate — mark "sambaeval-ci-gate" as the required
+  # status check, not "backend-tests". Passes when backend-tests succeeded or
+  # was skipped; fails only on real failure/cancellation.
+  sambaeval-ci-gate:
+    needs: [ backend-tests ]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check result
+      run: |
+        result="${{ needs.backend-tests.result }}"
+        echo "backend-tests result: $result"
+        if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+          exit 1
+        fi

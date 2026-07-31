@@ -42,8 +42,8 @@
     - [Validate an Environment](#validate-an-environment)
     - [Edit an Environment](#edit-an-environment)
     - [Delete an Environment](#delete-an-environment)
-  - [Bundle Builder](#bundle-builder)
-  - [Bundle Deployment](#bundle-deployment)
+  - [Model Selection](#model-selection)
+  - [Model Deployment](#model-deployment)
   - [Check Deployment Progress](#check-deployment-progress)
   - [Playground — Chat Console](#playground--chat-console)
   - [Install / Upgrade SambaStack](#install--upgrade-sambastack)
@@ -56,6 +56,8 @@
 ## Overview
 
 The SambaWiz CLI is a fully interactive terminal application. It covers every workflow available in the web UI — environment management, bundle building, deployment, live monitoring, and model chat — all from the command line.
+
+> **V3 bundles.** The CLI emits the V3 CR family: a single **`ModelBundle`** (replaces the old `BundleTemplate` + `Bundle` pair) and a **`ModelDeployment`** (replaces `BundleDeployment`) that references it by name. Model→PEF/SS/BS selection is gone — you now pick a **model → checkpoint arch (if multi-arch) → `ModelProfile`**, optionally add a **draft model** for speculative decoding, and optionally **override the profile's batching config**. Checkpoints are no longer authored by the builder; they come from the `Model` CR at reconcile time, so `checkpointsDir` is no longer used by the CLI.
 
 ```
  ____                  _        __        ___
@@ -126,11 +128,10 @@ npm install
 cp app-config.example.json app-config.json
 ```
 
-Edit `app-config.json` with your `checkpointsDir` at minimum:
+A minimal starting point:
 
 ```json
 {
-  "checkpointsDir": "gs://your-bucket/path/to/checkpoints/",
   "currentKubeconfig": "",
   "kubeconfigs": {}
 }
@@ -159,10 +160,10 @@ Shown after launch. The active environment name appears in brackets.
   ▶  ⚙️   Manage Environments
        Add, activate, edit, delete and validate
 
-     🧱  Bundle Builder
+     🧱  Model Selection
        Create and validate bundles
 
-     🚀  Bundle Deployment
+     🚀  Model Deployment
        Deploy or delete bundles
 
      📈  Check Deployment Progress
@@ -223,28 +224,24 @@ Selecting an existing environment opens its sub-menu:
 
 #### ➕ Add New Environment
 
-A 7-step guided flow. Press `Esc` at any step to cancel without saving.
+A 6-step guided flow. Press `Esc` at any step to cancel without saving.
 
 ```
-  1/7  Environment name  Esc cancel: my-env
+  1/6  Environment name  Esc cancel: my-env
 
        Paste the base64-encoded kubeconfig or enter a file path.
        The file will be saved as kubeconfigs/kubeconfig-my-env.yaml
 
-  2/7  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
+  2/6  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
 
-  3/7  Namespace  Esc cancel: default
+  3/6  Namespace  Esc cancel: default
 
-  4/7  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
+  4/6  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
 
-  5/7  API Domain (optional)  Esc cancel: https://api.my-env.example.com/
+  5/6  API Domain (optional)  Esc cancel: https://api.my-env.example.com/
 
-  6/7  API Key (optional)  Esc cancel: your-api-key-here
-
-  7/7  Checkpoints Directory (e.g. gs://bucket/path)  Esc cancel: gs://your-bucket/checkpoints/
+  6/6  API Key (optional)  Esc cancel: your-api-key-here
 ```
-
-> Step 7 only appears if `checkpointsDir` is not already set in `app-config.json`. Subsequent environments skip it.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -254,7 +251,6 @@ A 7-step guided flow. Press `Esc` at any step to cancel without saving.
 | UI Domain | No | SambaStack UI URL |
 | API Domain | No | Required for Playground |
 | API Key | No | Required for Playground |
-| Checkpoints Directory | Yes (once) | GCS path for model checkpoints. Required for Bundle Builder. Trailing `/` added automatically. Only prompted when not already set. |
 
 **Kubeconfig auto-detection:**
 - Contains `/`, `\`, `~`, or ends in `.yaml` → treated as a file path
@@ -267,25 +263,26 @@ On success:
   Kubeconfig        kubeconfigs/kubeconfig-my-env.yaml
   UI Domain         https://ui.my-env.example.com/
   API Domain        https://api.my-env.example.com/
-  Checkpoints Dir   gs://your-bucket/checkpoints/
 
-[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
-[PEF Generator] ✓ Generated pef_configs.json with 139 entries
+  [1/3]  checkpoint_mapping.json  ........  ✓  25 models    (1.2s)
+  [2/3]  model_profiles.json      ........  ✓  18 profiles  (0.6s)
+  [3/3]  pef_configs.json         ........  ✓  139 PEFs     (2.1s)
 ```
 
-Both `checkpoint_mapping.json` and `pef_configs.json` are generated automatically so Bundle Builder is ready immediately.
+`checkpoint_mapping.json` (multi-arch `Model` CR cache), `model_profiles.json` (`ModelProfile` CR cache), and `pef_configs.json` (PEF SS/BS/version cache, still used to validate batch sizes) are all generated automatically so Model Selection is ready immediately.
 
 ---
 
 #### ⚡ Activate an Environment
 
-Sets an environment as active and regenerates both `checkpoint_mapping.json` and `pef_configs.json`.
+Sets an environment as active and regenerates `checkpoint_mapping.json`, `model_profiles.json`, and `pef_configs.json`.
 
 ```
   ✅ "my-env" is now the active environment.
 
-[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
-[PEF Generator] ✓ Generated pef_configs.json with 139 entries
+  [1/3]  checkpoint_mapping.json  ........  ✓  25 models    (1.2s)
+  [2/3]  model_profiles.json      ........  ✓  18 profiles  (0.6s)
+  [3/3]  pef_configs.json         ........  ✓  139 PEFs     (2.1s)
 ```
 
 If the kubeconfig file is missing:
@@ -298,7 +295,7 @@ If the kubeconfig file is missing:
 
 #### 🔍 Validate an Environment
 
-Runs a full connectivity and configuration check. If all checks pass, `checkpoint_mapping.json` and `pef_configs.json` are regenerated.
+Runs a full connectivity and configuration check. If all checks pass, `checkpoint_mapping.json`, `model_profiles.json`, and `pef_configs.json` are regenerated.
 
 ```
   ╭──────────────────────────────────────────────────────────╮
@@ -324,12 +321,11 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
   UI Domain      https://ui.my-env.example.com/
   ✔  UI Domain reachable  (200)
 
-  Checkpoints Dir   gs://your-bucket/checkpoints/
-
   ──────────────────────────────────────────────────────────
   ✅ All checks passed!
 
-[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models
+[Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models (multi-arch)
+[Model Profiles] ✓ Generated model_profiles.json with 18 profiles
 [PEF Generator] ✓ Generated pef_configs.json with 139 entries
 ```
 
@@ -350,7 +346,6 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 | API `/v1/models` | 2xx = lists models; 404 = info (not an error); 401/403 = key invalid |
 | API key | `POST /v1/chat/completions` auth check |
 | UI Domain | Any HTTP response = reachable; connection failure = error |
-| Checkpoints Dir | `checkpointsDir` is set in `app-config.json`; required for Bundle Builder |
 
 If SambaStack chart is below the minimum:
 
@@ -380,8 +375,6 @@ All fields are pre-populated with current values — use `←` `→` to navigate
 
   › API Key  Esc cancel: your-api-key-here
 
-  › Checkpoints Directory  Esc cancel: gs://your-bucket/checkpoints/
-
   › Enable Updates (y/n)  Esc cancel: y
 
   ✅ Environment "my-env" updated.
@@ -390,8 +383,6 @@ All fields are pre-populated with current values — use `←` `→` to navigate
 Sub-menu stays open after saving so you can validate or continue editing.
 
 > When the **namespace** changes for the active environment, `pef_configs.json` is regenerated automatically — PEFs are namespace-scoped.
-
-> **Checkpoints Directory** is a top-level `app-config.json` field shared across all environments. Editing it here updates it globally.
 
 > **Enable Updates** controls whether the SambaStack update banner is shown in the web UI for this environment. Defaults to `y`.
 
@@ -409,38 +400,38 @@ Sub-menu stays open after saving so you can validate or continue editing.
 
 ---
 
-### 🧱 Bundle Builder
+### 🧱 Model Selection
 
-Guides you through selecting models, configuring PEF settings, previewing YAML, and optionally applying the bundle to the cluster.
+Guides you through selecting models, picking a `ModelProfile` for each (with an optional draft model for speculative decoding), optionally overriding the profile's batching config, previewing the `ModelBundle` YAML, and optionally applying it to the cluster.
 
-> Requires `checkpoint_mapping.json` and `pef_configs.json`. Both are generated automatically on startup and when you Add, Activate, or successfully Validate an environment.
+> Requires `checkpoint_mapping.json` (the `Model` CR cache) and `model_profiles.json` (the `ModelProfile` CR cache). Both are generated automatically on startup and when you Add, Activate, or successfully Validate an environment. `pef_configs.json` is still generated alongside them but is no longer used for model/PEF selection.
 
 #### Start — New or load saved
 
 If saved bundle files exist in `saved_artifacts/`, you are asked how to start:
 
 ```
-  › Bundle Builder — start from:
+  › Model Selection — start from:
 
   ▶  🆕  Build new bundle
      📂  Load from saved_artifacts/
      ✕  Cancel
 ```
 
-Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
+Only files containing `kind: ModelBundle` are listed (V3-only — no backwards compatibility with old `BundleTemplate`/`Bundle` files). Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
 
 ---
 
 #### Step 1 — Select models
 
 ```
-  › Bundle Builder  (0 added)
+  › Model Selection  (0 added)
 
   ▶  ✅  Finish and Create Bundle
 
      DeepSeek-R1-0528
      DeepSeek-V3-0324
-     Llama-4-Maverick-17B-128E-Instruct
+     Llama-4-Maverick-17B-128E-Instruct  (no matching profile)
      Meta-Llama-3.1-405B-Instruct
      Qwen3-32B
      ...
@@ -448,57 +439,76 @@ Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, s
      ✕  Cancel
 ```
 
-Only models present in **both** `checkpoint_mapping.json` and `pef_mapping.json` are shown. Select models one at a time, adding as many as needed. To edit an already-added model, select it again — its previous selections are pre-checked. Select **✅ Finish and Create Bundle** when done.
+Models come from `checkpoint_mapping.json` (the `Model` CR cache). Select models one at a time, adding as many as needed; re-selecting an already-added model removes it (and its draft, if any) so you can redo the flow. A model with **no matching `ModelProfile` for any of its checkpoint archs** is labeled `(no matching profile)` and cannot be added. Select **✅ Finish and Create Bundle** when done.
 
 ---
 
-#### Step 2 — Select PEF configurations
+#### Step 2 — Pick a checkpoint arch (multi-arch models only)
 
-Multi-select with `Space` to toggle, `a` to select/deselect all at once. Configs are listed in ascending SS → BS order.
-
-```
-  › Configurations for Meta-Llama-3.3-70B-Instruct:
-  Space toggle   a select all   Enter confirm   q / Esc to go back
-
-  ❯ ✅  Done - Confirm Selection
-     ○  Select All / Deselect All
-     ○  SS: 4k    │ BS: 1   │ llama-3p1-70b-ss4096-bs1-sd5  ⚡SD
-     ○  SS: 4k    │ BS: 2   │ llama-3p1-70b-ss4096-bs2-sd5  ⚡SD
-     ○  SS: 8k    │ BS: 1   │ llama-3p1-70b-ss8192-bs1-sd5  ⚡SD
-     ○  SS: 16k   │ BS: 1   │ llama-3p1-70b-ss16384-bs1-sd5 ⚡SD
-     ...
-    ✕  Back
-```
-
-| Column | Meaning |
-|---|---|
-| SS | Sequence size (context window), sorted ascending |
-| BS | Batch size, sorted ascending within each SS |
-| PEF name | Processor Executable Format identifier |
-| `⚡SD` | Speculative decoding PEF — requires a draft model |
-
-After confirming, the menu collapses to a single summary line:
+Shown only when a model has more than one checkpoint arch **with a matching `ModelProfile`**:
 
 ```
-  › Configurations for Meta-Llama-3.3-70B-Instruct: 6 selected
+  › Select checkpoint arch for Llama-4-Maverick-17B-128E-Instruct:
+
+  ▶  llama-4-maverick  (stable)
+     llama-4-maverick-v2  (preview)
+     ← Back
 ```
 
-```
-  ✅ Added 6 config(s) for Meta-Llama-3.3-70B-Instruct
-```
-
-> **Removing a model:** Select the model again, deselect all configs, then press **Done - Confirm Selection** with nothing checked. All entries for that model are removed from the bundle.
+The chosen arch is pinned into the model reference (`<crname>:<arch>:<version>`); single-arch models skip this step entirely (`<crname>:<version>`).
 
 ---
 
-#### Step 3 — Draft model for speculative decoding *(optional)*
+#### Step 3 — Pick a `ModelProfile`
 
-Shown only when the selected model supports speculative decoding. **Skip** is always available regardless of whether all PEFs require a draft:
+Profiles whose `model_arch` matches the chosen arch are listed. A model with only one matching profile **auto-selects it**:
 
 ```
-  ⚡ Meta-Llama-3.3-70B-Instruct supports speculative decoding.
+  Auto-selected profile: High Interactivity
+```
+
+Otherwise, pick one — the card title is derived from `features` (`continuous_batching` → **High Throughput**, otherwise **High Interactivity**; numbered when more than one of the same type is offered for a model), never from the profile's `metadata.name`:
+
+```
+  › Select a profile for Meta-Llama-3.3-70B-Instruct:
+
+  ▶  High Interactivity 1     4k:[1,4] 16k:[1]   Features: default
+     High Interactivity 2     4k:[1] 16k:[1,2]   Features: default
+     ← Back
+
+  High Interactivity 1
+    4k: batch_sizes=[1, 4]
+    16k: batch_sizes=[1]
+    Features: default
+```
+
+---
+
+#### Step 4 — Override the batching config *(optional)*
+
+Seeded from the profile's effective batching config (`spec.defaultBatchingConfig`, else `status.batchingConfig`):
+
+```
+  › Override this profile's batching config for the bundle? [y/N]  Esc cancel: n
+```
+
+Answering `y` prompts per tier — enter a comma-separated list or `*` for "all batch sizes the PEF/tier offers":
+
+```
+  › Batch sizes for tier 4k (comma-separated, or * for all)  Esc cancel: 1,4
+```
+
+The full `batchingConfig` — overridden or not — is always written into `ModelBundle.spec.modelConfigs[].batchingConfig` as an explicit record of the bundle's contents. `is_default` on the smallest tier is auto-derived (embedding models only — `Model.spec.metadata.capabilities` contains `"embeddings"`) and is never a user control.
+
+---
+
+#### Step 5 — Draft model for speculative decoding *(optional)*
+
+Shown only when the selected profile's `pefs` contains a name with `sd` in it:
+
+```
+  ⚡ Meta-Llama-3.3-70B-Instruct's profile uses speculative-decoding PEFs.
      A smaller draft model can significantly improve throughput.
-     Selected configs: SS:4k BS:1  SS:4k BS:2  SS:8k BS:1  ...
 
   › Draft model for Meta-Llama-3.3-70B-Instruct:
 
@@ -507,92 +517,73 @@ Shown only when the selected model supports speculative decoding. **Skip** is al
      ← Back
 ```
 
-If a matching draft is found, its configs are added automatically (matched by SS and BS):
-
-```
-  ✅ Auto-added 3 draft config(s) for Meta-Llama-3.1-8B-Instruct
-     Note: matched configs — SS:4k BS:1, SS:4k BS:2, SS:8k BS:1
-```
-
-> Draft configs that have no matching SS/BS in the draft model are silently skipped. The bundle summary will mark those configs with `⚠ no draft — will fail validation`.
+Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arch, profile pick, optional override). The draft is added to the bundle with `modelSettings: { routable: false }` and wired into `specDecodingPairs` (`{ target, draft }`, bare `Model` CR names — no `:version`/`:arch` suffix, and `experts` is always omitted so spec decoding applies to all of the target's experts).
 
 ---
 
-#### SD warning — SD PEFs without a draft model
-
-If SD PEFs were added but no draft model assigned, a warning appears before proceeding:
-
-```
-  ⚠  The following SD PEFs have no draft model and will fail cluster validation:
-     • llama-3p1-70b-ss32768-bs1-sd5  (Meta-Llama-3.3-70B-Instruct  SS:32k  BS:1)
-
-  › How to proceed?
-
-  ▶  ← Go back to Bundle Builder  (re-edit selections)
-     ▶ Continue anyway  (bundle may fail validation)
-     ✕  Cancel
-```
-
-Choosing **← Go back** returns to model selection with all existing selections preserved and pre-checked.
-
----
-
-#### Step 4 — Bundle summary & YAML preview
+#### Step 6 — Bundle summary & YAML preview
 
 ```
   ╭──────────────────────────────────────────────────────────╮
   │ 📋  Bundle Summary                                       │
   ╰──────────────────────────────────────────────────────────╯
 
-  1.  Meta-Llama-3.3-70B-Instruct            SS:4k    BS:1
-  2.  Meta-Llama-3.3-70B-Instruct            SS:4k    BS:2
-  3.  Meta-Llama-3.1-8B-Instruct             SS:4k    BS:1  ⚠ no draft — will fail validation
-  ...
+  1.  Meta-Llama-3.1-8B-Instruct              High Interactivity  (draft)
+  2.  Meta-Llama-3.3-70B-Instruct             High Interactivity
 
   ── YAML Preview  (my-bundle = placeholder) ─────────────────
   apiVersion: sambanova.ai/v1alpha1
-  kind: BundleTemplate
-  ...
+  kind: ModelBundle
+  metadata:
+    name: my-bundle
+  spec:
+    modelConfigs:
+    - model: meta-llama-3-1-8b-instruct:1
+      profile: llama-3p1-8b
+      modelSettings:
+        routable: false
+      batchingConfig: { ... }
+    - model: meta-llama-3-3-70b-instruct:1
+      profile: llama-3p1-70b-sd
+      batchingConfig: { ... }
+    specDecodingPairs:
+    - draft: meta-llama-3-1-8b-instruct
+      target: meta-llama-3-3-70b-instruct
   ────────────────────────────────────────────────────────────
 ```
 
-Rows marked `⚠ no draft — will fail validation` are SD PEFs whose SS/BS had no matching draft model config.
+The builder displays only the single `ModelBundle` document — no `checkpoints` block (checkpoints come from the `Model` CR) and no `secretNames` (carried by the referenced profiles).
 
 ---
 
-#### Step 5 — Name the bundle (and optionally edit YAML)
+#### Step 7 — Name the bundle (and optionally edit YAML)
 
 ```
-  › Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu: bundle-4291
+  › Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu: my-bundle
 ```
 
-A 4-digit suffix is pre-populated. The default prefix is `bundle`. Resource names are derived from what you type:
-
-- `BundleTemplate` → `bt-<name>`
-- `Bundle` → `b-<name>`
-
-Any `b-` or `bt-` prefix you accidentally type is stripped automatically.
+Unlike the old V2 flow, there is **no `b-`/`bt-` prefix convention** — the name you enter becomes `ModelBundle.metadata.name` directly.
 
 **Hotkeys at this prompt:**
 
 | Key | Action |
 |---|---|
-| `e` | Open YAML in `$EDITOR` (fallback: `vi`) — edited YAML is read back; bundle name is auto-detected from the saved file |
-| `Esc` | Go back to Bundle Builder (all model selections preserved) |
+| `e` | Open YAML in `$EDITOR` (fallback: `vi`) — edited YAML is read back; bundle name is re-parsed from the saved file via the shared `ModelBundle` parser |
+| `Esc` | Go back to Model Selection (all model selections preserved) |
 | `Enter` | Confirm name and continue |
 
-After confirming a name the final YAML (with real resource names) is displayed before the action menu.
+After confirming a name the final YAML is displayed before the action menu.
 
 ---
 
-#### Step 6 — YAML actions
+#### Step 8 — YAML actions
 
 ```
-  ── Final YAML  (bundle-4291) ────────────────────────────────
+  ── Final YAML  (my-bundle) ──────────────────────────────────
   apiVersion: sambanova.ai/v1alpha1
-  kind: BundleTemplate
+  kind: ModelBundle
   metadata:
-    name: bt-bundle-4291
+    name: my-bundle
   ...
   ────────────────────────────────────────────────────────────
 
@@ -608,30 +599,29 @@ After confirming a name the final YAML (with real resource names) is displayed b
 |---|---|
 | ✅ Apply to cluster to validate | Applies YAML via `kubectl apply` and polls for validation status |
 | 💾 Save to file | Saves YAML to `saved_artifacts/<bundle-name>.yaml`; path is pre-populated and editable |
-| ← Skip (deploy later) | Exits without applying; use **Bundle Deployment** later |
+| ← Skip (deploy later) | Exits without applying; use **Model Deployment** later |
 | ✕ Cancel | Exits without saving or applying |
 
 > You can save to file and then apply in the same session — the menu loops until you choose Skip or Cancel.
 
 ---
 
-#### Step 7 — Apply and validate
+#### Step 9 — Apply and validate
 
 ```
   ✔  Bundle applied — polling for validation status...
 
   kubectl apply output:
-    bundletemplate.sambanova.ai/bt-bundle-4291 created
-    bundle.sambanova.ai/b-bundle-4291 created
+    modelbundle.sambanova.ai/my-bundle created
 
-  ⠋  Pending  3s  ValidationInProgress
-  ⠸  Pending  9s  ValidationInProgress
-  ⠼  Running  12s  ValidationSucceeded
+  ⠋  Pending  3s  Legalizing
+  ⠸  Pending  9s  Legalizing
+  ⠼  Running  12s  Legalized
 
   ✅ Bundle Validation Succeeded!
 ```
 
-`kubectl apply` output is shown immediately after applying so you can confirm the resource names. Validation polls every 3 s with a braille spinner. Press `q` or `Esc` to stop watching — validation continues on the cluster.
+`kubectl apply` output is shown immediately after applying so you can confirm the resource name. Validation polls `ModelBundle.status.conditions` every 3 s (looking for `{ type: Valid, status: True }` = succeeded, `{ type: Valid, status: False }` = failed — the same status shape as the old V2 `Bundle`) with a braille spinner. Press `q` or `Esc` to stop watching — validation continues on the cluster.
 
 ---
 
@@ -645,26 +635,22 @@ When validation fails, a recovery menu appears:
 
   › What would you like to do?
 
-  ▶  🔧  Remove 2 SD PEF(s) without draft model and re-apply
-     ✏️   Edit YAML in editor and re-apply
-     ← Go back to Bundle Builder  (re-edit selections)
-     🗑️   Delete b-bundle-4291 from cluster
+  ▶  ✏️   Edit YAML in editor and re-apply
+     ← Go back to Model Selection  (re-edit selections)
+     🗑️   Delete my-bundle from cluster
      ← Back to main menu
 ```
 
 | Option | Description |
 |---|---|
-| 🔧 Remove SD PEFs | Auto-removes SD PEFs that lack a draft model and re-applies |
 | ✏️ Edit YAML | Opens editor, then re-applies the edited YAML |
-| ← Go back to Bundle Builder | Deletes the failed bundle from cluster and returns to model selection with all previous selections preserved and pre-checked |
-| 🗑️ Delete from cluster | Removes the bundle and template from the cluster |
-| ← Back to main menu | Leaves resources on cluster, returns to main menu |
-
-> **🔧 Remove SD PEFs** is only shown when the error message identifies specific SD PEFs as the cause.
+| ← Go back to Model Selection | Deletes the failed `ModelBundle` from cluster and returns to model selection with all previous selections preserved |
+| 🗑️ Delete from cluster | Removes the `ModelBundle` from the cluster |
+| ← Back to main menu | Leaves the resource on cluster, returns to main menu |
 
 ---
 
-### 🚀 Bundle Deployment
+### 🚀 Model Deployment
 
 Deploy and delete bundle resources on the cluster.
 
@@ -676,7 +662,7 @@ Every visit shows the current deployment state:
   ◌  bd-llama-staging
   ○  bd-qwen-test
 
-  › Bundle Deployment:
+  › Model Deployment:
 
   ▶  ▶  Deploy a Bundle
      ✕  Delete a Bundle / Deployment
@@ -698,18 +684,20 @@ Every visit shows the current deployment state:
 ```
   ℹ  Found 3 bundle(s)
 
-  · b-deepseek-prod    ✔ valid
-  · b-llama-staging    ⚠ unvalidated
-  · b-qwen-test        ✔ valid
+  · deepseek-prod    ✔ valid
+  · llama-staging    ⚠ unvalidated
+  · qwen-test        ✔ valid
 ```
+
+Validity is read from `ModelBundle.status.conditions` (`{ type: Valid, status: True }` = valid).
 
 **2 — Select bundle to deploy**
 
 ```
   › Select bundle to deploy:
 
-  ▶  ● b-deepseek-prod    validated
-     ○ b-llama-staging    unvalidated
+  ▶  ● deepseek-prod    validated
+     ○ llama-staging    unvalidated
      ← Back
 ```
 
@@ -719,23 +707,25 @@ Every visit shows the current deployment state:
   Deployment YAML:
   ────────────────────────────────────────
   apiVersion: sambanova.ai/v1alpha1
-  kind: BundleDeployment
+  kind: ModelDeployment
   metadata:
-    name: bd-deepseek-prod
+    name: md-deepseek-prod
   spec:
-    bundle: b-deepseek-prod
+    bundle: deepseek-prod
     groups:
     - minReplicas: 1
       name: default
   ────────────────────────────────────────
 ```
 
+`spec.bundle` always references the `ModelBundle` **by name** — the CLI never generates the inline `spec.models` form (you can hand-edit the YAML for that). All other deployment knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) are unchanged from the old `BundleDeployment` builder.
+
 **4 — Confirm and deploy**
 
 ```
-  › Deploy bd-deepseek-prod? [Y/n]  Esc cancel:
+  › Deploy md-deepseek-prod? [Y/n]  Esc cancel:
 
-  ✔  Deployment bd-deepseek-prod initiated
+  ✔  Deployment md-deepseek-prod initiated
 
   › Monitor progress now? [Y/n]  Esc cancel:
 ```
@@ -751,20 +741,21 @@ Answering `y` jumps straight into the live monitor.
 ```
   › What to delete?
 
-  ▶  BundleDeployment
-     Bundle
-     BundleTemplate
+  ▶  ModelDeployment
+     ModelBundle
      ← Back
 ```
+
+`ModelProfile`s and `Model`s are pre-existing cluster resources the builder only references by name — it never creates or deletes them, so they aren't offered here (compare to V2's `BundleTemplate`, which the builder did own and cascade-delete).
 
 **2 — Select resources** (multi-select with `Space`)
 
 ```
-  › Select BundleDeployment(s) to delete:
+  › Select ModelDeployment(s) to delete:
   Space toggle   Enter confirm   q / Esc to go back
 
-   ❯  ◉  bd-deepseek-prod
-      ○  bd-llama-staging
+   ❯  ◉  md-deepseek-prod
+      ○  md-llama-staging
       ← Back
 ```
 
@@ -773,33 +764,20 @@ Answering `y` jumps straight into the live monitor.
 ```
   ⚠  The following will be permanently deleted:
 
-  ·  bd-deepseek-prod
+  ·  md-deepseek-prod
 
   › Confirm deletion? This cannot be undone [y/N]  Esc cancel:
 
-  ✔  Deleted bd-deepseek-prod
+  ✔  Deleted md-deepseek-prod
 ```
 
 > Deletion is permanent and immediate. There is no undo.
-
-**BundleTemplate cascade delete**
-
-When deleting a `BundleTemplate`, the associated `Bundle` is automatically deleted too. Both resources are shown in the confirmation list:
-
-```
-  ⚠  The following will be permanently deleted:
-
-  ·  bt-bundle-4291
-     ↳  b-bundle-4291  (associated Bundle)
-
-  › Confirm deletion? This cannot be undone [y/N]  Esc cancel:
-```
 
 ---
 
 ### 📈 Check Deployment Progress
 
-Live monitor for a `BundleDeployment`. Polls every 5 s.
+Live monitor for a `ModelDeployment`. Polls every 5 s.
 
 **1 — Select deployment**
 
@@ -808,8 +786,8 @@ Live monitor for a `BundleDeployment`. Polls every 5 s.
 
   › Select deployment to monitor:
 
-  ▶  ● bd-deepseek-prod
-     ● bd-qwen-test
+  ▶  ● md-deepseek-prod
+     ● md-qwen-test
      ← Back
 ```
 
@@ -861,8 +839,8 @@ Interactive chat with a deployed model.
 
   › Select deployed bundle to chat with:
 
-  ▶  ●  bd-deepseek-prod
-     ●  bd-qwen-test
+  ▶  ●  md-deepseek-prod
+     ●  md-qwen-test
         ✏️  Enter model name manually
      ← Back
 ```
@@ -872,18 +850,18 @@ Only fully deployed bundles appear. If none are ready:
 ```
   ⚠ No fully deployed bundles ready.
   Current status:
-  ◌  bd-llama-staging   Deploying
-  ○  bd-qwen-test       Not Deployed
+  ◌  md-llama-staging   Deploying
+  ○  md-qwen-test       Not Deployed
 
   › Model name manually (leave empty to go back)  Esc cancel:
 ```
 
 **2 — Select model**
 
-If a bundle has multiple models:
+The CLI fetches the referenced `ModelBundle`, reads `spec.modelConfigs[].model` (`<crname>[:arch]:version` refs), and maps each crname back to its display name via `checkpoint_mapping.json`. If a bundle has multiple models:
 
 ```
-  › Select model from bd-deepseek-prod:
+  › Select model from md-deepseek-prod:
 
   ▶  DeepSeek-R1
      DeepSeek-R1-0528
@@ -987,10 +965,10 @@ Installation is detected as complete when the log line contains `configure_defau
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `checkpointsDir` | string | **Yes** | GCS path prefix. Must end with `/` |
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
-| `checkpoint_overrides` | object | No | Override checkpoint version per model e.g. `{ "Model-Name": "1" }` |
+
+> **V3 note:** `checkpointsDir` and `checkpoint_overrides` are no longer read or written by the CLI. Checkpoints now come from the `Model` CR (`spec.checkpoints.<arch>.versions`), and the bundle always pins the **highest** checkpoint version under the chosen arch — there's no per-model override.
 
 ### Per-environment fields
 
@@ -1007,7 +985,6 @@ Installation is detected as complete when the log line contains `configure_defau
 
 ```json
 {
-  "checkpointsDir": "gs://your-bucket/checkpoints/",
   "currentKubeconfig": "my-env",
   "kubeconfigs": {
     "my-env": {
@@ -1018,9 +995,6 @@ Installation is detected as complete when the log line contains `configure_defau
       "apiKey": "your-api-key-here",
       "enableUpdates": true
     }
-  },
-  "checkpoint_overrides": {
-    "Llama-4-Maverick-17B-128E-Instruct": "1"
   }
 }
 ```
@@ -1080,9 +1054,15 @@ helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 
 ---
 
-**No models available in Bundle Builder**
+**No models available in Model Selection**
 
-`checkpoint_mapping.json` or `pef_configs.json` is missing or empty. Both files are regenerated on every startup when the cluster is reachable. To force a refresh: **Manage Environments** → select env → **🔍 Validate**. If all checks pass both files are regenerated automatically.
+`checkpoint_mapping.json` or `model_profiles.json` is missing or empty. Both files are regenerated on every startup when the cluster is reachable. To force a refresh: **Manage Environments** → select env → **🔍 Validate**. If all checks pass, both files (plus `pef_configs.json`) are regenerated automatically.
+
+---
+
+**"No matching profile" next to every model**
+
+`model_profiles.json` is likely empty or stale — regenerate it via **Manage Environments** → select env → **🔍 Validate**, and confirm `kubectl get modelprofiles -n <namespace>` returns results (the join is on `ModelProfile.spec.model_arch` == `Model.spec.checkpoints.<arch>`).
 
 ---
 
@@ -1099,18 +1079,10 @@ helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml
 **Bundle validation timeout**
 
 ```bash
-kubectl get bundle.sambanova.ai <bundle-name> -n <namespace> -o yaml
+kubectl get modelbundle.sambanova.ai <bundle-name> -n <namespace> -o yaml
 ```
 
-Check `.status.conditions` for detailed error messages.
-
----
-
-**`checkpointsDir` path error during deployment**
-
-If cache pod logs show `[CRITICAL] Failed to access source storage`:
-- Confirm `checkpointsDir` in `app-config.json` ends with `/`
-- Confirm the GCS path is accessible from the cluster
+Check `.status.conditions` for detailed error messages (`{ type: Valid, status, reason, message }`) and `.status.legalizerInfo` for utilization/errors.
 
 ---
 

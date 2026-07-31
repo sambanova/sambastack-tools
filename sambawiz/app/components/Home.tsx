@@ -253,10 +253,25 @@ export default function Home() {
 
         if (data.success) {
           setInstallerLogs(data.logs);
-          // Check if installation is complete (last line contains "configure_default_ingress")
+          // Check if installation is complete. The final installer step differs
+          // between SambaStack helm versions:
+          // - 1.x: the last step is `configure_default_ingress`, so its marker
+          //   appears on the last log line.
+          // - 2.x: the installer continues past ingress configuration with a
+          //   `create_keycloak_user` step, so completion is signalled once that
+          //   step reaches a terminal state (service user created or already
+          //   present) rather than by the ingress line being last.
           const lines = data.logs.trim().split('\n');
           const lastLine = lines[lines.length - 1];
-          if (lastLine && lastLine.includes('configure_default_ingress')) {
+          const oneXComplete = Boolean(
+            lastLine && lastLine.includes('configure_default_ingress')
+          );
+          const twoXComplete = lines.some(
+            (line: string) =>
+              line.includes('create_keycloak_user') &&
+              /already exists|created/i.test(line)
+          );
+          if (oneXComplete || twoXComplete) {
             setInstallationComplete(true);
             setYamlModifiedAfterInstall(false); // Require YAML modification before next install
           }
@@ -444,6 +459,34 @@ export default function Home() {
 
       if (!generateData.success) {
         setSaveError(`Failed to generate checkpoint mapping from cluster: ${generateData.error || 'Unknown error'}`);
+        setSaving(false);
+        return;
+      }
+
+      // Generate model_profiles.json from the cluster's ModelProfile resources
+      // (must run after update-config so it uses the newly selected environment)
+      const profilesResponse = await fetch('/api/generate-model-profiles', {
+        method: 'POST',
+      });
+      const profilesData = await profilesResponse.json();
+
+      if (!profilesData.success) {
+        setSaveError(`Failed to generate model profiles from cluster: ${profilesData.error || 'Unknown error'}`);
+        setSaving(false);
+        return;
+      }
+
+      // Guard: a v3-capable environment that has models should also have ModelProfiles.
+      // Zero profiles means either the backend doesn't support v3 bundles or none are
+      // installed yet — either way, no model can be added to a bundle, so surface it here
+      // rather than letting the user discover it as a wall of per-model exclusions on the
+      // Model Selection page.
+      if (!profilesData.count || profilesData.count === 0) {
+        setSaveError(
+          'Environment applied, but 0 model profiles were found in this environment. ' +
+          'No models can be added to a bundle until ModelProfiles exist. Confirm the backend ' +
+          'supports v3 bundles (ModelProfile / ModelBundle) and that profiles are installed.'
+        );
         setSaving(false);
         return;
       }

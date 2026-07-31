@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { normalizeCheckpointsDir } from '../../utils/checkpoints-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -12,7 +11,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -31,30 +29,23 @@ export async function GET() {
       });
     }
 
-    // Check if the file is valid JSON and has checkpointsDir
+    // Check if the file is valid JSON with the expected shape. Checkpoints are
+    // no longer GCS-bucket-rooted (v3: they come from the Model CR), so
+    // "valid" just means the config parses and has a kubeconfigs map — an
+    // empty kubeconfigs map is still valid (handled separately by the
+    // "no kubeconfigs" auto-populate/prompt flow in Home.tsx).
     try {
       const configContent = fs.readFileSync(configPath, 'utf-8');
       const config: AppConfig = JSON.parse(configContent);
 
-      // Normalize checkpointsDir to the bucket root (strips any sub-path, adds
-      // trailing slash). This keeps bundle generation correct even when the
-      // on-disk config holds a deep path; the warning tells the user to fix it.
-      let checkpointsDirWarning: string | undefined;
-      if (config.checkpointsDir) {
-        const normalized = normalizeCheckpointsDir(config.checkpointsDir);
-        config.checkpointsDir = normalized.value;
-        checkpointsDirWarning = normalized.warning;
-      }
-
-      const hasCheckpointsDir = config.checkpointsDir && config.checkpointsDir.trim() !== '';
+      const valid = typeof config === 'object' && config !== null && typeof config.kubeconfigs === 'object';
 
       return NextResponse.json({
         success: true,
         exists: true,
-        valid: hasCheckpointsDir,
+        valid,
         config,
-        checkpointsDirWarning,
-        message: hasCheckpointsDir ? 'Configuration is valid' : 'checkpointsDir is not populated',
+        message: valid ? 'Configuration is valid' : 'app-config.json is missing a "kubeconfigs" object',
       });
     } catch {
       return NextResponse.json({
@@ -73,27 +64,13 @@ export async function GET() {
   }
 }
 
-export async function POST(request: Request) {
+export async function POST() {
   try {
-    const { checkpointsDir } = await request.json();
-
-    if (!checkpointsDir || checkpointsDir.trim() === '') {
-      return NextResponse.json({
-        success: false,
-        error: 'checkpointsDir is required',
-      }, { status: 400 });
-    }
-
     const configPath = path.join(process.cwd(), 'app-config.json');
     const kubeconfigsDir = path.join(process.cwd(), 'kubeconfigs');
 
-    // Normalize the value. For GCS, a path below the bucket root is collapsed to
-    // the bucket root and a warning is returned; non-GCS roots pass through.
-    const normalized = normalizeCheckpointsDir(checkpointsDir);
-
-    // Create minimal app-config.json with the normalized checkpointsDir
+    // Create minimal app-config.json
     const config: AppConfig = {
-      checkpointsDir: normalized.value,
       currentKubeconfig: '',
       kubeconfigs: {},
     };
@@ -126,7 +103,6 @@ export async function POST(request: Request) {
       success: true,
       message: 'app-config.json created successfully',
       config,
-      checkpointsDirWarning: normalized.warning,
     });
   } catch (error) {
     console.error('Error creating app-config.json:', error);

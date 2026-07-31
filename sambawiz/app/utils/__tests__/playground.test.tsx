@@ -15,22 +15,27 @@ describe('Playground Page', () => {
     });
   });
 
-  it('should fetch deployments and environments on mount', async () => {
+  it('should fetch models, environments, and checkpoint mapping on mount', async () => {
     (global.fetch as jest.Mock)
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, bundleDeployments: [] }),
+        json: async () => ({ success: true, models: [] }),
       })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => mockEnvironments,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, data: {} }),
       });
 
     renderWithProviders(<Playground />);
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith('/api/bundle-deployment');
+      expect(global.fetch).toHaveBeenCalledWith('/api/models');
       expect(global.fetch).toHaveBeenCalledWith('/api/environments');
+      expect(global.fetch).toHaveBeenCalledWith('/api/checkpoint-mapping');
     });
   });
 });

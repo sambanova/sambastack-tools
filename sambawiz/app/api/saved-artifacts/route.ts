@@ -17,7 +17,9 @@ export async function GET() {
     // Read all files in the directory
     const allFiles = fs.readdirSync(savedArtifactsDir);
 
-    // Filter for .yaml files that contain both BundleTemplate and Bundle
+    // Filter for .yaml files that contain a ModelBundle document (v3 surface;
+    // V2 BundleTemplate+Bundle saves are no longer recognized, per Q9 — no
+    // backwards compatibility).
     const yamlFiles = allFiles
       .filter(file => file.endsWith('.yaml') || file.endsWith('.yml'))
       .filter(file => {
@@ -25,11 +27,7 @@ export async function GET() {
           const filePath = path.join(savedArtifactsDir, file);
           const content = fs.readFileSync(filePath, 'utf-8');
 
-          // Check if file contains both "kind: BundleTemplate" and "kind: Bundle"
-          const hasBundleTemplate = content.includes('kind: BundleTemplate');
-          const hasBundle = content.includes('kind: Bundle');
-
-          return hasBundleTemplate && hasBundle;
+          return content.includes('kind: ModelBundle');
         } catch (err) {
           console.error(`Error reading file ${file}:`, err);
           return false;

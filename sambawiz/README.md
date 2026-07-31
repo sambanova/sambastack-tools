@@ -7,7 +7,9 @@
 
 # SambaWiz
 
-SambaWiz is a GUI wizard that accelerates the creation and deployment of model bundles on [SambaStack](https://docs.sambanova.ai/docs/en/admin/overview/sambastack-overview).
+SambaWiz is a GUI wizard that accelerates deploying and serving models on [SambaStack](https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction). Pick a model and a profile and deploy it directly, or combine several models into a validated model bundle.
+
+> **SambaWiz 2.0** targets SambaStack's **v3 resource model** (`Model`, `ModelProfile`, `ModelBundle`, and `ModelDeployment` custom resources), in which a model can be deployed on its own — a bundle is no longer required. This is a breaking change from 1.x — the old `BundleTemplate`/`Bundle` resources and the PEF/checkpoint-directory workflow have been replaced. See [Key Concepts](#key-concepts). See the [VERSION](VERSION) file for the minimum SambaStack helm version.
 
 ## Contents
 
@@ -17,46 +19,43 @@ SambaWiz is a GUI wizard that accelerates the creation and deployment of model b
   - [1. Install Dependencies](#1-install-dependencies)
   - [2. Configure Application Settings](#2-configure-application-settings)
   - [3. Configure Kubernetes Access](#3-configure-kubernetes-access)
-  - [4. Verify Configuration Files](#4-verify-configuration-files)
-  - [5. Run Development Server](#5-run-development-server)
-  - [6. Build for Production](#6-build-for-production)
+  - [4. Run the Development Server](#4-run-the-development-server)
+  - [5. Build for Production](#5-build-for-production)
+- [Key Concepts](#key-concepts)
 - [Features](#features)
   - [1. Home](#1-home)
-  - [2. Bundle Builder](#2-bundle-builder)
-  - [3. Bundle Deployment](#3-bundle-deployment)
+  - [2. Model Selection](#2-model-selection)
+  - [3. Model Deployment](#3-model-deployment)
   - [4. Playground](#4-playground)
+- [Data Caches](#data-caches)
 - [Project Structure](#project-structure)
 - [API Endpoints](#api-endpoints)
-  - [GET /api/kubeconfig-validate](#get-apikubeconfig-validate)
-  - [POST /api/validate](#post-apivalidate)
 - [Technology Stack](#technology-stack)
 - [Development](#development)
 - [Testing](#testing)
 - [Security Considerations](#security-considerations)
 - [Troubleshooting](#troubleshooting)
-  - [Configuration Issues](#configuration-issues)
-  - [Version Compatibility Issues](#version-compatibility-issues)
-  - [Connection Issues](#connection-issues)
-  - [Common Error Messages](#common-error-messages)
 - [CLI →](README-CLI.md)
 
 ## Overview
 
+**With SambaWiz 2.0, you can deploy a model directly — pick a model and a profile and deploy it, no bundle required.** This is the primary flow. Bundling several models together into a validated `ModelBundle` is still fully supported and remains an important capability when you want to serve multiple models as one unit or apply advanced per-model overrides — but it is no longer a prerequisite for getting a model running.
+
 SambaWiz provides an intuitive interface to:
-- Select AI models from an available catalog
-- Configure PEF (Processor Executable Format) settings including sequence size (SS) and batch size (BS)
-- Map models to checkpoints
-- Generate valid Kubernetes YAML manifests (BundleTemplate and Bundle resources)
-- Validate and apply bundles to a Kubernetes cluster
-- View bundle validation status and error messages
+- Select a model and a `ModelProfile` and deploy it directly to your cluster
+- Optionally combine multiple models — with speculative-decoding draft pairing and per-tier batching overrides — into a single `ModelBundle`, validated against the SambaStack legalizer (with DDR/host memory utilization feedback)
+- Deploy models or bundles as `ModelDeployment` resources and monitor pod readiness and logs in real time
+- Chat with deployed models in an interactive playground, complete with performance metrics and copy-paste code snippets
+- Optionally install SambaStack into a cluster directly from the Home page
+
+SambaWiz also ships as a fully interactive terminal CLI — see [README-CLI.md](README-CLI.md).
 
 ## Prerequisites
 
-- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/admin/installation/prerequisites) and SambaNova CRDs available (minimum Helm version specified in the [VERSION](VERSION) file)
-- Valid `kubeconfig.yaml` for your SambaStack environment
+- Access to a Kubernetes cluster with SambaStack [installed](https://docs.sambanova.ai/docs/en/sambastack/getting-started/introduction) and the SambaNova CRDs available (minimum SambaStack Helm version specified in the [VERSION](VERSION) file). SambaWiz can also install SambaStack for you from the Home page.
+- A valid kubeconfig for your SambaStack environment
 - Node.js 18+ and npm
-- `checkpointsDir`, which is the root directory for checkpoints (provided by your SambaNova contact and goes into app-config.json)
-- `kubectl` and `helm` CLI tools installed and configured (must be in your PATH as the application uses these commands via Node.js)
+- `kubectl` and `helm` installed and available on your `PATH` (SambaWiz invokes them via Node.js `child_process`)
 
 ## Getting Started
 
@@ -64,23 +63,20 @@ SambaWiz provides an intuitive interface to:
 
 ```bash
 npm install
-npm audit fix --force
 ```
 
 ### 2. Configure Application Settings
 
-Create an `app-config.json` file in the project root directory by copying the example:
+SambaWiz stores its configuration in `app-config.json` in the project root. You can either create it by copying the example, or let the app auto-generate it on first launch (it will scan `kubeconfigs/` and pre-populate any kubeconfig files it finds).
 
 ```bash
-# Copy the example config file
 cp app-config.example.json app-config.json
 ```
 
-Edit `app-config.json` with your settings:
+Example `app-config.json`:
 
 ```json
 {
-  "checkpointsDir": "gs://your-bucket-name/",
   "currentKubeconfig": "your-environment-name",
   "kubeconfigs": {
     "your-environment-name": {
@@ -94,343 +90,319 @@ Edit `app-config.json` with your settings:
 }
 ```
 
-**Important**:
-- `app-config.json` is gitignored for security
-- `checkpointsDir`: the root directory where model checkpoints are stored (provided by your SambaNova contact). SambaWiz appends each model's checkpoint sub-path automatically, so set this to the **root only**:
-  - **Google Cloud Storage** — use the **bucket root**, e.g. `gs://your-bucket-name/`. Do **not** include a sub-path such as `gs://your-bucket-name/version/0.1.0/pefs-checkpoints/ckpts/`; that sub-path is derived per-model and appending it here produces a doubled, broken path. (SambaWiz auto-corrects a GCS value to the bucket root and shows a warning if you do this.)
-  - **NFS / local filesystem** — use the directory that contains your checkpoints, e.g. `/mnt/nfs/checkpoints/`. Arbitrary paths are supported and are used as-is.
-- `currentKubeconfig`: Name of the currently selected environment
-- `kubeconfigs`: Object containing all configured environments
-  - Each environment has:
-    - `file`: Path to kubeconfig file relative to sambawiz folder
-    - `namespace`: Kubernetes namespace for this environment
-    - `uiDomain`: Optional UI domain URL for the environment (used to create an API key)
-    - `apiDomain`: API domain URL for the environment (required for Playground chat functionality)
-    - `apiKey`: API key for environment-specific authentication (required for Playground chat functionality)
-- The checkpoints directory is used to construct full checkpoint paths
-- Configuration can be updated through the home page UI
-- You can configure multiple environments in the `kubeconfigs` object
+**Fields:**
+- `currentKubeconfig`: Name of the currently selected environment (must match a key in `kubeconfigs`).
+- `kubeconfigs`: Map of environment name → configuration. Each entry has:
+  - `file`: Path to the kubeconfig file, relative to the `sambawiz/` folder.
+  - `namespace`: Kubernetes namespace for the environment.
+  - `uiDomain` *(optional)*: SambaStack UI domain, used to help generate an API key.
+  - `apiDomain` *(optional)*: OpenAI-compatible API domain — **required for Playground** chat/embeddings.
+  - `apiKey` *(optional)*: API key for inference — **required for Playground**.
+- `checkpoint_overrides` *(optional)*: Map of model name → checkpoint version, to pin a specific checkpoint version when a model exposes more than one.
+
+**Notes:**
+- `app-config.json` is **gitignored** to keep credentials out of version control. Use `app-config.example.json` (safe to commit) as a template.
+- You can configure multiple environments and switch between them from the Home page.
+- Configuration can also be edited through the Home page UI.
+- Unlike SambaWiz 1.x, there is **no `checkpointsDir` setting** — checkpoints are resolved from each model's `Model` custom resource in the cluster, not from a storage path you configure.
 
 ### 3. Configure Kubernetes Access
 
 Place your kubeconfig files in the `kubeconfigs/` directory:
 
 ```bash
-# Copy your kubeconfig to the kubeconfigs directory
 cp /path/to/your/kubeconfig.yaml ./kubeconfigs/your-environment.yaml
 ```
 
-Then add the environment to the `kubeconfigs` object in `app-config.json` with the corresponding file path, namespace, and optional API key.
+Then add (or select) the environment in `app-config.json`, or use the Home page to do it interactively.
 
-**Important**:
-- All files in the `kubeconfigs/` directory are gitignored for security (except `kubeconfig_example.yaml`)
-- The application reads the kubeconfig file path from `app-config.json`
-- The kubeconfig is validated on app startup using `helm list` to verify cluster connectivity
-- If validation fails, an error alert is displayed with instructions to check your kubeconfig and network/VPN connection
-- The SambaStack Helm version is displayed in the navigation sidebar when validation succeeds
+**Notes:**
+- All files in `kubeconfigs/` are gitignored (except `kubeconfig_example.yaml`).
+- The kubeconfig is validated on the Home page using `helm list` to verify cluster connectivity and read the installed SambaStack Helm version.
+- If validation fails, an error dialog appears with guidance to check your kubeconfig and network/VPN connection.
+- The SambaStack Helm version is displayed in the navigation sidebar when validation succeeds.
 
-### 4. Verify Configuration Files
-
-The application uses several configuration files:
-
-**VERSION File**: Contains version compatibility information in the project root:
-- `app`: Current version of SambaWiz
-- `minimum-sambastack-helm`: Minimum SambaStack Helm chart version required
-- Version requirements are enforced during kubeconfig validation
-
-**Data Configuration Files** in `app/data/`:
-- `pef_mapping.json`: Maps model names to their available PEF configurations
-- `checkpoint_mapping.json`: Maps model names to their checkpoint paths (this is auto-generated by the application when an environment configuration is applied)
-
-These files are included with the application and typically don't require modification.
-
-### 5. Run Development Server
+### 4. Run the Development Server
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000) in your browser. The Home page loads first, where you select your environment and namespace.
 
-The home page will display the environment selector where you can choose your kubeconfig and namespace.
-
-### 6. Build for Production
+### 5. Build for Production
 
 ```bash
 npm run build
 npm start
 ```
 
+## Key Concepts
+
+SambaWiz 2.0 works with SambaStack's v3 custom resources (all `apiVersion: sambanova.ai/v1alpha1`). The diagram below shows how they relate — and, crucially, which ones already live in the cluster versus which ones SambaWiz generates for you:
+
+```mermaid
+graph TD
+    PEF["PEF<br/><small>references to versioned executables</small>"]
+    MP["ModelProfile<br/><small>set&nbsp;of&nbsp;feature‑compatible&nbsp;PEFs&nbsp;for&nbsp;a&nbsp;model&nbsp;arch<br/>+&nbsp;default&nbsp;batching&nbsp;configuration</small>"]
+    M["Model<br/><small>checkpoints per architecture</small>"]
+    MB["ModelBundle<br/><small>reusable,&nbsp;shareable&nbsp;set&nbsp;of<br/>models&nbsp;+&nbsp;profiles</small>"]
+    MD["ModelDeployment<br/><small>routable inference endpoint, replicas &amp; QoS, backed by serving pods</small>"]
+    JP("<i>ModelProfile & Model Pair</i><br/><small>implicit pairing, not a CR<br/>joined by model_arch</small>")
+
+    PEF -->|"referenced by"| MP
+    MP --- JP
+    M --- JP
+    JP -->|"referenced by"| MB
+    MB ==>|"bundle deploy"| MD
+    JP -.->|"direct deploy"| MD
+
+    classDef cluster fill:#eef2f7,stroke:#8aa0bd,color:#1a2b45;
+    classDef authored fill:#cfe2f3,stroke:#2f6fb0,color:#0d2c4d,stroke-width:2px;
+    classDef config fill:#fbe7c6,stroke:#c9871f,color:#5c3d00;
+    class PEF,MP,M cluster;
+    class MB,MD authored;
+    class JP config;
+```
+
+<sub>**Light boxes** are CRs that already exist in the cluster (SambaWiz only *references* them); **darker boxes** are the CRs SambaWiz *generates and applies*; the **italic amber box** is an *implicit* pairing of a `Model` and a `ModelProfile` — not a standalone CR, it corresponds to a single entry in `spec.modelConfigs`. The dashed arrow marks the direct-deploy path (no bundle); the thick arrow is the bundle-based deploy path. `referenced by` points from a component to the resource that references it — a `ModelProfile` lists many `PEF`s, and a `ModelBundle` groups many model + profile pairings.</sub>
+
+- **`Model`** — the source of checkpoints. A `Model` CR holds the checkpoint versions for each architecture it supports. Checkpoints are resolved by the operator from the referenced `Model` at reconcile time; they are never authored in the bundle.
+- **`ModelProfile`** — defines the runtime shape for a **single** model: which PEFs it uses, its per-tier batching configuration, and its `model_arch` (the join key back to a `Model`'s checkpoint architecture). Profiles are reusable and are expected to already exist in the cluster; SambaWiz does not author them.
+- **`ModelBundle`** — combines one or more `Model` + `ModelProfile` pairs into a single deployable unit. Its `spec.modelConfigs` list references each model and profile **by name**, with an optional per-model batching override. Bundling is **optional** in 2.0 — you only need it to serve multiple models as one unit, to pair a draft model for speculative decoding, or to apply advanced overrides. The Model Selection page generates and validates it when you take the bundle route.
+- **`ModelDeployment`** — the resource that actually runs a model, creating the serving pods. A **direct model deployment** inlines the chosen model + profile under `spec.models` (no bundle involved); a **bundle deployment** instead references a `ModelBundle` by name via `spec.bundle`.
+
+**PEF (Processor Executable Format)** — pre-compiled model executables listed inside a `ModelProfile`. SambaWiz abstracts individual PEF/sequence-size/batch-size selection behind the profile you pick; the only place a PEF surfaces directly is speculative-decoding detection (a profile is treated as a speculative-decoding profile when a PEF name contains `sd`).
+
+**Speculative decoding** — a smaller "draft" model proposes tokens that a larger "target" model verifies, improving inference speed. When you pick a speculative-decoding profile, SambaWiz prompts for a draft model and adds it to the bundle as its own (non-routable) model entry.
+
 ## Features
 
 ### 1. Home
-- **Prerequisites Validation**: Automatically checks kubeconfig validity and cluster connectivity
-- **Environment Configuration**: Configure API keys, domains, and checkpoint directories for each environment
-- **Multi-Environment Support**: Switch between multiple SambaStack environments seamlessly
-- **Version Display**: Shows SambaStack Helm version in the navigation sidebar when connected
+- **Environment Configuration**: Select a Kubernetes environment, set the namespace, and configure the API domain/key used for the Playground.
+- **Prerequisites & Connectivity Check**: Verifies `kubectl`/`helm` are installed and validates the kubeconfig against the cluster on load.
+- **SambaStack Installer**: Generate and apply an installation manifest to bring SambaStack up in a cluster, with live installer log streaming.
+- **Cache Refresh**: Clicking **Apply** refreshes the local model and profile caches from the cluster (see [Data Caches](#data-caches)).
+- **Version Display**: Shows the SambaStack Helm version in the navigation sidebar when connected.
 
-### 2. Bundle Builder
-- **Model Selection**: Choose from multiple AI models including Meta-Llama and more
-- **PEF Configuration**: Configure sequence sizes (16k, 32k, etc.) and batch sizes for each model
-- **Automatic Checkpoint Mapping**: Models are automatically mapped to their corresponding checkpoints
-- **YAML Generation**: Generates properly formatted Kubernetes manifests with BundleTemplate and Bundle resources
-- **Editable YAML**: Manually edit generated YAML before validation
-- **Bundle Validation**: Validate bundle deployability by applying resources to your cluster and checking their status
+### 2. Model Selection
 
-![Bundle Builder - Configuration](images/bundlebuilder1.png)
-*Configure model settings, PEF parameters, and resource requirements*
+The Model Selection page (formerly "Bundle Builder") is where you choose the model(s) you want to serve. **For a single model, pick a profile and click _Deploy Model_ to go straight to deployment — no bundle is created.** Selecting multiple models, using speculative decoding, or opening _Advanced Settings_ switches to the **bundle route**, where your selections are combined into a `ModelBundle` and validated before deployment.
 
-![Bundle Builder - YAML Preview](images/bundlebuilder2.png)
-*Review and edit generated YAML before validation*
+- **Model Selection**: Choose one or more models from those available in your cluster. Models with no matching profile are excluded and called out in a warning banner.
+- **Architecture Selection**: For multi-architecture models, an architecture dropdown must be resolved before profiles are listed (single-architecture models skip this).
+- **Profile Selection**: Pick exactly one `ModelProfile` per model from a row of card tiles. A single matching profile is auto-selected.
+- **Deploy Model (direct path)**: With a single model and a profile chosen, deploy it directly — the model and profile are inlined into the `ModelDeployment`, so **no `ModelBundle` is created**.
 
-### 3. Bundle Deployment
-- **Deployment Management**: Deploy validated bundles to your Kubernetes cluster
-- **Status Monitoring**: Real-time monitoring of deployment status including pod readiness
-- **Error Reporting**: View detailed error messages and status conditions from the cluster
-- **Deployment History**: Track all deployed bundles with creation timestamps
+![Model Selection - models and profiles](images/model-selection-overview.png)
+*Pick a model and profile, then deploy it directly — or open Advanced Settings to build a bundle*
 
-![Bundle Deployment](images/bundledeployment.png)
-*Monitor deployment status and manage bundle lifecycle*
+The remaining steps apply to the **bundle route** — used for multiple models, speculative decoding, or when you open Advanced Settings:
+
+- **Speculative Decoding**: Choosing a speculative-decoding profile surfaces a draft-model dropdown; the draft is added to the bundle and recorded in `spec.specDecodingPairs`.
+- **YAML Generation**: A single `ModelBundle` YAML document is generated automatically as selections change.
+- **Load Existing Bundle**: Start from an existing bundle instead of a blank slate.
+
+![Model Selection - multiple models and speculative decoding](images/model-selection-profiles.png)
+*Bundle multiple models together, including a speculative-decoding draft model*
+
+- **Advanced Options**: Override each model's per-tier batching configuration (explicit batch sizes or "all batch sizes"), and toggle whether the model is swappable.
+
+![Model Selection - advanced options](images/model-selection-advanced-options.png)
+*Override batching configuration per sequence-length tier and set swappable behavior*
+
+- **Validation**: Apply the bundle to the cluster and read back the legalizer result — pass/fail, errors/warnings, and DDR/host memory utilization gauges.
+- **Save**: Save the generated YAML to the `saved_artifacts/` directory.
+- **Create Deployment**: Jump straight to the Model Deployment page after a successful validation.
+
+![Model Selection - validation and save](images/model-selection-validation.png)
+*Validate against the legalizer, view memory utilization, then save or create a deployment*
+
+### 3. Model Deployment
+
+The Model Deployment page (formerly "Bundle Deployment") manages the deployment lifecycle.
+
+- **Existing Deployments**: Lists all `ModelDeployment` resources in the namespace with status (Deployed / Deploying / Not Deployed), and lets you delete them or jump to status monitoring.
+- **Deploy a Model or Bundle**: Deploy a single model (profile inlined directly — arriving here from Model Selection's _Deploy Model_ pre-fills it) or a full `ModelBundle`, with the `ModelDeployment` YAML generated automatically and editable before applying.
+
+![Model Deployment - deploy](images/model-deployment.png)
+*Review existing deployments and generate a ModelDeployment manifest to deploy*
+
+- **Status Monitoring**: Real-time monitoring of the cache pod and default pod, with readiness progress bars, live log tails, and auto-refresh. SambaWiz resolves the real (possibly hash-truncated) pod names from the cluster so monitoring works even for long deployment names.
+
+![Model Deployment - status](images/model-deployment-status.png)
+*Monitor pod readiness and stream logs until the deployment is complete*
 
 ### 4. Playground
-- **Interactive Chat Interface**: Test deployed models with an intuitive chat interface
-- **Multi-Turn Conversations**: Full conversation history maintained for contextual responses
-- **Performance Metrics**: Real-time display of tokens/second, total latency, and time-to-first-token
-- **Code Examples**: View and copy cURL and Python code snippets with syntax highlighting
-- **Model Selection**: Choose from available deployed models to interact with
-- **Chat Management**: Clear conversation history to start fresh interactions
+- **Interactive Chat**: Test deployed models through a chat interface.
+- **Routable Models Only**: The model list comes from the environment's OpenAI-compatible `/v1/models` endpoint, so only models that can actually be served are shown.
+- **Chat & Embeddings**: Chat models use `/v1/chat/completions`; embedding models (detected via the model's `capabilities`) use `/v1/embeddings`.
+- **Performance Metrics**: Real-time tokens/second, total latency, and time-to-first-token.
+- **View Code**: Copy-ready cURL and Python snippets for the selected model.
 
 ![Playground](images/playground.png)
 *Interactive chat interface with performance metrics and code examples*
+
+## Data Caches
+
+Model Selection and the Playground do not call `kubectl` to list models/profiles on every render. Instead they read from local JSON caches under `app/data/`, refreshed when you click **Apply** on the Home page:
+
+- `checkpoint_mapping.json` — from `kubectl get models -o json`: each model's display/resource name, checkpoint architectures and versions, and `capabilities`.
+- `model_profiles.json` — from `kubectl get modelprofiles -o json`: each profile's `model_arch`, `features`, batching config, and `pefs`.
+- `pef_configs.json` — PEF sequence-size/batch-size configurations.
+
+Model Selection joins these caches on `model_arch` to decide which profiles are offered for which model. **These files are gitignored and regenerated by the app** — if you add or change models/profiles in the cluster, return to Home and click Apply to refresh them.
+
 ## Project Structure
 
 ```
 sambawiz/
 ├── app/
-│   ├── api/
-│   │   ├── kubeconfig-validate/    # API endpoint for kubeconfig validation
-│   │   └── validate/               # API endpoint for bundle validation
+│   ├── api/                          # Next.js API routes (kubectl/helm, config, inference)
 │   ├── components/
-│   │   ├── AppLayout.tsx           # Main layout with navigation and version display
-│   │   └── BundleForm.tsx          # Main form component
-│   ├── data/
-│   │   ├── pef_mapping.json        # Model to PEF mappings
-│   ├── utils/
-│   │   └── bundle-yaml-generator.ts # YAML generation logic
-│   ├── lib/
-│   │   └── emotion-cache.ts        # MUI styling cache
-│   ├── types/
-│   │   └── bundle.ts               # TypeScript interfaces
-│   ├── theme.ts                    # MUI theme configuration
-│   └── page.tsx                    # Home page
-├── kubeconfigs/                    # Kubeconfig files (gitignored except example)
-│   ├── your-kubeconfig-name.yaml   # Your kubeconfig (gitignored)
-│   └── kubeconfig_example.yaml     # Example template
-├── public/                         # Static assets
-├── instrumentation.ts              # Server startup initialization
-└── temp/                           # Temporary YAML files (gitignored)
+│   │   ├── AppLayout.tsx             # Navigation layout + version display
+│   │   ├── Home.tsx                  # Home / environment selector / installer
+│   │   ├── ModelSelection.tsx        # Model Selection page
+│   │   ├── ModelDeploymentManager.tsx# Model Deployment page
+│   │   ├── Playground.tsx            # Playground page
+│   │   └── DocumentationPanel.tsx    # In-app docs drawer
+│   ├── data/                         # Auto-generated caches (gitignored)
+│   ├── model-selection/page.tsx      # /model-selection route
+│   ├── model-deployment/page.tsx     # /model-deployment route
+│   ├── playground/page.tsx           # /playground route
+│   ├── types/bundle.ts               # v3 resource TypeScript interfaces
+│   ├── utils/                        # YAML generation, model availability, pod-name logic
+│   └── page.tsx                      # Home page (/)
+├── bin/cli.ts                        # Interactive terminal CLI
+├── docs/                             # Feature documentation (source)
+├── public/docs/                      # Feature documentation served in-app
+├── kubeconfigs/                      # Kubeconfig files (gitignored except example)
+├── saved_artifacts/                  # Saved bundle/deployment YAML (gitignored)
+├── temp/                             # Temporary YAML files (gitignored)
+├── app-config.json                   # Local configuration (gitignored)
+├── app-config.example.json           # Configuration template
+└── VERSION                           # App + minimum SambaStack Helm versions
 ```
 
 ## API Endpoints
 
-### GET /api/kubeconfig-validate
+SambaWiz's UI is backed by Next.js API routes that shell out to `kubectl`/`helm` and proxy inference calls. Key routes include:
 
-Validates kubeconfig and retrieves SambaStack Helm version.
+| Route | Purpose |
+| --- | --- |
+| `GET /api/environments` | List configured environments and current settings |
+| `POST /api/update-config` | Update the selected environment and namespace |
+| `GET /api/check-prerequisites` | Verify `kubectl`/`helm` are installed |
+| `GET /api/kubeconfig-validate` | Validate the kubeconfig and read the SambaStack Helm version |
+| `POST /api/install-sambastack` | Generate and apply a SambaStack install manifest |
+| `POST /api/generate-checkpoint-mapping` | Refresh `checkpoint_mapping.json` from `kubectl get models` |
+| `POST /api/generate-model-profiles` | Refresh `model_profiles.json` from `kubectl get modelprofiles` |
+| `POST /api/validate` | Apply a `ModelBundle` and return its legalizer status |
+| `GET /api/model-bundles` | List validated `ModelBundle` resources |
+| `POST /api/deploy-bundle` | Apply a `ModelDeployment` |
+| `GET /api/deployed-bundles` | List `ModelDeployment` resources and their status |
+| `GET /api/pod-status`, `GET /api/pod-logs` | Monitor deployment pods and stream logs |
+| `GET /api/models` | List routable models (`/v1/models`) for the Playground |
+| `POST /api/chat`, `POST /api/embeddings` | Proxy chat/embedding requests to the environment API |
+| `POST /api/save-artifact`, `GET /api/saved-artifacts` | Save/list generated YAML artifacts |
 
-**Response (Success):**
-```json
-{
-  "success": true,
-  "version": "0.3.496"
-}
-```
-
-**Response (Error):**
-```json
-{
-  "success": false,
-  "error": "Your kubeconfig.yaml seems to be invalid. Please check it and re-run the app. Also ensure that you are on the right network/VPN to access the server."
-}
-```
-
-### POST /api/validate
-
-Validates and applies a bundle YAML to the Kubernetes cluster.
-
-**Request Body:**
-```json
-{
-  "yaml": "apiVersion: sambanova.ai/v1alpha1\nkind: BundleTemplate\n..."
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Bundle validated and applied successfully",
-  "applyOutput": "bundletemplate.sambanova.ai/bt-name created\nbundle.sambanova.ai/b-name created",
-  "statusConditions": "Last Transition Time: ...\nMessage: ...",
-  "bundleName": "b-name",
-  "filePath": "/path/to/temp/bundle-123456.yaml"
-}
-```
+The full set of routes lives under [app/api/](app/api/).
 
 ## Technology Stack
 
-- **Framework**: Next.js 15 (App Router)
-- **UI Library**: Material-UI (MUI) v6
+- **Framework**: Next.js 16 (App Router)
+- **UI Library**: Material-UI (MUI) v7
 - **Language**: TypeScript
 - **Styling**: Emotion (CSS-in-JS)
-- **Backend**: Next.js API Routes with Node.js child_process for kubectl
+- **Backend**: Next.js API routes with Node.js `child_process` for `kubectl`/`helm`
+- **Kubernetes**: `@kubernetes/client-node`, `js-yaml`
+- **Visualization**: `react-gauge-chart` (memory utilization), `react-syntax-highlighter`, `react-markdown`
+- **CLI**: `@inquirer/prompts` (see [README-CLI.md](README-CLI.md))
 
 ## Development
 
 ```bash
-# Run development server with hot reload
-npm run dev
-
-# Type checking
-npm run type-check
-
-# Linting
-npm run lint
-
-# Build for production
-npm run build
+npm run dev         # Development server with hot reload
+npm run type-check  # TypeScript checking
+npm run lint        # Linting
+npm run build       # Production build
+npm run dev-cli     # Run the interactive CLI
 ```
 
 ## Testing
 
-SambaWiz includes a comprehensive test suite covering business logic, API integration, and feature validation.
-
-### Running Tests
+SambaWiz includes a Jest test suite covering business logic, YAML generation, and API integration.
 
 ```bash
-# Run all automated tests
-npm test
-
-# Run tests in watch mode (auto-rerun on file changes)
-npm test -- --watch
-
-# Run tests with coverage report
-npm test -- --coverage
-
-# Run specific test file
-npm test bundle-yaml-generator.test.ts
-
-# Run tests for a specific directory
-npm test app/utils/__tests__
+npm test                              # Run all tests
+npm run test:watch                    # Watch mode
+npm run test:coverage                 # Coverage report
+npm test bundle-yaml-generator.test.ts # A specific test file
 ```
 
-### Test Documentation
+Detailed test documentation — philosophy, categories, coverage, and manual integration procedures — is in [app/utils/__tests__/TESTS.md](app/utils/__tests__/TESTS.md).
 
-Comprehensive test documentation is available at [app/utils/__tests__/TESTS.md](app/utils/__tests__/TESTS.md), which includes:
-- Test philosophy and guidelines for writing new tests
-- Detailed breakdown of all test categories
-- Test coverage and statistics
-- Manual integration test procedures for new features
+The suite focuses on:
+- ✅ Model/profile availability and filtering logic
+- ✅ `ModelBundle` and `ModelDeployment` YAML generation and parsing
+- ✅ Deployment status and pod-name resolution
+- ✅ API integration for the page components and generators
+- ✅ CLI behavior
 
-### Test Coverage
-
-The test suite focuses on critical business logic:
-- ✅ Model availability and filtering logic
-- ✅ Bundle YAML generation
-- ✅ PEF configuration parsing and validation
-- ✅ Deployment status calculation
-- ✅ API integration for all page components
-- ✅ Kubernetes integration tests
-- ✅ Data transformations and error handling
-
-Tests explicitly **do not** cover:
-- ❌ UI rendering details
-- ❌ Third-party libraries (Material-UI, React internals)
-- ❌ Browser features
+It intentionally does **not** cover UI rendering details, third-party libraries, or browser features.
 
 ## Security Considerations
 
-- `app-config.json` and all files in `kubeconfigs/` (except the example) are gitignored to prevent credential leaks
-- Temporary YAML files stored in the `temp/` directory are also gitignored
-- The validation endpoint runs kubectl commands server-side with appropriate timeouts
-- Kubeconfig validation is performed on app startup to ensure cluster connectivity
-- Consider implementing authentication/authorization for production deployments
-- Never commit sensitive configuration files or credentials to version control
-- Use `app-config.example.json` as a template (safe to commit)
+- `app-config.json`, everything in `kubeconfigs/` (except the example), `saved_artifacts/`, `temp/`, and the auto-generated caches in `app/data/` are all gitignored to prevent leaking credentials or environment details.
+- Use `app-config.example.json` (dummy values) as a template — it is safe to commit.
+- API routes run `kubectl`/`helm` server-side with timeouts.
+- Never commit sensitive configuration files, kubeconfigs, or API keys.
+- Consider adding authentication/authorization before exposing SambaWiz beyond local use.
 
 ## Troubleshooting
 
 ### Configuration Issues
 
-**Problem: Application fails to start or shows configuration errors**
+**Application fails to start or shows configuration errors**
+- Ensure `app-config.json` exists in the `sambawiz/` root (copy `app-config.example.json`, or let the app auto-create it).
+- Ensure `currentKubeconfig` matches a key in `kubeconfigs`, and that each entry has a valid `file` path and `namespace`.
+- For the Playground, ensure `apiDomain` and `apiKey` are set for the current environment.
+- Verify the referenced kubeconfig file actually exists at the given path.
 
-1. **Verify `app-config.json` exists**
-   - The `app-config.json` file must exist in the sambawiz folder root directory
-   - If it doesn't exist, create it by copying the example file:
-     ```bash
-     cp app-config.example.json app-config.json
-     ```
+### No Models or Profiles Appear on Model Selection
 
-2. **Check `app-config.json` fields**
-   - Ensure all required fields are populated:
-     - `checkpointsDir`: Must be the **root** that the relative paths in the auto-generated `checkpoint_mapping.json` are appended to — for GCS the bucket root (`gs://your-bucket-name/`, not a deeper sub-path), or an NFS/local directory (`/mnt/nfs/checkpoints/`). If this is wrong, you will see an error in your cache pod logs during deployment: `[CRITICAL] Failed to access source storage`
-     - `currentKubeconfig`: Must match an environment name in the `kubeconfigs` object
-     - `kubeconfigs`: Must contain at least one environment with:
-       - `file`: Path to a kubeconfig file (e.g., `kubeconfigs/your-environment.yaml`)
-       - `namespace`: Kubernetes namespace for the environment
-       - `apiDomain`: Required for Playground functionality
-       - `apiKey`: Required for Playground functionality
-
-3. **Verify kubeconfig files exist**
-   - Ensure the kubeconfig file specified in `app-config.json` exists at the specified path
-   - Example: If `file` is `"kubeconfigs/production.yaml"`, verify the file exists at `./kubeconfigs/production.yaml`
-   - The kubeconfig file must be valid and contain proper cluster credentials
+- The model/profile lists come from local caches. Go to **Home** and click **Apply** to refresh them from the cluster.
+- If a model is listed in the warning banner as excluded, it has no `ModelProfile` matching any of its checkpoint architectures in the cluster.
 
 ### Version Compatibility Issues
 
-**Problem: Kubeconfig validation fails or version mismatch errors**
-
-1. **Check SambaStack Helm version**
-   - Verify your SambaStack Helm chart version meets the minimum requirement
-   - Minimum required version: as specified in the [VERSION](VERSION) file
-   - To check your current SambaStack Helm version:
-     ```bash
-     helm list --kubeconfig ./kubeconfigs/your-environment.yaml -n <namespace>
-     ```
-   - Look for the SambaStack chart in the output and verify the CHART VERSION column
-   - If your version is below the minimum, upgrade your SambaStack deployment
-
-2. **Check Node.js and npm versions**
-   - Minimum required Node.js version: **18+** (as specified in Prerequisites)
-   - To check your current versions:
-     ```bash
-     node --version
-     npm --version
-     ```
-   - If your versions are below the minimum, upgrade Node.js and npm:
-     - Visit [nodejs.org](https://nodejs.org/) for installation instructions
-     - npm is typically included with Node.js
+- Verify your SambaStack Helm version meets the minimum in the [VERSION](VERSION) file:
+  ```bash
+  helm list --kubeconfig ./kubeconfigs/your-environment.yaml -n <namespace>
+  ```
+- Verify Node.js is 18+:
+  ```bash
+  node --version && npm --version
+  ```
 
 ### Connection Issues
 
-**Problem: Kubeconfig validation fails with connection errors**
-
-- Ensure you are connected to the correct network or VPN required to access your Kubernetes cluster
-- Verify that `kubectl` and `helm` are installed and accessible in your PATH:
+- Confirm you are on the correct network/VPN for your cluster.
+- Confirm `kubectl` and `helm` are on your `PATH`:
   ```bash
-  kubectl version --client
-  helm version
+  kubectl version --client && helm version
   ```
-- Test cluster connectivity manually:
+- Test connectivity:
   ```bash
   kubectl get nodes --kubeconfig ./kubeconfigs/your-environment.yaml
   ```
 
 ### Common Error Messages
 
-- **"Your kubeconfig.yaml seems to be invalid"**: Check that the kubeconfig file exists, is properly formatted YAML, and contains valid cluster credentials
-- **"Version mismatch"**: Your SambaStack Helm version is below the minimum required version (as specified in the [VERSION](VERSION) file)
-- **"Cannot find module" or "ENOENT"**: The kubeconfig file path in `app-config.json` is incorrect or the file doesn't exist
-- **"Connection refused" or "timeout"**: Check your network/VPN connection and cluster accessibility
+- **"Your kubeconfig.yaml seems to be invalid"** — the kubeconfig file is missing, malformed, or lacks valid cluster credentials.
+- **Version mismatch** — your SambaStack Helm version is below the minimum in the [VERSION](VERSION) file.
+- **"Cannot find module" / "ENOENT"** — the kubeconfig `file` path in `app-config.json` is wrong or the file doesn't exist.
+- **"Connection refused" / "timeout"** — check your network/VPN and cluster accessibility.
 
 ---
 

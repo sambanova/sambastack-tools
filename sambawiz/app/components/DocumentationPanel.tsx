@@ -13,7 +13,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import ReactMarkdown from 'react-markdown';
 
 interface DocumentationPanelProps {
-  docFile: string; // e.g., 'home.md', 'bundle-builder.md'
+  docFile: string; // e.g., 'home.md', 'model-selection.md'
 }
 
 export default function DocumentationPanel({ docFile }: DocumentationPanelProps) {

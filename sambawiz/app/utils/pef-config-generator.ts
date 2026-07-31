@@ -11,7 +11,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -32,7 +31,6 @@ interface KubectlPefItem {
   };
   spec?: {
     metadata?: {
-      task_name?: string;
       batch_size?: number;
       dynamic_dims?: {
         batch_size?: {
@@ -271,68 +269,6 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
     }
 
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
-
-    // Apply DYT precedence logic (DYT is always enabled)
-    const pefMappingPath = path.join(process.cwd(), 'app', 'data', 'pef_mapping.json');
-    if (!existsSync(pefMappingPath)) {
-      return {
-        success: false,
-        error: 'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.',
-      };
-    }
-    const dytEnabled = true;
-    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
-    for (const pefNames of Object.values(pefMapping)) {
-      const hasDyt = pefNames.some((name) => name.includes('dyt') && configs[name] !== undefined);
-      if (hasDyt) {
-        for (const pefName of pefNames) {
-          if (dytEnabled ? !pefName.includes('dyt') : pefName.includes('dyt')) {
-            delete configs[pefName];
-          }
-        }
-      }
-    }
-
-    // Detect embedding (and other typed) models and update checkpoint_mapping.json
-    const checkpointMappingPath = path.join(process.cwd(), 'app', 'data', 'checkpoint_mapping.json');
-    if (existsSync(checkpointMappingPath)) {
-      const checkpointMapping: Record<string, Record<string, unknown>> = JSON.parse(
-        readFileSync(checkpointMappingPath, 'utf-8')
-      );
-      let checkpointMappingUpdated = false;
-
-      // spec.metadata is not included in list responses — fetch one PEF per model individually
-      for (const [modelName, pefNames] of Object.entries(pefMapping)) {
-        if (!checkpointMapping[modelName]) continue;
-        if (checkpointMapping[modelName].model_type) continue; // already set
-
-        // Find the first PEF for this model that exists in the cluster
-        const representativePef = pefNames.find((name) => items.some((item) => item.metadata?.name === name));
-        if (!representativePef) continue;
-
-        try {
-          const individualOutput = execSync(`kubectl -n ${namespace} get pef ${representativePef} -o json`, {
-            encoding: 'utf-8',
-            env: { ...process.env, KUBECONFIG: kubeconfigPath },
-            maxBuffer: 2 * 1024 * 1024,
-          });
-          const individualPef: KubectlPefItem = JSON.parse(individualOutput);
-          const taskName = individualPef.spec?.metadata?.task_name;
-          if (taskName) {
-            checkpointMapping[modelName].model_type = taskName;
-            checkpointMappingUpdated = true;
-            console.log(`[PEF Generator] Set model_type="${taskName}" for ${modelName}`);
-          }
-        } catch (err) {
-          console.warn(`[PEF Generator] Failed to get task_name for ${modelName}:`, err);
-        }
-      }
-
-      if (checkpointMappingUpdated) {
-        writeFileSync(checkpointMappingPath, JSON.stringify(checkpointMapping, null, 2), 'utf-8');
-        console.log('[PEF Generator] ✓ Updated checkpoint_mapping.json with model_type fields');
-      }
-    }
 
     // Write to file
     const outputPath = path.join(process.cwd(), 'app', 'data', 'pef_configs.json');

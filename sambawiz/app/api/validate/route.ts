@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
+import yaml from 'js-yaml';
 
 interface KubeconfigEntry {
   file: string;
@@ -10,46 +11,49 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
 
 /**
- * Extract bundle name from YAML content
+ * Extract bundle name from a `kind: ModelBundle` YAML document.
+ * v3's `/api/validate` only ever receives a single ModelBundle document (no
+ * `---` multi-doc split needed, unlike the old BundleTemplate+Bundle pair).
  */
-function extractBundleName(yaml: string): string | null {
-  const lines = yaml.split('\n');
-  let inBundleSection = false;
+interface ModelBundleDocument {
+  kind?: string;
+  metadata?: {
+    name?: string;
+  };
+}
 
-  for (const line of lines) {
-    // Check if we're in the Bundle section (not BundleTemplate)
-    if (line.includes('kind: Bundle') && !line.includes('kind: BundleTemplate')) {
-      inBundleSection = true;
-      continue;
-    }
-
-    // Look for metadata.name in the Bundle section
-    if (inBundleSection && line.includes('name:')) {
-      const match = line.match(/name:\s*(.+)/);
-      if (match) {
-        return match[1].trim();
-      }
-    }
-
-    // Reset if we hit another resource separator
-    if (line.trim() === '---') {
-      inBundleSection = false;
-    }
+function extractBundleName(yamlContent: string): string | null {
+  let doc: unknown;
+  try {
+    doc = yaml.load(yamlContent);
+  } catch {
+    return null;
   }
 
-  return null;
+  if (!doc || typeof doc !== 'object') {
+    return null;
+  }
+
+  const modelBundle = doc as ModelBundleDocument;
+  if (modelBundle.kind !== 'ModelBundle') {
+    return null;
+  }
+
+  const name = modelBundle.metadata?.name;
+  return typeof name === 'string' && name.trim().length > 0 ? name.trim() : null;
 }
 
 /**
- * Extract validation status from kubectl JSON output
+ * Extract validation status from kubectl JSON output.
+ * Status shape confirmed identical to the old V2 `Bundle` status (Q5 in
+ * v3plan.md) — only the resource kind being queried changes.
  */
-interface BundleCondition {
+interface ModelBundleCondition {
   type: string;
   status: string;
   reason: string;
@@ -69,9 +73,9 @@ interface LegalizerInfo {
   };
 }
 
-interface BundleStatus {
+interface ModelBundleStatusResource {
   status?: {
-    conditions?: BundleCondition[];
+    conditions?: ModelBundleCondition[];
     legalizerInfo?: LegalizerInfo;
   };
 }
@@ -83,7 +87,7 @@ function extractValidationStatus(jsonOutput: string): {
   legalizerInfo?: LegalizerInfo;
 } {
   try {
-    const bundle: BundleStatus = JSON.parse(jsonOutput);
+    const bundle: ModelBundleStatusResource = JSON.parse(jsonOutput);
 
     if (!bundle.status?.conditions || bundle.status.conditions.length === 0) {
       return {
@@ -232,7 +236,7 @@ export async function POST(request: NextRequest) {
     // Get bundle status using JSON output
     let validationStatus;
     try {
-      const jsonOutput = execSync(`kubectl -n ${namespace} get bundle.sambanova.ai ${bundleName} -o json`, {
+      const jsonOutput = execSync(`kubectl -n ${namespace} get modelbundle.sambanova.ai ${bundleName} -o json`, {
         encoding: 'utf-8',
         env,
         timeout: 30000,
@@ -240,7 +244,7 @@ export async function POST(request: NextRequest) {
 
       validationStatus = extractValidationStatus(jsonOutput);
     } catch (error) {
-      // kubectl get bundle.sambanova.ai failed
+      // kubectl get modelbundle.sambanova.ai failed
       const stderr = (error && typeof error === 'object' && 'stderr' in error)
         ? String(error.stderr)
         : '';
@@ -250,7 +254,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: 'kubectl get bundle.sambanova.ai failed',
+          error: 'kubectl get modelbundle.sambanova.ai failed',
           message: 'Bundle was applied but status check failed',
           applyOutput: applyOutput.trim(),
           stderr,

@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { normalizeCheckpointsDir } from '../../utils/checkpoints-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -13,7 +12,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -28,8 +26,6 @@ export async function GET() {
     let defaultApiKey = '';
     let defaultApiDomain = '';
     let defaultUiDomain = '';
-    let checkpointsDir = '';
-    let checkpointsDirWarning: string | undefined;
     let kubeconfigs: Record<string, KubeconfigEntry> = {};
 
     if (fs.existsSync(configPath)) {
@@ -42,9 +38,6 @@ export async function GET() {
 
         // Get current environment and its settings
         defaultEnvironment = config.currentKubeconfig || null;
-        const normalizedCheckpointsDir = normalizeCheckpointsDir(config.checkpointsDir || '');
-        checkpointsDir = normalizedCheckpointsDir.value;
-        checkpointsDirWarning = normalizedCheckpointsDir.warning;
         kubeconfigs = config.kubeconfigs || {};
 
         // Get namespace, API key, and domains for current environment
@@ -67,8 +60,6 @@ export async function GET() {
       defaultApiKey,
       defaultApiDomain,
       defaultUiDomain,
-      checkpointsDir,
-      checkpointsDirWarning,
       kubeconfigs
     });
 
@@ -80,8 +71,7 @@ export async function GET() {
       environments: [],
       defaultEnvironment: null,
       defaultNamespace: 'default',
-      defaultApiKey: '',
-      checkpointsDir: ''
+      defaultApiKey: ''
     }, { status: 500 });
   }
 }
