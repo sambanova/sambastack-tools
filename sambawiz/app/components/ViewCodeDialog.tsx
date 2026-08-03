@@ -24,6 +24,12 @@ interface ViewCodeDialogProps {
   apiDomain: string;
   modelName: string;
   isEmbedding?: boolean;
+  // Audio model modes — mutually exclusive with isEmbedding and each other.
+  isAsr?: boolean;
+  isTts?: boolean;
+  // Selected qwen3-tts voice/language, echoed into the TTS snippets.
+  ttsVoice?: string;
+  ttsLanguage?: string;
 }
 
 interface TabPanelProps {
@@ -55,6 +61,10 @@ export default function ViewCodeDialog({
   apiDomain,
   modelName,
   isEmbedding = false,
+  isAsr = false,
+  isTts = false,
+  ttsVoice = 'vivian',
+  ttsLanguage = 'english',
 }: ViewCodeDialogProps) {
   const [selectedTab, setSelectedTab] = useState(0);
   const [copiedCurl, setCopiedCurl] = useState(false);
@@ -70,15 +80,37 @@ export default function ViewCodeDialog({
   // Hide API key in display
   const displayApiKey = '•'.repeat(Math.min(apiKey.length, 32));
 
-  const curlCodeDisplay = isEmbedding
-    ? `curl ${normalizedApiDomain}/v1/embeddings \\
+  // Build the cURL snippet for the active model mode, parameterized by the key
+  // value so we can render a masked version and copy the real one.
+  const buildCurl = (key: string): string => {
+    if (isEmbedding) {
+      return `curl ${normalizedApiDomain}/v1/embeddings \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${displayApiKey}" \\
+  -H "Authorization: Bearer ${key}" \\
   -d '{
     "input": "The quick brown fox jumps over the lazy dog",
     "model": "${modelName}"
-  }'`
-    : `curl -H "Authorization: Bearer ${displayApiKey}" \\
+  }'`;
+    }
+    if (isAsr) {
+      return `curl ${normalizedApiDomain}/v1/audio/transcriptions \\
+  -H "Authorization: Bearer ${key}" \\
+  -F "model=${modelName}" \\
+  -F "file=@audio.mp3" \\
+  -F "language=en"`;
+    }
+    if (isTts) {
+      return `curl ${normalizedApiDomain}/v1/audio/speech \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${modelName}",
+    "input": "Today is a wonderful day to build something people love!",
+    "voice": "${ttsVoice}",
+    "language": "${ttsLanguage}"
+  }'`;
+    }
+    return `curl -H "Authorization: Bearer ${key}" \\
      -H "Content-Type: application/json" \\
      -d '{
 	"stream": false,
@@ -95,39 +127,15 @@ export default function ViewCodeDialog({
 	]
 	}' \\
      -X POST ${normalizedApiDomain}/v1/chat/completions`;
+  };
 
-  const curlCodeActual = isEmbedding
-    ? `curl ${normalizedApiDomain}/v1/embeddings \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer ${apiKey}" \\
-  -d '{
-    "input": "The quick brown fox jumps over the lazy dog",
-    "model": "${modelName}"
-  }'`
-    : `curl -H "Authorization: Bearer ${apiKey}" \\
-     -H "Content-Type: application/json" \\
-     -d '{
-	"stream": false,
-	"model": "${modelName}",
-	"messages": [
-		{
-			"role": "system",
-			"content": "You are a helpful assistant"
-		},
-		{
-			"role": "user",
-			"content": "What is 3+3?"
-		}
-	]
-	}' \\
-     -X POST ${normalizedApiDomain}/v1/chat/completions`;
-
-  const pythonCodeDisplay = isEmbedding
-    ? `from sambanova import SambaNova
+  const buildPython = (key: string): string => {
+    if (isEmbedding) {
+      return `from sambanova import SambaNova
 
 client = SambaNova(
     base_url="${normalizedApiDomain}/v1",
-    api_key="${displayApiKey}",
+    api_key="${key}",
 )
 
 response = client.embeddings.create(
@@ -135,11 +143,62 @@ response = client.embeddings.create(
     input="The quick brown fox jumps over the lazy dog"
 )
 
-print(response)`
-    : `from sambanova import SambaNova
+print(response)`;
+    }
+    if (isAsr) {
+      return `from sambanova import SambaNova
 
 client = SambaNova(
-    api_key="${displayApiKey}",
+    api_key="${key}",
+    base_url="${normalizedApiDomain}/v1",
+)
+
+with open("audio.mp3", "rb") as audio_file:
+    response = client.audio.transcriptions.create(
+        model="${modelName}",
+        file=audio_file,
+        language="en"
+    )
+
+print(response.text)`;
+    }
+    if (isTts) {
+      // TTS streams Server-Sent Events of base64 float32 PCM chunks, so use a
+      // raw streaming request rather than the SDK helper.
+      return `import base64
+import json
+import requests
+
+resp = requests.post(
+    "${normalizedApiDomain}/v1/audio/speech",
+    headers={"Authorization": "Bearer ${key}", "Content-Type": "application/json"},
+    json={
+        "model": "${modelName}",
+        "input": "Today is a wonderful day to build something people love!",
+        "voice": "${ttsVoice}",
+        "language": "${ttsLanguage}",
+    },
+    stream=True,
+)
+
+pcm = bytearray()
+for line in resp.iter_lines():
+    if not line or not line.startswith(b"data:"):
+        continue
+    payload = line[len(b"data:"):].strip()
+    if payload == b"[DONE]":
+        break
+    event = json.loads(payload)
+    if event.get("audio_b64"):
+        pcm += base64.b64decode(event["audio_b64"])
+
+# pcm is float32 little-endian PCM @ 24 kHz mono
+print(f"received {len(pcm) // 4} samples")`;
+    }
+    return `from sambanova import SambaNova
+
+client = SambaNova(
+    api_key="${key}",
     base_url="${normalizedApiDomain}/v1",
 )
 
@@ -154,39 +213,12 @@ response = client.chat.completions.create(
 )
 
 print(response.choices[0].message.content)`;
+  };
 
-  const pythonCodeActual = isEmbedding
-    ? `from sambanova import SambaNova
-
-client = SambaNova(
-    base_url="${normalizedApiDomain}/v1",
-    api_key="${apiKey}",
-)
-
-response = client.embeddings.create(
-    model="${modelName}",
-    input="The quick brown fox jumps over the lazy dog"
-)
-
-print(response)`
-    : `from sambanova import SambaNova
-
-client = SambaNova(
-    api_key="${apiKey}",
-    base_url="${normalizedApiDomain}/v1",
-)
-
-response = client.chat.completions.create(
-    model="${modelName}",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant"},
-        {"role": "user", "content": "What is 3+3?"}
-    ],
-    temperature=0.1,
-    top_p=0.1
-)
-
-print(response.choices[0].message.content)`;
+  const curlCodeDisplay = buildCurl(displayApiKey);
+  const curlCodeActual = buildCurl(apiKey);
+  const pythonCodeDisplay = buildPython(displayApiKey);
+  const pythonCodeActual = buildPython(apiKey);
 
   const handleCopyCurl = async () => {
     try {

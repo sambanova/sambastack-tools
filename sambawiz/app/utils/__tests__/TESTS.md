@@ -2,9 +2,9 @@
 
 This document provides a comprehensive overview of all tests in the SambaWiz application. Tests are organized by page/component and categorized by functionality type (UI components vs. core functionality).
 
-**Last Updated:** 2026-07-28 — Restricted the "Enable prompt caching" checkbox in bundle mode: it now shows only when the bundle contains exactly one model whose profile supports `prompt_caching` (KV cache management, `ENABLE_KV_CACHE_MANAGER`, rejects a multi-model bundle whose experts span more than one `ckpt_sharing_uuid`); model mode (single model + profile) is unchanged. Added 2 bundle-mode Model Deployment Manager integration tests. Earlier (2026-07-27): Added an "Enable prompt caching" checkbox above the Section-2 deployment YAML: it only shows when the selected model's profile — or, for a bundle, any referenced profile — advertises the `prompt_caching` feature (from the `/api/model-profiles` cache), and checking it injects `engineConfig.env_vars` (`ENABLE_KV_CACHE_MANAGER`/`KV_CACHE_INCLUDE_STATS_IN_RESPONSE: "true"`) into the YAML (removed on uncheck; reset on each new selection). Added 2 Model Deployment Manager integration tests. Earlier (same date): On the Model Deployment page, renamed the Section-1 table column "Model Bundle" → "Model / Bundle" and, for a model-based deployment (inline `spec.models`, empty `spec.bundle`), now show the referenced Model CR's display name (`spec.name`) instead of a blank cell; `/api/model-deployment` resolves crname → `spec.name` via a single `kubectl get models` call (only when a model-based deployment is present). Added 1 Model Deployment Manager integration test and documented 2 previously-undocumented integration tests. Earlier (2026-07-23): Deprecated the user-facing term "bundle deployment" in favor of "model deployment" throughout the Model Deployment page copy, API response/log messages, doc comments, and docs/README (code identifiers like `getBundleDeploymentStatus`/`bundleDeployments` and the historical `BundleDeployment` CR-kind references are unchanged); no test behavior affected. Earlier (same date): Redesigned the Step-2 profile card's batching summary: a titled "Context / Max Batch Size" two-column layout, tiers sorted by descending sequence length, each tier reduced to just its max batch size (was a raw `tier: [batch sizes]` list); added 1 model-selection test and exported `parseTierKey` from the generator. Earlier (same date): renamed the user-facing "Bundle" term to "Model Bundle" on the Model Deployment page (bundle-picker `InputLabel`/`Select` label, the Section-1 table column header, and the Section-2 empty-state/help copy); the three Model Deployment Manager tests now query the picker via `findByLabelText('Model Bundle')`. Also hardened `/api/model-bundles` to only surface `kind: ModelBundle` items (belt-and-suspenders over the already-ModelBundle-scoped `kubectl get modelbundle.sambanova.ai` query), keeping the deprecated `Bundle` CR out of the picker. No tests added/removed (165 total). Earlier (2026-07-22): Made the Step-3 override drop any sequence-length tier whose batch sizes are all unchecked (no more `batch_sizes: []` in the emitted YAML; the embedding `is_default` re-targets to the smallest remaining tier); added 2 generator tests. Earlier (same date): redesigned Model Selection Section 3 into "Advanced Options": each model now shows an "Override Batching Config" subsection (the existing grid) plus a "Swappable" True/False toggle (default True, only emitted to the YAML as `modelSettings.swappable:false` when set to False); added 4 tests (1 UI toggle test + 3 generator tests) and updated the Section-3 label/aria-label assertions. Earlier (2026-07-21): added 7 `isPodProbeFailure` unit tests: a fresh deployment whose pod is still `PodInitializing`/`ContainerCreating` no longer reports "Deployment failed" (the logs probe's transient "command failed" is now excluded), while genuine failures (not found, no resources, CrashLoopBackOff, ...) still report. Earlier (same date): added a Model Deployment Manager integration test covering the long-name warning — it previews the operator-shortened pod names (fetched from the new `/api/predicted-pod-names` route) and lists only the pods actually truncated+hashed. Earlier still: rewritten for the **v3 bundle** migration (SambaWiz 2.0.0) — the old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
-**Total Tests:** 191 automated across 13 suites + a legacy manual test plan
-**Test Status:** ✅ All 191 tests passing (13/13 suites)
+**Last Updated:** 2026-08-03 — Added audio (ASR + TTS) support to the Playground. ASR: `audio`-capability non-TTS models (e.g. `Whisper-Large-v3`) replace the text box with a mic-record button + audio-file upload; the clip is posted as `multipart/form-data` to the new `/api/transcribe` route (→ `/v1/audio/transcriptions`) and the transcription returns as the assistant reply. TTS: models whose id contains `tts` (e.g. `qwen3-tts`, detected by name even without a `checkpoint_mapping` entry) show Voice/Language selectors; text is posted to the new `/api/speech` route, which forwards the selected routable model id (e.g. `qwen3-tts-talker`) to `/v1/audio/speech` — overridable via an app-config `ttsModel` when the routable id differs from the id the speech handler accepts — aggregates the SSE stream of base64 float32-PCM chunks, and wraps them in a WAV for playback. The `View Code` dialog now emits ASR/TTS snippets. Added 2 playground tests (mic controls shown for ASR, Voice/Language shown for TTS). Earlier (same date): Added image (vision) support to the Playground: when the selected model's `capabilities` in the local `checkpoint_mapping` include `"vision"`, an attach-image button appears next to the message box (multiple images, ≤10 MB each), staged images preview with per-image remove, and messages carrying images are sent as OpenAI-style multimodal content parts (`text` + `image_url` data URLs) through the unchanged `/api/chat` route. Added 2 playground tests (attach-image button shows for a vision model, hidden for a text-only model). Also reconciled the test-count totals against the jest runner (now 199 across 13 suites): corrected stale counts for `model-selection.test.tsx` (18) and `bundle-yaml-generator.test.ts` (48), whose detail tables enumerate only their primary cases. Earlier (2026-07-28): Restricted the "Enable prompt caching" checkbox in bundle mode: it now shows only when the bundle contains exactly one model whose profile supports `prompt_caching` (KV cache management, `ENABLE_KV_CACHE_MANAGER`, rejects a multi-model bundle whose experts span more than one `ckpt_sharing_uuid`); model mode (single model + profile) is unchanged. Added 2 bundle-mode Model Deployment Manager integration tests. Earlier (2026-07-27): Added an "Enable prompt caching" checkbox above the Section-2 deployment YAML: it only shows when the selected model's profile — or, for a bundle, any referenced profile — advertises the `prompt_caching` feature (from the `/api/model-profiles` cache), and checking it injects `engineConfig.env_vars` (`ENABLE_KV_CACHE_MANAGER`/`KV_CACHE_INCLUDE_STATS_IN_RESPONSE: "true"`) into the YAML (removed on uncheck; reset on each new selection). Added 2 Model Deployment Manager integration tests. Earlier (same date): On the Model Deployment page, renamed the Section-1 table column "Model Bundle" → "Model / Bundle" and, for a model-based deployment (inline `spec.models`, empty `spec.bundle`), now show the referenced Model CR's display name (`spec.name`) instead of a blank cell; `/api/model-deployment` resolves crname → `spec.name` via a single `kubectl get models` call (only when a model-based deployment is present). Added 1 Model Deployment Manager integration test and documented 2 previously-undocumented integration tests. Earlier (2026-07-23): Deprecated the user-facing term "bundle deployment" in favor of "model deployment" throughout the Model Deployment page copy, API response/log messages, doc comments, and docs/README (code identifiers like `getBundleDeploymentStatus`/`bundleDeployments` and the historical `BundleDeployment` CR-kind references are unchanged); no test behavior affected. Earlier (same date): Redesigned the Step-2 profile card's batching summary: a titled "Context / Max Batch Size" two-column layout, tiers sorted by descending sequence length, each tier reduced to just its max batch size (was a raw `tier: [batch sizes]` list); added 1 model-selection test and exported `parseTierKey` from the generator. Earlier (same date): renamed the user-facing "Bundle" term to "Model Bundle" on the Model Deployment page (bundle-picker `InputLabel`/`Select` label, the Section-1 table column header, and the Section-2 empty-state/help copy); the three Model Deployment Manager tests now query the picker via `findByLabelText('Model Bundle')`. Also hardened `/api/model-bundles` to only surface `kind: ModelBundle` items (belt-and-suspenders over the already-ModelBundle-scoped `kubectl get modelbundle.sambanova.ai` query), keeping the deprecated `Bundle` CR out of the picker. No tests added/removed (165 total). Earlier (2026-07-22): Made the Step-3 override drop any sequence-length tier whose batch sizes are all unchecked (no more `batch_sizes: []` in the emitted YAML; the embedding `is_default` re-targets to the smallest remaining tier); added 2 generator tests. Earlier (same date): redesigned Model Selection Section 3 into "Advanced Options": each model now shows an "Override Batching Config" subsection (the existing grid) plus a "Swappable" True/False toggle (default True, only emitted to the YAML as `modelSettings.swappable:false` when set to False); added 4 tests (1 UI toggle test + 3 generator tests) and updated the Section-3 label/aria-label assertions. Earlier (2026-07-21): added 7 `isPodProbeFailure` unit tests: a fresh deployment whose pod is still `PodInitializing`/`ContainerCreating` no longer reports "Deployment failed" (the logs probe's transient "command failed" is now excluded), while genuine failures (not found, no resources, CrashLoopBackOff, ...) still report. Earlier (same date): added a Model Deployment Manager integration test covering the long-name warning — it previews the operator-shortened pod names (fetched from the new `/api/predicted-pod-names` route) and lists only the pods actually truncated+hashed. Earlier still: rewritten for the **v3 bundle** migration (SambaWiz 2.0.0) — the old V2 `BundleTemplate`+`Bundle` generator/parser tests were replaced with V3 `ModelBundle` / `ModelProfile` / `ModelDeployment` tests; new suites were added for the parser, the CLI, and the two cache-generation routes; the two node-env route suites now run (jest.setup.ts guarded for `window`).
+**Total Tests:** 201 automated across 13 suites + a legacy manual test plan
+**Test Status:** ✅ All 201 tests passing (13/13 suites)
 **Focus:** Core business logic (V3 YAML generation/parsing, model↔profile join, batching config), API/route integration, and CLI parity
 
 ## Table of Contents
@@ -61,17 +61,21 @@ This test suite follows these principles:
 
 ### Playground Page
 
-**File:** [playground.test.tsx](playground.test.tsx) · **Component:** `Playground` · **Tests:** 1
+**File:** [playground.test.tsx](playground.test.tsx) · **Component:** `Playground` · **Tests:** 5
 
 | Test | Type | Description |
 |------|------|-------------|
 | should fetch models, environments, and checkpoint mapping on mount | Core | Verifies `/api/models`, `/api/environments`, and `/api/checkpoint-mapping` are called on mount |
+| shows the attach-image button for a vision-capable model | Vision | Attach-image affordance appears when the selected model's `capabilities` include `"vision"` |
+| hides the attach-image button for a text-only model | Vision | Attach-image affordance is absent for a text-only (non-vision) model |
+| shows the mic record + upload controls for an ASR (Whisper) audio model | Audio | An `audio`-capability, non-TTS model shows the mic + audio-upload controls and no TTS voice selector |
+| shows the voice and language selectors for a TTS audio model | Audio | A TTS model (name matches `tts`, detected even without a `checkpoint_mapping` entry) shows Voice/Language selectors and no mic control |
 
 ---
 
 ### Model Selection Page (V3)
 
-**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 10
+**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 18
 
 Real UI-behavior tests for the V3 Model Selection flow (the old suite was a single API-integration
 test). Drives the full flow: pick models → pick one profile per model → override batching → wire spec
@@ -79,15 +83,24 @@ decoding → observe the generated `ModelBundle` YAML.
 
 | Test | Description |
 |------|-------------|
-| lists only models with a matching profile and warns about excluded models (Q4) | Models with no `model_arch`→profile join are blocked, with a UI warning |
-| auto-selects and collapses the only matching profile for a single-profile model | Single-profile models are auto-selected and their row starts collapsed |
-| renders one card tile per matching profile, single-selects, and collapses on selection | Card-tile row behavior: one tile per profile, single-select, collapse-on-select |
+| lists only models with a matching profile and warns about excluded models (Q4) | Models with no `model_arch`→profile join are excluded from the picker, with a UI warning naming them |
+| shows each model's capabilities as chips in the model picker | Each picker option renders the model's `capabilities` (e.g. `text`) as chips beside its name |
+| auto-selects and collapses the only matching profile for a single-profile model | Single-profile models are auto-selected, the row starts collapsed to a "Profile:" summary, and "Change selection" re-expands it |
+| renders one card tile per matching profile, single-selects, and collapses on selection | Card-tile row behavior: one tile per profile, starts expanded with none selected, single-select, collapse-on-select to the chosen profile's display name |
+| leaves prompt_caching profiles selectable when only one model is selected | With a single model, a `prompt_caching` profile tile is not disabled and can be selected |
+| disables prompt_caching profiles (with an explanatory tooltip) once more than one model is selected | With >1 model, `prompt_caching` tiles become `aria-disabled`, can't be selected, and hovering surfaces the "can only be deployed on their own" tooltip; sibling profiles stay enabled |
 | shows a titled "Context / Max Batch Size" summary on each card, largest sequence length first | Step-2 card batching summary: titled two-column layout, tiers sorted by descending sequence length, each tier reduced to its max batch size (no raw batch-size list) |
-| shows the arch dropdown only for models with more than one matching arch | Multi-arch models require an arch pick before profiles list (Q3) |
-| renders the override grid seeded from the profile: supported cells enabled, "All" auto-checks, and "*" mode | Step-3 override is a checkbox grid (context-length rows × fixed batch-size columns); cells enable per profile support, "All" auto-checks when every supported cell is checked and collapses the tier to `*` |
+| shows the arch dropdown only for models with more than one matching arch | Multi-arch models require an arch pick before profiles list (Q3); picking an arch auto-resolves the single matching profile and collapses the row |
+| renders the override grid seeded from the profile: supported cells enabled, "All" auto-checks, and "*" mode | Step-3 override is a checkbox grid (context-length rows × fixed batch-size columns) seeded from the profile default; columns trim to the largest supported size, unsupported cells render blank, "All" auto-checks when every supported cell is checked and collapses the tier to `*`; unchecking a cell emits the reduced `batchingConfig` |
 | defaults Swappable to True (omitted from YAML) and emits modelSettings.swappable:false only when set to False | Step-3 Advanced Options "Swappable" toggle defaults to True (no `modelSettings` emitted); switching to False emits `modelSettings.swappable:false`; switching back to True drops it |
-| shows the draft-model dropdown only for spec-decoding profiles | The draft dropdown appears only when the profile has an `sd` PEF |
-| wires a chosen draft model into the generated ModelBundle YAML (routable:false + specDecodingPairs) | End-to-end: draft selection produces `specDecodingPairs` + `modelSettings.routable:false` on the draft |
+| shows the draft-model dropdown only for spec-decoding profiles | The draft dropdown / prompt appears only when the profile has an `sd` PEF (exactly one prompt for a target+non-target pair) |
+| wires a chosen draft model into the generated ModelBundle YAML (routable:false + specDecodingPairs) | End-to-end: draft selection adds the draft's nested row and produces `specDecodingPairs` + `modelSettings.routable:false` on the draft |
+| generates a single ModelBundle document once a profile is resolved | Once a profile resolves, the YAML has `apiVersion: sambanova.ai/v1alpha1`, `kind: ModelBundle`, and `profile: <name>` |
+| offers quick "Create Deployment"/"Advanced Settings" for a single non-spec-decoding model and routes to the model+profile deploy | A single non-spec-decoding model shows quick buttons (Steps 3 & 4 hidden); "Create Deployment" routes to `/model-deployment` with `modelPath` (bare crname) + `profileName` |
+| applies an app-config checkpoint_overrides version to both the deploy modelPath and the bundle YAML | A pinned `checkpoint_overrides` version flows into both the quick-deploy `modelPath` (`crname:2`) and the Advanced Settings bundle YAML (`model: …:2`), not the latest |
+| "Advanced Settings" reveals Steps 3 & 4 and hides the quick-deploy buttons (single model) | Clicking "Advanced Settings" shows Step 3 (Advanced Options) and Step 4 (Save & Validate), removes the quick action bar, and doesn't navigate |
+| keeps the bundle route (no quick buttons) when multiple models are selected | Selecting >1 model shows Steps 3 & 4 directly with no single-model quick action bar |
+| forces the bundle route (no quick buttons) for a single spec-decoding model | A single spec-decoding model (needs a target+draft pair) is forced to Steps 3 & 4 with no quick action bar |
 
 **Note:** the draft-model `Select` uses a proper `InputLabel`+`labelId` (matching the arch `Select`) so
 it is queryable by accessible name and correctly labeled for assistive tech.
@@ -165,30 +178,40 @@ intersection is gone).
 
 ### Bundle YAML Generator (V3 ModelBundle)
 
-**File:** [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts) · **Module:** framework-agnostic V3 generator · **Tests:** 27
+**File:** [bundle-yaml-generator.test.ts](bundle-yaml-generator.test.ts) · **Module:** framework-agnostic V3 generator · **Tests:** 48
 
 Covers the shared, React-free `ModelBundle` generator + its helpers (also consumed by the CLI). The old
 `generateCheckpointName`/`generateBundleYaml` (V2 `BundleTemplate`+`Bundle`) tests were removed.
 
-#### Helpers
+#### Helpers (29)
 
 | Group | Tests | What they verify |
 |-------|-------|------------------|
 | `getHighestVersion` | 1 | Picks the numeric-highest version, not lexicographically-highest |
-| `formatModelRef` | 2 | `crname:version` for single-arch; `crname:arch:version` for multi-arch |
-| `isEmbeddingModel` | 2 | True iff `capabilities` includes `"embeddings"` (Q10) |
+| `formatModelRef` | 3 | `crname:version` for single-arch; `crname:arch:version` for multi-arch; an explicit version override replaces the latest version |
+| `formatModelRefLatest` | 3 | Bare `crname` (single-arch) / `crname:arch` (multi-arch) to mean "latest" (no version); a version override pins the version when provided |
+| `isEmbeddingModel` | 2 | True iff `capabilities` includes `"embeddings"` (Q10); false otherwise |
 | `getEffectiveBatchingConfig` | 3 | `spec.defaultBatchingConfig` → `status.batchingConfig` → `{}` fallback chain |
-| `deriveIsDefaultTier` | 4 | `is_default` on smallest tier for embedding only; never otherwise; strips any pre-existing flag; handles bare-int and `t`-suffixed tier keys |
-| `getDisplayName` | 3 | Features→title ("High Interactivity" default; numbered per model when a type repeats; lone type unnumbered) |
-| `isSpecDecodingProfile` | 2 | True iff a `pef` name contains `"sd"` |
+| `deriveIsDefaultTier` | 5 | `is_default` on smallest tier for embedding only; never otherwise; strips any pre-existing flag; handles bare-int and `t`-suffixed tier keys; empty config → `{}` |
+| `batchingConfigsEqual` | 2 | Equality is order-independent across tiers and batch sizes; differs on tiers, batch sizes, or `is_default` |
+| `collapseTiersToWildcard` | 3 | Replaces a tier's `batch_sizes` with `'*'` when they match the profile default (order-independent); leaves them when they differ or the default lacks that tier; preserves `is_default` while collapsing |
+| `orderBatchingConfigDescending` | 1 | Reinserts tiers in descending sequence-length order |
+| `getDisplayName` | 4 | `continuous_batching`→"High Throughput", empty features→"High Interactivity"; a lone type is unnumbered; repeated types are numbered in listing order |
+| `isSpecDecodingProfile` | 2 | True iff a `pef` name contains `"sd"`; false otherwise |
 
-#### `buildModelBundleObject` / `generateModelBundleYaml` (13)
+#### `buildModelBundleObject` / `generateModelBundleYaml` (19)
 
 | Test | Description |
 |------|-------------|
-| emits one modelConfigs entry per selection, with full batchingConfig always present | One entry per selection; `batchingConfig` always emitted (Q1) |
-| applies is_default to the smallest tier only for embedding models | Embedding is_default derivation (Q2) |
+| emits one modelConfigs entry per selection (batchingConfig present here since the embedding is_default diverges from the profile default) | One `modelConfigs` entry per selection; `batchingConfig` is emitted here because the embedding's derived `is_default` diverges from the profile default |
+| applies is_default to the smallest tier only for embedding models | Embedding `is_default` derivation (Q2) |
 | never sets is_default for non-embedding models | Negative case |
+| omits batchingConfig when it matches the profile default (non-embedding, no override) | No `batchingConfig` emitted when the effective config equals the profile default |
+| omits batchingConfig when an override exactly matches the profile default | An override equal to the default counts as no divergence → `batchingConfig` omitted |
+| drops a model entirely when all its batching tiers are cleared in Step 3 | A model whose every tier is unchecked is removed from `modelConfigs` |
+| prunes a spec-decoding pair whose target model was dropped | Dropping a target removes its `specDecodingPairs` entry |
+| orders an emitted batchingConfig by descending sequence length in the YAML | Emitted `batchingConfig` tiers are ordered largest sequence length first |
+| renders batch_sizes as flow-style arrays and collapses tiers matching the profile default to "*" | `batch_sizes` render as flow-style arrays; tiers matching the profile default collapse to `'*'` |
 | uses batchingConfigOverride instead of the profile default when present | Step-3 override supersedes the profile default |
 | drops tiers whose batch_sizes were fully unchecked in the override (no empty batch_sizes emitted) | A tier with an empty `batch_sizes` array is omitted from the emitted config; `'*'` is preserved |
 | re-targets is_default to the smallest remaining tier after empty tiers are dropped (embedding) | Dropping the smallest tier moves the embedding `is_default:true` to the new smallest remaining tier |
@@ -375,9 +398,9 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| **Total automated tests** | **166** | across 13 suites, all passing |
-| UI components (API/behavior) | 30 | home (1), playground (1), model-selection (10), model-deployment (18) |
-| Core utilities | 88 | availability (9), generator (32), parser (10), pef-config (26), inference-pod-names (8), pod-name-limits (3) |
+| **Total automated tests** | **201** | across 13 suites, all passing |
+| UI components (API/behavior) | 49 | home (1), playground (5), model-selection (18), model-deployment (25) |
+| Core utilities | 104 | availability (9), generator (48), parser (10), pef-config (26), inference-pod-names (8), pod-name-limits (3) |
 | API route handlers | 24 | generate-checkpoint-mapping (13), generate-model-profiles (11) |
 | CLI | 24 | bin/__tests__/cli.test.ts |
 
@@ -386,11 +409,11 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 | File | Tests | Focus |
 |------|-------|-------|
 | home.test.tsx | 1 | API integration on mount |
-| playground.test.tsx | 1 | API integration on mount |
-| model-selection.test.tsx | 10 | V3 selection flow (cards + batching summary, arch dropdown, overrides, swappable, spec decoding → ModelBundle) |
+| playground.test.tsx | 5 | API integration on mount + vision attach-image + audio ASR/TTS control visibility |
+| model-selection.test.tsx | 18 | V3 selection flow (cards + batching summary, arch dropdown, overrides, swappable, spec decoding → ModelBundle) |
 | model-deployment.test.tsx | 25 | Deployment status logic (6) + probe-failure logic (7) + ModelDeployment integration (12) |
 | model-availability.test.ts | 9 | V3 model↔profile join, no-profile guard, embedding detection |
-| bundle-yaml-generator.test.ts | 32 | V3 ModelBundle generator + helpers |
+| bundle-yaml-generator.test.ts | 48 | V3 ModelBundle generator + helpers |
 | parse-bundle-yaml.test.ts | 10 | V3 ModelBundle parser (round-trip, V2 rejection) |
 | pef-config-generator.test.ts | 26 | kubectl PEF cache generation + DYT logic (no `pef_mapping.json`) |
 | inference-pod-names.test.ts | 8 | Pod-name derivation |
@@ -398,7 +421,7 @@ byte-identical `ModelBundle`/`ModelDeployment` output to the UI path.
 | api/generate-checkpoint-mapping/route.test.ts | 13 | Multi-arch checkpoint capture + capabilities (V3) |
 | api/generate-model-profiles/route.test.ts | 11 | ModelProfile cache generation + batching fallback + non-v3-backend detection (V3) |
 | bin/__tests__/cli.test.ts | 24 | V3 CLI: cache→CR conversion, join, shared-generator parity |
-| **Total** | **158** | |
+| **Total** | **201** | |
 
 ---
 

@@ -6,7 +6,8 @@
       "namespace": "default",
       "uiDomain": "https://ui-your-environment.example.com/",
       "apiDomain": "https://api-your-environment.example.com/",
-      "apiKey": "your-api-key-here"
+      "apiKey": "your-api-key-here",
+      "ttsModel": "qwen3-tts"
     },
     "another-environment": {
       "file": "kubeconfigs/another-kubeconfig_example.yaml",
