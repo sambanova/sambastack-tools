@@ -66,10 +66,16 @@ export async function GET() {
     }
 
     const normalizedApiDomain = apiDomain.endsWith('/') ? apiDomain : `${apiDomain}/`;
-    const apiUrl = `${normalizedApiDomain}v1/models`;
+    // Append a unique cache-buster query param so the Cloudflare CDN in front of
+    // the API doesn't serve a stale /v1/models list — otherwise newly deployed /
+    // undeployed models don't show up on Playground refresh.
+    const cacheBuster = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    const apiUrl = `${normalizedApiDomain}v1/models?cb=${cacheBuster}`;
 
     const response = await fetch(apiUrl, {
       headers: { Authorization: `Bearer ${apiKey}` },
+      // Also bypass Next.js's own fetch cache for this request.
+      cache: 'no-store',
     });
 
     if (!response.ok) {
