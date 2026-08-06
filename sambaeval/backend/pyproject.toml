@@ -14,6 +14,10 @@ dependencies = [
     # Output-generator deps (previously scripts/requirements.txt). Generators
     # now run in-process, so they share this environment.
     "openai>=1.0.0",
+    # LangChain-agent example generator
+    # (scripts/generators/langchain_agent_generator.py).
+    "langchain>=1.0",
+    "langchain-openai>=1.0",
     "numpy>=2.4.6",
     "scipy>=1.17.1",
     "sympy>=1.14.0",
@@ -24,6 +28,10 @@ dependencies = [
 [project.optional-dependencies]
 # Phase 1 (FastAPI backend). Installed when we get there.
 server = ["fastapi>=0.110", "uvicorn>=0.29"]
+# Test suite (pytest). Installed in CI and for local `pytest backend/tests`.
+# Pulls in the server extra too: the API-level tests (test_error_log,
+# test_orphan_cancel, test_retry_config) drive the FastAPI app via TestClient.
+test = ["pytest>=8", "sambaeval[server]"]
 
 [project.scripts]
 sambaeval = "sambaeval.cli:main"
@@ -32,3 +40,6 @@ sambaeval-server = "sambaeval.api:serve"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sambaeval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { cachePodName, defaultPodName } from '@/app/utils/inference-pod-names';
 
 interface KubeconfigEntry {
   file: string;
@@ -10,7 +11,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -21,13 +21,32 @@ interface AppConfig {
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const podName = searchParams.get('podName');
     const lines = searchParams.get('lines') || '5';
     const container = searchParams.get('container');
 
+    // Preferred: resolve the pod name from the deployment name + type so the
+    // operator's truncate+hash naming is applied (see inference-pod-names).
+    // Falls back to an explicit `podName` for backwards compatibility.
+    const deploymentName = searchParams.get('deploymentName');
+    const type = searchParams.get('type'); // 'cache' | 'default'
+    let podName = searchParams.get('podName');
+
+    if (!podName && deploymentName && type) {
+      if (type === 'cache') {
+        podName = cachePodName(deploymentName);
+      } else if (type === 'default') {
+        podName = defaultPodName(deploymentName);
+      } else {
+        return NextResponse.json(
+          { error: `Invalid pod type: ${type}. Expected 'cache' or 'default'.` },
+          { status: 400 }
+        );
+      }
+    }
+
     if (!podName || typeof podName !== 'string') {
       return NextResponse.json(
-        { error: 'Pod name is required' },
+        { error: 'Pod name is required (provide podName, or deploymentName and type)' },
         { status: 400 }
       );
     }

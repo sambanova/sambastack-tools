@@ -32,10 +32,10 @@ export default function AppLayout({ children }: AppLayoutProps) {
   // Derive selected item directly from pathname instead of using state
   const getSelectedItem = () => {
     if (pathname === '/') return 'environment-settings';
-    if (pathname === '/bundle-builder') return 'bundle-builder';
-    if (pathname === '/bundle-deployment') return 'bundle-deployment';
+    if (pathname === '/model-selection') return 'model-selection';
+    if (pathname === '/model-deployment') return 'model-deployment';
     if (pathname === '/playground') return 'playground';
-    return 'bundle-builder';
+    return 'model-selection';
   };
   const selectedItem = getSelectedItem();
 
@@ -48,6 +48,8 @@ export default function AppLayout({ children }: AppLayoutProps) {
     errorDetails,
     helmVersionError,
     hasNonNumericalSuffix,
+    fullVersion,
+    minimumVersion,
   } = useAppContext();
 
   const [showErrorDialog, setShowErrorDialog] = useState<boolean>(false);
@@ -106,11 +108,11 @@ export default function AppLayout({ children }: AppLayoutProps) {
       {/* Top menu items */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
         <ListItemButton
-          selected={selectedItem === 'bundle-builder'}
+          selected={selectedItem === 'model-selection'}
           disabled={helmVersionError}
           onClick={() => {
             if (!helmVersionError) {
-              router.push('/bundle-builder');
+              router.push('/model-selection');
             }
           }}
           sx={{
@@ -137,23 +139,23 @@ export default function AppLayout({ children }: AppLayoutProps) {
           <ListItemIcon
             sx={{
               minWidth: 'auto',
-              color: selectedItem === 'bundle-builder' ? 'primary.main' : '#71717A',
+              color: selectedItem === 'model-selection' ? 'primary.main' : '#71717A',
             }}
           >
             <BuildIcon />
           </ListItemIcon>
           <ListItemText
-            primary="Bundle Builder"
-            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'bundle-builder' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
+            primary="Model Selection"
+            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'model-selection' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
           />
         </ListItemButton>
 
         <ListItemButton
-          selected={selectedItem === 'bundle-deployment'}
+          selected={selectedItem === 'model-deployment'}
           disabled={helmVersionError}
           onClick={() => {
             if (!helmVersionError) {
-              router.push('/bundle-deployment');
+              router.push('/model-deployment');
             }
           }}
           sx={{
@@ -180,14 +182,14 @@ export default function AppLayout({ children }: AppLayoutProps) {
           <ListItemIcon
             sx={{
               minWidth: 'auto',
-              color: selectedItem === 'bundle-deployment' ? 'primary.main' : '#71717A',
+              color: selectedItem === 'model-deployment' ? 'primary.main' : '#71717A',
             }}
           >
             <RocketLaunchIcon />
           </ListItemIcon>
           <ListItemText
-            primary="Bundle Deployment"
-            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'bundle-deployment' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
+            primary="Model Deployment"
+            slotProps={{ primary: { fontSize: '0.875rem', fontWeight: selectedItem === 'model-deployment' ? 600 : 500, fontFamily: 'var(--font-geist-sans)' } }}
           />
         </ListItemButton>
 
@@ -391,7 +393,9 @@ export default function AppLayout({ children }: AppLayoutProps) {
         >
           {validationError && (
             <Alert severity="error" sx={{ mb: 3 }}>
-              {validationError}
+              {helmVersionError
+                ? `SambaWiz version ${appVersion ?? 'unknown'} requires a minimum SambaStack Helm version of ${minimumVersion ?? 'unknown'}. The current helm version ${fullVersion ?? 'unknown'} is not supported.`
+                : validationError}
             </Alert>
           )}
           {children}

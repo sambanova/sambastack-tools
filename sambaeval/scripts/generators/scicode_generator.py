@@ -64,6 +64,13 @@ import time
 import uuid
 
 from base import OutputGenerator, ROOT, load_provider, run_cli
+from sandbox_runtime import (
+    PER_CONTAINER_MB,
+    SandboxUnavailable,
+    cap_concurrency,
+    container_slots,
+    ensure_podman_ready,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +107,10 @@ WITH_BACKGROUND = os.environ.get(
 SANDBOX_BACKEND = os.environ.get("SCICODE_SANDBOX", "podman").lower()
 # Prebuilt sandbox image (see scripts/generators/scicode_sandbox.Dockerfile).
 SANDBOX_IMAGE = os.environ.get("SCICODE_SANDBOX_IMAGE", "scicode-sandbox")
-SANDBOX_MEM_LIMIT = os.environ.get("SCICODE_SANDBOX_MEM", "4g")
+# Per-container memory cap. Kept small on purpose: the shared Podman VM is
+# sized (see sandbox_runtime) so MAX_CONTAINERS of these fit in parallel without
+# oversubscribing it. Override with SCICODE_SANDBOX_MEM for a heavier problem set.
+SANDBOX_MEM_LIMIT = os.environ.get("SCICODE_SANDBOX_MEM", f"{PER_CONTAINER_MB}m")
 # Where test_data.h5 is mounted read-only inside the container.
 H5_CONTAINER_PATH = "/data/test_data.h5"
 
@@ -290,6 +300,25 @@ def load_problem(example_id) -> dict | None:
 
 
 class SciCodeGenerator(OutputGenerator):
+    @classmethod
+    def prepare_sandbox(cls, concurrency: int) -> int:
+        """Backend preflight, run once before any task dispatches.
+
+        Ensures the code-execution sandbox is ready (auto-starting and
+        right-sizing the shared Podman VM) and returns the concurrency this
+        generator actually supports — clamped to the Podman container cap, so a
+        run configured for more parallelism is warned and throttled rather than
+        oversubscribing the VM.
+
+        Raises ``SandboxUnavailable`` when the sandbox can't be prepared; the
+        executor turns that into a run-level abort. No-op for the subprocess
+        backend (no VM, no fixed container cap).
+        """
+        if SANDBOX_BACKEND != "podman":
+            return concurrency
+        ensure_podman_ready()  # raises SandboxUnavailable -> run aborts
+        return cap_concurrency(concurrency)
+
     @staticmethod
     def _step_description(step: dict) -> str:
         """A sub-step's description, with its SciCode scientist background
@@ -476,6 +505,14 @@ class SciCodeGenerator(OutputGenerator):
                 "SCICODE_SANDBOX=subprocess."
             )
 
+        # Make sure the shared Podman VM is up. The backend preflight normally
+        # does this once per run (and this is then a cached no-op); the lazy call
+        # covers the CLI / debugger paths that skip the backend.
+        try:
+            ensure_podman_ready()
+        except SandboxUnavailable as e:
+            return False, f"sandbox error: {e}"
+
         run_id = uuid.uuid4().hex
         verdict_path = f"/sandbox/{run_id}.verdict"
         script = self._build_script(
@@ -533,24 +570,29 @@ class SciCodeGenerator(OutputGenerator):
             ],
             "environment": {"MPLBACKEND": "Agg", "MPLCONFIGDIR": "/tmp"},
         }
+        # Bound concurrent containers to MAX_CONTAINERS so parallel tasks can't
+        # oversubscribe the VM's memory (backstop; the backend also caps run
+        # concurrency to the same number). A blocked task simply waits its turn.
         try:
-            with SandboxSession(
-                lang="python",
-                backend="podman",
-                image=SANDBOX_IMAGE,
-                runtime_configs=runtime_configs,
-                skip_environment_setup=True,  # image already has the stack
-                # Own the kill deadline here rather than relying on llm-sandbox's
-                # implicit default; expired execution is force-killed and raised
-                # as an exception we turn into a step failure below.
-                execution_timeout=STEP_TIMEOUT_SECONDS,
-                verbose=False,
-            ) as session:
-                # run() handles writing + copying + executing the script. Its
-                # exit code is unreliable on the Podman path, so we read the
-                # verdict file the script always writes instead.
-                session.run(script)
-                verdict = self._read_verdict(session, verdict_path)
+            with container_slots:
+                with SandboxSession(
+                    lang="python",
+                    backend="podman",
+                    image=SANDBOX_IMAGE,
+                    runtime_configs=runtime_configs,
+                    skip_environment_setup=True,  # image already has the stack
+                    # Own the kill deadline here rather than relying on
+                    # llm-sandbox's implicit default; expired execution is
+                    # force-killed and raised as an exception we turn into a
+                    # step failure below.
+                    execution_timeout=STEP_TIMEOUT_SECONDS,
+                    verbose=False,
+                ) as session:
+                    # run() handles writing + copying + executing the script. Its
+                    # exit code is unreliable on the Podman path, so we read the
+                    # verdict file the script always writes instead.
+                    session.run(script)
+                    verdict = self._read_verdict(session, verdict_path)
         except Exception as e:  # container/setup failure — surface it as a fail
             return False, f"sandbox error: {e}"
 
@@ -651,6 +693,11 @@ class SciCodeGenerator(OutputGenerator):
 
         # 2. Screen + test each (non-given) sub-step with cumulative code.
         passed, failed = [], []
+        # Distinct failure reasons across the failing steps, preserving first-seen
+        # order. Surfacing these turns an opaque "failed steps: 1.1" into
+        # something diagnosable — e.g. a "sandbox error: ..." (infra) reads very
+        # differently from an "assertion failed" (a genuinely wrong answer).
+        reasons: list[str] = []
         for idx, step in enumerate(sub_steps):
             if step.get("given_code"):
                 continue  # given code is reference; SciCode does not test it
@@ -661,16 +708,19 @@ class SciCodeGenerator(OutputGenerator):
             cumulative = (
                 dependencies + "\n\n" + "\n\n".join(code_by_step[: idx + 1])
             )
-            ok, _err = self._run_step_tests(
+            ok, err = self._run_step_tests(
                 dependencies, cumulative, step["step_number"], step["test_cases"]
             )
             (passed if ok else failed).append(step["step_number"])
+            if not ok and err and err not in reasons:
+                reasons.append(err)
 
         total = len(passed) + len(failed)
         if failed:
+            detail = (f" [{'; '.join(reasons)}]" if reasons else "")
             return (
                 f"FAIL\n{len(passed)}/{total} sub-steps passed; "
-                f"failed steps: {', '.join(failed)}"
+                f"failed steps: {', '.join(failed)}{detail}"
             )
         return f"PASS\n{len(passed)}/{total} sub-steps passed"
 
@@ -776,16 +826,19 @@ class SciCodeDebugger(SciCodeGenerator):
     @classmethod
     def for_example(
         cls, example_id, *, provider_name: str = "SambaNova",
-        model_name: str = "MiniMax-M2.7", temperature: float = 0.0,
+        model_name: str = "MiniMax-M2.7", temperature: float | None = None,
         seed: int | None = 42,
     ) -> "SciCodeDebugger":
         """Build a debugger for one problem id, loading the provider from
         data/providers.json. Defaults match the scicode_example experiment."""
         provider = load_provider(provider_name)
         model = {
-            "name": model_name, "temperature": temperature,
-            "seed": seed, "provider_name": provider_name,
+            "name": model_name, "seed": seed, "provider_name": provider_name,
         }
+        # Temperature is forwarded via additional_kwargs (it's no longer a
+        # first-class field); omitted entirely when not requested.
+        if temperature is not None:
+            model["additional_kwargs"] = {"temperature": temperature}
         dbg = cls(provider, model)
         dbg.example_id = str(example_id)
         return dbg

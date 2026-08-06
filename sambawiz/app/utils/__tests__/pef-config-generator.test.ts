@@ -16,7 +16,6 @@ jest.mock('child_process', () => ({
 
 describe('pef-config-generator', () => {
   const mockAppConfig = {
-    checkpointsDir: 'gs://my-bucket/',
     currentKubeconfig: 'dev',
     kubeconfigs: {
       dev: {
@@ -62,12 +61,7 @@ describe('pef-config-generator', () => {
     jest.clearAllMocks();
     // Mock existsSync to return true for all file checks (app-config.json and kubeconfig files)
     (existsSync as jest.Mock).mockImplementation(() => true);
-    (readFileSync as jest.Mock).mockImplementation((filePath: string) => {
-      if (String(filePath).includes('pef_mapping.json')) {
-        return JSON.stringify({});
-      }
-      return JSON.stringify(mockAppConfig);
-    });
+    (readFileSync as jest.Mock).mockImplementation(() => JSON.stringify(mockAppConfig));
     (execSync as jest.Mock).mockReturnValue(JSON.stringify(mockKubectlOutput));
     // Reset writeFileSync to default mock (no-op)
     (writeFileSync as jest.Mock).mockImplementation(() => undefined);
@@ -107,19 +101,11 @@ describe('pef-config-generator', () => {
       expect(result).toHaveProperty('error');
     });
 
-    it('should return error with specific message when pef_mapping.json does not exist', async () => {
-      (existsSync as jest.Mock).mockImplementation((filePath: string) => {
-        return !String(filePath).includes('pef_mapping.json');
-      });
+    it('should not read pef_mapping.json at all', async () => {
+      await generatePefConfigs();
 
-      const result = await generatePefConfigs();
-
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error).toBe(
-          'pef_mapping.json was not found in the app/data folder! Please restore the file and reapply the environment configuration.'
-        );
-      }
+      const readCalls = (readFileSync as jest.Mock).mock.calls.map((call) => String(call[0]));
+      expect(readCalls.some((filePath) => filePath.includes('pef_mapping.json'))).toBe(false);
     });
 
     it('should call kubectl with correct parameters', async () => {
@@ -639,70 +625,6 @@ describe('pef-config-generator', () => {
         bs: '8',
         latestVersion: '1',
       });
-    });
-
-    it('should remove non-DYT PEFs for a model when a DYT PEF is present', async () => {
-      const listOutput = {
-        items: [
-          {
-            metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
-            spec: { versions: { '1': {} } },
-          },
-          {
-            metadata: { name: 'gpt-oss-fp8-ss4096-bs1' },
-            spec: { versions: { '1': {} } },
-          },
-          {
-            metadata: { name: 'unrelated-model-ss4096-bs1' },
-            spec: { versions: { '1': {} } },
-          },
-        ],
-      };
-
-      const individualPefOutput = {
-        metadata: { name: 'gpt-oss-fp8-ss131072-bs8-dyt-1' },
-        spec: {
-          metadata: {
-            dynamic_dims: {
-              batch_size: { values: [2, 4] },
-              decode_seq: { min: 8192, max: 131072, step: 4096 },
-            },
-          },
-          versions: { '1': {} },
-        },
-      };
-
-      const pefMapping = {
-        'some-model': ['gpt-oss-fp8-ss131072-bs8-dyt-1', 'gpt-oss-fp8-ss4096-bs1'],
-      };
-
-      (execSync as jest.Mock).mockImplementation((cmd: string) => {
-        if (cmd === 'kubectl -n default get pef -o json') {
-          return JSON.stringify(listOutput);
-        }
-        return JSON.stringify(individualPefOutput);
-      });
-
-      (readFileSync as jest.Mock).mockImplementation((filePath: string) => {
-        if (String(filePath).includes('pef_mapping.json')) {
-          return JSON.stringify(pefMapping);
-        }
-        return JSON.stringify(mockAppConfig);
-      });
-
-      const result = await generatePefConfigs();
-
-      expect(result.success).toBe(true);
-
-      const writeCall = (writeFileSync as jest.Mock).mock.calls[0];
-      const writtenData = JSON.parse(writeCall[1]);
-
-      // DYT PEF should be present
-      expect(writtenData['gpt-oss-fp8-ss131072-bs8-dyt-1']).toBeDefined();
-      // Non-DYT PEF for the same model should be removed
-      expect(writtenData['gpt-oss-fp8-ss4096-bs1']).toBeUndefined();
-      // Unrelated model PEF should still be present
-      expect(writtenData['unrelated-model-ss4096-bs1']).toBeDefined();
     });
 
     it('should handle version numbers as strings', async () => {

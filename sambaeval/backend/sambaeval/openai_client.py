@@ -39,7 +39,6 @@ def call_model(
     body: dict[str, Any] = {
         "model": model.name,
         "messages": messages,
-        "temperature": model.temperature,
     }
     if isinstance(model.seed, int):
         body["seed"] = model.seed

@@ -11,7 +11,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -46,7 +45,6 @@ export async function POST(request: Request) {
     } else {
       // Initialize with default values if config doesn't exist
       config = {
-        checkpointsDir: '',
         currentKubeconfig: environment,
         kubeconfigs: {}
       };

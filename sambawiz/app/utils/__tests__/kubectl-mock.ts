@@ -7,16 +7,16 @@ export function mockKubectl() {
     const cmd = command.toString();
 
     // Mock various kubectl commands
-    if (cmd.includes('kubectl get bundles')) {
+    if (cmd.includes('kubectl get modelbundle.sambanova.ai')) {
       return Buffer.from(JSON.stringify({
         items: [
-          { metadata: { name: 'b-llama-bundle' }, spec: { template: 'bt-llama-bundle' } },
-          { metadata: { name: 'b-qwen-bundle' }, spec: { template: 'bt-qwen-bundle' } },
+          { metadata: { name: 'b-llama-bundle' }, spec: { modelConfigs: [{ model: 'meta-llama-3-1-8b-instruct:1', profile: 'llama-profile' }] } },
+          { metadata: { name: 'b-qwen-bundle' }, spec: { modelConfigs: [{ model: 'qwen2-5-72b-instruct:1', profile: 'qwen-profile' }] } },
         ],
       }));
     }
 
-    if (cmd.includes('kubectl get bundledeployments')) {
+    if (cmd.includes('kubectl get modeldeployment.sambanova.ai')) {
       return Buffer.from(JSON.stringify({
         items: [
           { metadata: { name: 'llama-deployment' }, spec: { bundle: 'b-llama-bundle' } },
@@ -60,11 +60,11 @@ export function mockKubectl() {
     }
 
     if (cmd.includes('kubectl apply')) {
-      return Buffer.from('bundle.sambanova.ai/b-test-bundle created\nbundletemplate.sambanova.ai/bt-test-bundle created');
+      return Buffer.from('modelbundle.sambanova.ai/b-test-bundle created');
     }
 
     if (cmd.includes('kubectl delete')) {
-      return Buffer.from('bundledeployment.sambanova.ai "test-deployment" deleted');
+      return Buffer.from('modeldeployment.sambanova.ai "test-deployment" deleted');
     }
 
     if (cmd.includes('helm version')) {

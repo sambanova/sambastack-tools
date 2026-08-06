@@ -4,6 +4,7 @@ import { apiUrl } from "@/app/lib/api";
 import { useEffect, useState } from "react";
 import { DEFAULT_JUDGE_PROMPT } from "../lib/types";
 import type { LlmJudgeScorerDef, Provider } from "../lib/types";
+import { type KwargRow, recordToRows, rowsToRecord } from "../lib/kwargs";
 
 export default function ScorersPage() {
   const [scorers, setScorers] = useState<LlmJudgeScorerDef[]>([]);
@@ -12,6 +13,10 @@ export default function ScorersPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Per-scorer additional-kwargs editor state — the rows are the source of
+  // truth while editing and are folded into `additional_kwargs` on save.
+  const [kwargRowsByScorer, setKwargRowsByScorer] = useState<KwargRow[][]>([]);
+  const [kwargsOpen, setKwargsOpen] = useState<boolean[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -19,7 +24,14 @@ export default function ScorersPage() {
         fetch(apiUrl("/api/scorers")).then((r) => r.json()),
         fetch(apiUrl("/api/providers")).then((r) => r.json()),
       ]);
-      setScorers(sRes.scorers ?? []);
+      const list: LlmJudgeScorerDef[] = sRes.scorers ?? [];
+      setScorers(list);
+      setKwargRowsByScorer(list.map((s) => recordToRows(s.additional_kwargs)));
+      // Expand the editor for any scorer that already has kwargs so they're
+      // visible on load rather than hidden behind a collapsed section.
+      setKwargsOpen(
+        list.map((s) => Object.keys(s.additional_kwargs ?? {}).length > 0),
+      );
       setProviders(pRes.providers ?? []);
       setLoading(false);
     })();
@@ -38,25 +50,76 @@ export default function ScorersPage() {
         name: "",
         provider_name: providers[0]?.name ?? "",
         model: "",
-        temperature: 0,
         judge_prompt: DEFAULT_JUDGE_PROMPT,
         max_score: 5,
       },
     ]);
+    setKwargRowsByScorer((prev) => [...prev, []]);
+    setKwargsOpen((prev) => [...prev, false]);
   };
 
   const remove = (i: number) => {
     setScorers((prev) => prev.filter((_, idx) => idx !== i));
+    setKwargRowsByScorer((prev) => prev.filter((_, idx) => idx !== i));
+    setKwargsOpen((prev) => prev.filter((_, idx) => idx !== i));
   };
+
+  const setScorerKwargRows = (i: number, rows: KwargRow[]) =>
+    setKwargRowsByScorer((prev) =>
+      prev.map((r, idx) => (idx === i ? rows : r)),
+    );
+
+  const addKwarg = (i: number) =>
+    setScorerKwargRows(i, [
+      ...(kwargRowsByScorer[i] ?? []),
+      { key: "", valueStr: "" },
+    ]);
+
+  const removeKwarg = (i: number, j: number) =>
+    setScorerKwargRows(
+      i,
+      (kwargRowsByScorer[i] ?? []).filter((_, idx) => idx !== j),
+    );
+
+  const updateKwargKey = (i: number, j: number, key: string) =>
+    setScorerKwargRows(
+      i,
+      (kwargRowsByScorer[i] ?? []).map((r, idx) =>
+        idx === j ? { ...r, key } : r,
+      ),
+    );
+
+  const updateKwargValueStr = (i: number, j: number, valueStr: string) =>
+    setScorerKwargRows(
+      i,
+      (kwargRowsByScorer[i] ?? []).map((r, idx) =>
+        idx === j ? { ...r, valueStr } : r,
+      ),
+    );
+
+  const toggleKwargsOpen = (i: number) =>
+    setKwargsOpen((prev) => prev.map((o, idx) => (idx === i ? !o : o)));
 
   const save = async () => {
     setSaving(true);
     setSaved(false);
     setError(null);
+    // Fold each scorer's kwarg rows into additional_kwargs; drop the key
+    // entirely when there are none so it leaves the saved JSON.
+    const payload = scorers.map((s, i) => {
+      const ak = rowsToRecord(kwargRowsByScorer[i] ?? []);
+      const next: LlmJudgeScorerDef = { ...s };
+      if (Object.keys(ak).length > 0) {
+        next.additional_kwargs = ak;
+      } else {
+        delete next.additional_kwargs;
+      }
+      return next;
+    });
     const res = await fetch(apiUrl("/api/scorers"), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scorers }),
+      body: JSON.stringify({ scorers: payload }),
     });
     const data = await res.json();
     setSaving(false);
@@ -64,7 +127,15 @@ export default function ScorersPage() {
       setError(data.error ?? "Failed to save scorers");
       return;
     }
-    setScorers(data.scorers ?? []);
+    const saved: LlmJudgeScorerDef[] = data.scorers ?? [];
+    setScorers(saved);
+    setKwargRowsByScorer(saved.map((s) => recordToRows(s.additional_kwargs)));
+    setKwargsOpen((prev) =>
+      saved.map(
+        (s, idx) =>
+          prev[idx] ?? Object.keys(s.additional_kwargs ?? {}).length > 0,
+      ),
+    );
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -181,20 +252,7 @@ export default function ScorersPage() {
                   placeholder="e.g. gpt-4o-mini"
                 />
               </div>
-              <div className="col-span-1">
-                <label className="text-xs text-[var(--muted)] block mb-1">
-                  Temp
-                </label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={s.temperature}
-                  onChange={(e) =>
-                    update(i, { temperature: Number(e.target.value) })
-                  }
-                />
-              </div>
-              <div className="col-span-1">
+              <div className="col-span-2">
                 <label className="text-xs text-[var(--muted)] block mb-1">
                   Max score
                 </label>
@@ -227,6 +285,66 @@ export default function ScorersPage() {
               onChange={(e) => update(i, { judge_prompt: e.target.value })}
               rows={10}
             />
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => toggleKwargsOpen(i)}
+                className="text-xs text-[var(--muted)] hover:text-[var(--accent)]"
+              >
+                {kwargsOpen[i] ? "▾" : "▸"} Additional keyword args
+                {(kwargRowsByScorer[i]?.length ?? 0) > 0 && (
+                  <span className="ml-1">({kwargRowsByScorer[i].length})</span>
+                )}
+              </button>
+              {kwargsOpen[i] && (
+                <div className="mt-2 pl-3 border-l-2 border-[var(--border)]">
+                  <p className="text-xs text-[var(--muted)] mb-2">
+                    Forwarded as-is to the judge model&apos;s chat completions
+                    endpoint (e.g. <code>temperature</code>, <code>top_p</code>,{" "}
+                    <code>max_tokens</code>). Values are parsed as JSON — wrap
+                    string values in double quotes (e.g.{" "}
+                    <code>&quot;text&quot;</code>), otherwise bare{" "}
+                    <code>0.2</code> becomes a number, <code>true</code> a
+                    boolean, etc.
+                  </p>
+                  {(kwargRowsByScorer[i] ?? []).map((kw, j) => (
+                    <div key={j} className="flex gap-2 mb-2">
+                      <input
+                        value={kw.key}
+                        onChange={(e) => updateKwargKey(i, j, e.target.value)}
+                        placeholder="key (e.g. temperature)"
+                        spellCheck={false}
+                        className="flex-1"
+                      />
+                      <input
+                        value={kw.valueStr}
+                        onChange={(e) =>
+                          updateKwargValueStr(i, j, e.target.value)
+                        }
+                        placeholder='value (JSON: 0.2, "stop_word", [1,2])'
+                        spellCheck={false}
+                        className="flex-1"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeKwarg(i, j)}
+                        title="Remove"
+                        className="text-[var(--muted)] hover:text-[var(--danger)] px-2"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => addKwarg(i)}
+                    className="text-sm bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-3 py-1.5 rounded-md"
+                  >
+                    + Add kwarg
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         ))}
         <button

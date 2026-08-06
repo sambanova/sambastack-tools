@@ -62,6 +62,17 @@ class OutputGenerator:
         # up per-row fixtures (test cases, reference data, etc.) can read
         # this; generators that don't can ignore it.
         self.example_id: int | None = None
+        # OpenAI-style tool/function definitions for the current row (the JSON
+        # schemas, not the calls). Set by `run_cli` / the in-process runner
+        # before `generate_output`. Tool-calling generators pass this as the
+        # `tools` request param; text-only generators ignore it.
+        self.tools: list | None = None
+        # Tool calls captured from the most recent `stream_completion` call,
+        # accumulated across streamed deltas: a list of
+        # {"id", "name", "arguments"} (arguments is the raw JSON string). Empty
+        # unless the model emitted tool calls. Tool-calling generators read this
+        # after a call; text-only generators can ignore it.
+        self.last_tool_calls: list[dict] = []
         self._client: OpenAI | None = None
         self._calls: list[dict] = []
 
@@ -133,14 +144,18 @@ class OutputGenerator:
         usage and latency get recorded. Any extra OpenAI request kwargs
         (tools, response_format, etc.) can be passed via **kwargs.
 
-        Override this in subclasses that need to capture more than text
-        from the stream (e.g. tool calls). Call `self._record_call(...)`
-        once per call in your override.
+        Returns the joined assistant text. Any tool calls the model emits are
+        captured (accumulated across streamed deltas) into
+        `self.last_tool_calls` for generators that drive tool-calling; text-only
+        callers can ignore them. Override only if you need stream data beyond
+        text and tool calls; if you do, call `self._record_call(...)` once per
+        call so timing math stays consistent.
         """
         client = self._get_client()
         t_start = time.perf_counter()
         t_first: float | None = None
         text_parts: list[str] = []
+        tool_acc: dict[int, dict] = {}  # index -> {"id","name","arguments"}
         usage_dict: dict = {}
 
         stream = client.chat.completions.create(
@@ -162,8 +177,22 @@ class OutputGenerator:
                 if t_first is None:
                     t_first = time.perf_counter()
                 text_parts.append(content)
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                if t_first is None:
+                    t_first = time.perf_counter()
+                idx = getattr(tc, "index", 0) or 0
+                slot = tool_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                if getattr(tc, "id", None):
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        slot["name"] = fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["arguments"] += fn.arguments
         t_end = time.perf_counter()
 
+        self.last_tool_calls = [tool_acc[i] for i in sorted(tool_acc)]
         self._record_call(
             usage_dict=usage_dict,
             t_start=t_start,
@@ -193,15 +222,32 @@ class OutputGenerator:
             "num_llm_calls": len(self._calls),
         }
 
+    def parsed_tool_calls(self) -> list[dict]:
+        """`self.last_tool_calls` with arguments JSON-decoded.
+
+        Returns a list of {"name", "arguments"} where `arguments` is the parsed
+        object (or the raw string if the model emitted invalid JSON). Handy for
+        tool-calling generators that report or execute the model's decision.
+        """
+        out: list[dict] = []
+        for tc in self.last_tool_calls:
+            raw = tc.get("arguments", "")
+            try:
+                args = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                args = raw
+            out.append({"name": tc.get("name", ""), "arguments": args})
+        return out
+
     def completion_kwargs(self) -> dict:
         """Build the per-call kwargs sent to the chat completions endpoint.
 
-        Pulls temperature, seed (if set), and the contents of
-        `additional_kwargs` off the model dict. Subclasses that drive
-        their own LLM calls should use `**self.completion_kwargs()` so
-        the experiment's seed / extra kwargs are honored consistently.
+        Pulls seed (if set) and the contents of `additional_kwargs` off the
+        model dict. Subclasses that drive their own LLM calls should use
+        `**self.completion_kwargs()` so the experiment's seed / extra kwargs
+        (including any temperature set there) are honored consistently.
         """
-        kwargs: dict = {"temperature": self.model.get("temperature", 0.0)}
+        kwargs: dict = {}
         seed = self.model.get("seed")
         if isinstance(seed, bool):
             pass  # bool is a subclass of int but never a valid seed
@@ -248,6 +294,7 @@ def run_cli(generator_cls: type[OutputGenerator]) -> None:
     messages = row.get("messages") or []
     row_system_prompt = row.get("system_prompt")
     example_id = row.get("example_id")
+    tools = row.get("tools")
 
     with open(experiment_path, "r", encoding="utf-8") as f:
         experiment = json.load(f)
@@ -267,6 +314,7 @@ def run_cli(generator_cls: type[OutputGenerator]) -> None:
 
     generator = generator_cls(provider, model)
     generator.example_id = example_id
+    generator.tools = tools if isinstance(tools, list) else None
     output = generator.generate_output(system_prompt, messages)
     metrics = generator.aggregate_metrics()
 

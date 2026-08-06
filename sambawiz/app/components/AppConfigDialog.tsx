@@ -6,7 +6,6 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  TextField,
   Button,
   Typography,
   Alert,
@@ -20,22 +19,12 @@ interface AppConfigDialogProps {
 }
 
 export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppConfigDialogProps) {
-  const checkpointsDirId = 'app-config-checkpoints-dir';
-
-  const [checkpointsDir, setCheckpointsDir] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
 
   const handleCreate = async () => {
-    if (!checkpointsDir || checkpointsDir.trim() === '') {
-      setError('Checkpoints Directory is required');
-      return;
-    }
-
     setCreating(true);
     setError(null);
-    setWarning(null);
 
     try {
       const response = await fetch('/api/check-app-config', {
@@ -43,21 +32,11 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          checkpointsDir: checkpointsDir.trim(),
-        }),
       });
 
       const data = await response.json();
 
       if (data.success) {
-        // If checkpointsDir was auto-corrected, keep the dialog open so the user
-        // reads the warning; the "Continue" button then applies the new config.
-        if (data.checkpointsDirWarning) {
-          setWarning(data.checkpointsDirWarning);
-          setCreating(false);
-          return;
-        }
         onConfigCreated();
         onClose();
       } else {
@@ -71,11 +50,6 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
     }
   };
 
-  const handleContinue = () => {
-    onConfigCreated();
-    onClose();
-  };
-
   const handleClose = () => {
     if (!creating) {
       onClose();
@@ -87,28 +61,12 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
       <DialogTitle>App Configuration Required</DialogTitle>
       <DialogContent>
         <Alert severity="warning" sx={{ mb: 3 }}>
-          The app-config.json file does not exist or the checkpointsDir field is not populated.
-          Please create the configuration file to continue.
+          The app-config.json file does not exist. Please create the configuration file to continue.
         </Alert>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          The app-config.json file must exist in the SambaWiz root directory and contain a valid checkpoints directory path.
+          The app-config.json file must exist in the SambaWiz root directory. Click below to create a
+          minimal configuration; environments (kubeconfigs) can then be added from the Home page.
         </Typography>
-        <TextField
-          id={checkpointsDirId}
-          fullWidth
-          label="Checkpoints Dir"
-          placeholder="gs://your-bucket-name/  or  /mnt/nfs/checkpoints/"
-          value={checkpointsDir}
-          onChange={(e) => setCheckpointsDir(e.target.value)}
-          variant="outlined"
-          helperText="GCS: enter the bucket root only (e.g. gs://your-bucket-name/) — per-model sub-paths are added automatically. NFS/local: the checkpoints directory path."
-          sx={{ mb: 2 }}
-        />
-        {warning && (
-          <Alert severity="warning" sx={{ mt: 2 }}>
-            {warning}
-          </Alert>
-        )}
         {error && (
           <Alert severity="error" sx={{ mt: 2 }}>
             {error}
@@ -120,9 +78,9 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
           Cancel
         </Button>
         <Button
-          onClick={warning ? handleContinue : handleCreate}
+          onClick={handleCreate}
           variant="contained"
-          disabled={creating || !checkpointsDir.trim()}
+          disabled={creating}
           sx={{
             background: 'linear-gradient(135deg, #FF6B35 0%, #FF8E53 100%)',
             '&:hover': {
@@ -135,8 +93,6 @@ export default function AppConfigDialog({ open, onClose, onConfigCreated }: AppC
               <CircularProgress size={20} sx={{ mr: 1, color: 'white' }} />
               Creating...
             </>
-          ) : warning ? (
-            'Continue'
           ) : (
             'Create App Config'
           )}

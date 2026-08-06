@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { inferencePodNames } from '@/app/utils/inference-pod-names';
 
 interface KubeconfigEntry {
   file: string;
@@ -10,7 +11,6 @@ interface KubeconfigEntry {
 }
 
 interface AppConfig {
-  checkpointsDir: string;
   currentKubeconfig: string;
   kubeconfigs: Record<string, KubeconfigEntry>;
 }
@@ -21,7 +21,7 @@ interface PodStatus {
 }
 
 /**
- * GET - Fetch pod status for a bundle deployment
+ * GET - Fetch pod status for a model deployment
  */
 export async function GET(request: NextRequest) {
   try {
@@ -77,6 +77,12 @@ export async function GET(request: NextRequest) {
 
     const env = { ...process.env, KUBECONFIG: kubeconfigPath };
 
+    // The inference operator truncates+hashes long deployment names, so we
+    // can't assume the pod is literally `inf-<deploymentName>-...`. Derive the
+    // exact pod names the operator would create and match on them. Computed up
+    // front so they can be returned even when kubectl fails or no pods exist yet.
+    const podNames = inferencePodNames(deploymentName);
+
     try {
       // Run kubectl get pods and filter for the deployment name in JS.
       // Piping to `grep` would make the whole command exit non-zero (throw)
@@ -98,7 +104,6 @@ export async function GET(request: NextRequest) {
       };
 
       for (const line of lines) {
-        if (!line.includes(deploymentName)) continue;
         const parts = line.trim().split(/\s+/);
         if (parts.length < 3) continue;
 
@@ -109,9 +114,11 @@ export async function GET(request: NextRequest) {
         // Parse ready status
         const [ready, total] = readyStatus.split('/').map(Number);
 
-        if (podName.includes('-cache-')) {
+        // Match against the operator-derived names rather than a substring of
+        // the deployment name, which breaks when the name is truncated+hashed.
+        if (podName === podNames.cache) {
           podStatus.cachePod = { ready, total, status };
-        } else if (podName.includes('-q-default-n-')) {
+        } else if (podName === podNames.default) {
           podStatus.defaultPod = { ready, total, status };
         }
       }
@@ -119,6 +126,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({
         success: true,
         podStatus,
+        podNames,
         deploymentName,
       });
     } catch (error) {
@@ -132,6 +140,7 @@ export async function GET(request: NextRequest) {
         error: 'Failed to fetch pod status',
         message,
         stderr,
+        podNames,
         deploymentName,
       });
     }

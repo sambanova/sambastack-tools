@@ -11,16 +11,33 @@ import path from 'path';
 import chalk from 'chalk';
 import * as readlineModule from 'readline';
 import readlinePromises from 'readline/promises';
-// ─── Inlined from cli-utils.ts ───────────────────────────────────────────────
+import type {
+  Model,
+  ModelProfile,
+  BatchingConfig,
+  CheckpointMappingV3,
+  ModelProfilesCache,
+} from '../app/types/bundle';
+import {
+  getHighestVersion,
+  getEffectiveBatchingConfig,
+  getDisplayName,
+  isSpecDecodingProfile,
+  generateModelBundleYaml,
+  type ModelBundleSelection,
+} from '../app/utils/bundle-yaml-generator';
+import { parseModelBundleYamlContent } from '../app/utils/parse-bundle-yaml';
 
-interface BundleSelection {
-  model:    string;
-  ss:       string;
-  bs:       string;
-  pef:      string;
-  version:  string;
-  draftFor?: string;  // set when this selection is a draft model for another model
-}
+// ─── V3 CLI data model ───────────────────────────────────────────────────────
+// V3 replaces the old model→PEF (SS/BS) selection model with a
+// model→arch→profile join (see v3plan.md, "V3 SambaWiz UX & implementation
+// plan"). The CLI sources its Model/ModelProfile lists from the same caches
+// the web UI's Home "Apply" flow produces (app/data/checkpoint_mapping.json —
+// CheckpointMappingV3 shape — and app/data/model_profiles.json —
+// ModelProfilesCache shape) and reuses the shared, framework-agnostic
+// generator/parser (bundle-yaml-generator.ts / parse-bundle-yaml.ts) so the
+// CLI and the GUI emit byte-identical ModelBundle YAML for the same
+// selections.
 
 interface PodInfo {
   name:     string;
@@ -42,47 +59,6 @@ function normalizeApiUrl(apiDomain: string): string {
   let base = apiDomain.replace(/\/v1\/chat\/completions\/?$/, '');
   if (!base.endsWith('/')) base += '/';
   return base;
-}
-
-// Normalize checkpointsDir. For GCS it must be ONLY the bucket root
-// (e.g. gs://my-bucket/) — per-model checkpoint sub-paths are derived
-// automatically, so a deeper gs:// path produces a doubled, broken path; any
-// sub-path is stripped and the user is warned. Non-GCS roots (NFS mounts, local
-// dirs, etc.) are supported as-is and only get a trailing slash. Mirrors
-// app/utils/checkpoints-dir.ts (kept inline so the CLI stays self-contained).
-function normalizeCheckpointsDir(dir: string): string {
-  const original = (dir ?? '').trim();
-  if (original === '') return '';
-
-  const match = original.match(/^gs:\/\/([^/]+)(\/?)/i);
-  if (!match) {
-    // Non-GCS root (NFS, local, ...): no bucket-root invariant — leave as-is.
-    return original.endsWith('/') ? original : `${original}/`;
-  }
-
-  const bucketRoot = `gs://${match[1]}/`;
-  const remainder = original.slice(match[0].length).replace(/\/+$/, '');
-  if (remainder.length > 0) {
-    warnMsg(`checkpointsDir "${original}" includes a path below the GCS bucket root. ` +
-            `For GCS, checkpoint sub-paths are derived automatically per model, so only ` +
-            `the bucket root is needed — using "${bucketRoot}". ` +
-            `Set checkpointsDir to "gs://<your-bucket>/" to avoid this warning.`);
-  }
-  return bucketRoot;
-}
-
-function generateCheckpointKey(modelName: string): string {
-  return modelName
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '') + '_CKPT';
-}
-
-/** Mirrors UI's generateVisionEmbeddingCheckpointName — strips _INSTRUCT suffix, adds _VISION_EMBD_CKPT */
-function generateVisionEmbeddingCkptKey(modelName: string): string {
-  const base = modelName.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  if (base.endsWith('_INSTRUCT')) return base.replace(/_INSTRUCT$/, '') + '_VISION_EMBD_CKPT';
-  return base + '_VISION_EMBD_CKPT';
 }
 
 function getDeploymentStatus(cachePod: PodInfo | null, defaultPod: PodInfo | null): DeploymentStatus {
@@ -112,15 +88,7 @@ function classifyPod(podName: string): 'cache' | 'default' | 'other' {
   return 'other';
 }
 
-interface BuildBundleYamlOptions {
-  selections:        BundleSelection[];
-  checkpointMapping: Record<string, { path: string; vision_embedding_checkpoint?: string }>;
-  checkpointsDir:    string;
-  bundleName:        string;
-  pefConfigs?:       Record<string, unknown>;
-}
-
-/** Format Kubernetes bundle validation errors the same way the UI does */
+/** Format Kubernetes validation/legalizer errors the same way for ModelBundle as the UI does. */
 function printValidationErrors(conds: any[]): void {
   const errCond = conds.find((c: any) => c.reason === 'ValidationFailed' || (c.status === 'False' && c.message));
   const msg = errCond?.message || conds.map((c: any) => c.message).filter(Boolean).join('\n');
@@ -138,162 +106,104 @@ function printValidationErrors(conds: any[]): void {
   process.stdout.write('\n');
 }
 
-function buildBundleYaml(opts: BuildBundleYamlOptions): { yaml: string; templateName: string; bundleManifestName: string } {
-  const { selections, checkpointMapping, checkpointsDir, bundleName, pefConfigs } = opts;
-  // A PEF emits `dynamic_dims` in the YAML only when its pef_configs entry is an array
-  // (multiple SS/BS combos). Single-object entries — including static-batch DYT PEFs —
-  // render as a plain `pef:` line, matching bundle-yaml-generator.ts.
-  const isDynamicDimsPef = (pefName: string): boolean =>
-    Array.isArray(pefConfigs?.[pefName]);
-  const templateName       = `bt-${bundleName}`;
-  const bundleManifestName = `b-${bundleName}`;
-  const tmpl: Record<string, string> = {};
-  const bmod: Record<string, string> = {};
-  const ckpt: Record<string, string> = {};
-
-  // Build lookup: targetModel+ss+bs → draftModelName
-  const draftLookup: Record<string, string> = {};
-  for (const sel of selections) {
-    if (sel.draftFor) {
-      draftLookup[`${sel.draftFor}|${sel.ss}|${sel.bs}`] = sel.model;
-    }
-  }
-
-  // Group non-draft selections by model → SS (mirrors UI bundle-yaml-generator.ts expert grouping)
-  const modelSsGroups: Record<string, Record<string, BundleSelection[]>> = {};
-  for (const sel of selections) {
-    if (sel.draftFor) continue;
-    if (!modelSsGroups[sel.model]) modelSsGroups[sel.model] = {};
-    if (!modelSsGroups[sel.model][sel.ss]) modelSsGroups[sel.model][sel.ss] = [];
-    modelSsGroups[sel.model][sel.ss].push(sel);
-  }
-
-  for (const [model, ssGroups] of Object.entries(modelSsGroups)) {
-    const cd  = checkpointMapping[model];
-    const ck  = generateCheckpointKey(model);
-    const dir = checkpointsDir.endsWith('/') ? checkpointsDir : checkpointsDir + '/';
-    let expertBlock = '      experts:\n';
-
-    for (const [ss, configs] of Object.entries(ssGroups)) {
-      // Split DYT PEFs (multi-BS, use dynamic_dims) from regular PEFs (single BS)
-      const dytByPef: Record<string, { pef: string; version: string; bsValues: number[] }> = {};
-      const regularConfigs: BundleSelection[] = [];
-      for (const c of configs) {
-        if (isDynamicDimsPef(c.pef)) {
-          if (!dytByPef[c.pef]) dytByPef[c.pef] = { pef: c.pef, version: c.version, bsValues: [] };
-          dytByPef[c.pef].bsValues.push(parseInt(c.bs, 10));
-        } else {
-          regularConfigs.push(c);
-        }
-      }
-
-      expertBlock += `        ${ss}:\n          configs:\n`;
-
-      // DYT PEFs: one entry per PEF with dynamic_dims (matches UI bundle-yaml-generator.ts)
-      for (const { pef, version, bsValues } of Object.values(dytByPef)) {
-        expertBlock += `          - dynamic_dims:\n              batch_size:\n                values:\n`;
-        bsValues.sort((a, b) => a - b).forEach(bs => { expertBlock += `                - ${bs}\n`; });
-        expertBlock += `            pef: ${pef}:${version}\n`;
-      }
-
-      // Regular PEFs: use default_config_values when all have draft + multiple configs
-      const allHaveDraft = regularConfigs.length > 0 && regularConfigs.every(c => !!draftLookup[`${c.model}|${c.ss}|${c.bs}`]);
-      const hasMultiple  = regularConfigs.length > 1;
-      const firstDraft   = regularConfigs.length > 0 ? draftLookup[`${regularConfigs[0].model}|${regularConfigs[0].ss}|${regularConfigs[0].bs}`] : undefined;
-
-      if (allHaveDraft && hasMultiple && firstDraft) {
-        for (const c of regularConfigs) {
-          expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
-        }
-        expertBlock += `          default_config_values:\n            spec_decoding:\n              draft_model: ${firstDraft}\n`;
-      } else {
-        for (const c of regularConfigs) {
-          const cfgDraft = draftLookup[`${c.model}|${c.ss}|${c.bs}`];
-          expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
-          if (cfgDraft) {
-            expertBlock += `            spec_decoding:\n              draft_model: ${cfgDraft}\n`;
-          }
-        }
-      }
-    }
-
-    tmpl[model] = expertBlock;
-    ckpt[ck]    = `    ${ck}:\n      source: ${dir}${cd.path}\n      toolSupport: true\n`;
-    // Vision embedding checkpoint (Llama-4-Maverick, gemma-3-12b-it, etc.)
-    const vck = cd.vision_embedding_checkpoint ? generateVisionEmbeddingCkptKey(model) : null;
-    if (vck && cd.vision_embedding_checkpoint) {
-      ckpt[vck] = `    ${vck}:\n      source: ${dir}${cd.vision_embedding_checkpoint}\n      toolSupport: true\n`;
-    }
-    let modelEntry = `    ${model}:\n      checkpoint: ${ck}\n      template: ${model}\n`;
-    if (vck) modelEntry += `      vision_embedding_checkpoint: ${vck}\n`;
-    bmod[model] = modelEntry;
-  }
-
-  // Draft models also need their own template entries and checkpoints
-  // Group by model → SS to avoid duplicate SS keys (same fix as non-draft loop above)
-  const draftSsGroups: Record<string, Record<string, BundleSelection[]>> = {};
-  for (const sel of selections) {
-    if (!sel.draftFor) continue;
-    if (!draftSsGroups[sel.model]) draftSsGroups[sel.model] = {};
-    if (!draftSsGroups[sel.model][sel.ss]) draftSsGroups[sel.model][sel.ss] = [];
-    draftSsGroups[sel.model][sel.ss].push(sel);
-  }
-  for (const [draftModel, ssGroups] of Object.entries(draftSsGroups)) {
-    const cd  = checkpointMapping[draftModel];
-    const ck  = generateCheckpointKey(draftModel);
-    const dir = checkpointsDir.endsWith('/') ? checkpointsDir : checkpointsDir + '/';
-    if (!cd) continue;
-    let expertBlock = '      experts:\n';
-    for (const [ss, configs] of Object.entries(ssGroups)) {
-      expertBlock += `        ${ss}:\n          configs:\n`;
-      for (const c of configs) {
-        expertBlock += `          - pef: ${c.pef}:${c.version}\n`;
-      }
-    }
-    if (!tmpl[draftModel]) tmpl[draftModel] = expertBlock;
-    if (!bmod[draftModel]) bmod[draftModel] = `    ${draftModel}:\n      checkpoint: ${ck}\n      template: ${draftModel}\n`;
-    ckpt[ck] = `    ${ck}:\n      source: ${dir}${cd.path}\n      toolSupport: true\n`;
-  }
-
-  const tModels = Object.keys(tmpl).map(m => `    ${m}:\n${tmpl[m]}`).join('');
-  const bModels = Object.values(bmod).join('');
-  const ckpts   = Object.values(ckpt).join('');
-
-  const yaml = [
-    'apiVersion: sambanova.ai/v1alpha1',
-    'kind: BundleTemplate',
-    'metadata:',
-    `  name: ${templateName}`,
-    'spec:',
-    '  models:',
-    tModels.trimEnd(),
-    '  owner: no-reply@sambanova.ai',
-    '  secretNames:',
-    '  - sambanova-artifact-reader',
-    '  usePefCRs: true',
-    '---',
-    'apiVersion: sambanova.ai/v1alpha1',
-    'kind: Bundle',
-    'metadata:',
-    `  name: ${bundleManifestName}`,
-    'spec:',
-    '  checkpoints:',
-    ckpts.trimEnd(),
-    '  models:',
-    bModels.trimEnd(),
-    '  secretNames:',
-    '  - sambanova-artifact-reader',
-    `  template: ${templateName}`,
-  ].join('\n') + '\n';
-
-  return { yaml, templateName, bundleManifestName };
+/**
+ * Reads the `Valid` condition off a ModelBundle's `status.conditions`
+ * (confirmed shape, v3plan.md Q5: `{ type: Valid, status, reason, message }`
+ * — identical to the V2 `Bundle` status).
+ */
+export type ValidationOutcome = 'succeeded' | 'failed' | 'pending';
+export function readValidCondition(conditions: Array<{ type?: string; status?: string }>): ValidationOutcome {
+  const cond = conditions.find((c) => c.type === 'Valid');
+  if (!cond) return 'pending';
+  if (cond.status === 'True') return 'succeeded';
+  if (cond.status === 'False') return 'failed';
+  return 'pending';
 }
 
-function buildDeploymentYaml(bundleName: string): { yaml: string; deploymentName: string } {
-  const deploymentName = bundleName.replace(/^b-/, 'bd-');
-  const yaml = [
+// ─── V3 cache → CR adapters ──────────────────────────────────────────────────
+// Converts cache entries (CheckpointMappingV3 / ModelProfilesCache — plain
+// JSON caches, see v3plan.md "Data fetching & caching for V3") into the
+// Model / ModelProfile CR shapes the shared generator functions expect.
+
+/** Converts a CheckpointMappingV3 entry (+ its display name) into a `Model` CR object. */
+export function toModelCR(displayName: string, entry: CheckpointMappingV3[string]): Model {
+  return {
+    metadata: { name: entry.resource_name },
+    spec: {
+      name: displayName,
+      checkpoints: entry.checkpoints,
+      metadata: { capabilities: entry.capabilities },
+    },
+  };
+}
+
+/** Converts a ModelProfilesCache entry (+ its name) into a `ModelProfile` CR object. */
+export function toModelProfileCR(name: string, entry: ModelProfilesCache[string]): ModelProfile {
+  return {
+    metadata: { name },
+    spec: {
+      model_arch: entry.model_arch,
+      features: entry.features,
+      defaultBatchingConfig: entry.batchingConfig,
+      pefs: entry.pefs,
+    },
+  };
+}
+
+/**
+ * Checkpoint archs (keys of `checkpoints`) that have at least one matching
+ * `ModelProfile` in the cache (join on `model_arch`) — empty means the
+ * no-matching-profile guard (Q4) should block this model from the bundle.
+ */
+export function getArchsWithProfiles(
+  checkpoints: CheckpointMappingV3[string]['checkpoints'],
+  modelProfiles: ModelProfilesCache
+): string[] {
+  const profiledArchs = new Set(Object.values(modelProfiles).map((p) => p.model_arch));
+  return Object.keys(checkpoints).filter((a) => profiledArchs.has(a));
+}
+
+/** `ModelProfile` CR objects whose `model_arch` matches `arch`, sourced from the cache. */
+export function getProfilesForArch(arch: string, modelProfiles: ModelProfilesCache): ModelProfile[] {
+  return Object.entries(modelProfiles)
+    .filter(([, entry]) => entry.model_arch === arch)
+    .map(([name, entry]) => toModelProfileCR(name, entry));
+}
+
+/** Parses a user-entered batch-sizes override: `'*'` (all) or a comma-separated number list. */
+export function parseBatchSizesInput(input: string): number[] | '*' {
+  const trimmed = input.trim();
+  if (trimmed === '*') return '*';
+  return trimmed
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n));
+}
+
+/** Reverse-looks-up a `Model` CR name (crname) back to its display name in the checkpoint mapping cache. */
+export function crNameToDisplayName(checkpointMapping: CheckpointMappingV3, crname: string): string | undefined {
+  const found = Object.entries(checkpointMapping).find(([, entry]) => entry.resource_name === crname);
+  return found?.[0];
+}
+
+/** Extracts a ModelBundle's `metadata.name` from YAML text via the shared V3 parser (returns '' on parse failure). */
+export function extractBundleName(yamlContent: string): string {
+  const parsed = parseModelBundleYamlContent(yamlContent);
+  return 'error' in parsed ? '' : parsed.bundleName;
+}
+
+/**
+ * Builds the `ModelDeployment` YAML referencing a `ModelBundle` by name
+ * (Q6 — always `spec.bundle`, never inline `spec.models`). All other
+ * deployment knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.)
+ * are carried over verbatim from the old `BundleDeployment` builder (Step 5,
+ * "Keep all other deployment parameters unchanged").
+ */
+export function buildModelDeploymentYaml(bundleName: string): { yaml: string; deploymentName: string } {
+  const deploymentName = `md-${bundleName}`;
+  const yamlText = [
     'apiVersion: sambanova.ai/v1alpha1',
-    'kind: BundleDeployment',
+    'kind: ModelDeployment',
     'metadata:',
     `  name: ${deploymentName}`,
     'spec:',
@@ -309,7 +219,7 @@ function buildDeploymentYaml(bundleName: string): { yaml: string; deploymentName
     '  engineConfig:',
     '    startupTimeout: 7200',
   ].join('\n');
-  return { yaml, deploymentName };
+  return { yaml: yamlText, deploymentName };
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
@@ -320,34 +230,31 @@ const PROJECT_ROOT = process.cwd();
 const APP_DIR      = path.join(PROJECT_ROOT, 'app');
 const DATA_DIR     = path.join(APP_DIR, 'data');
 
-// ─── generateCheckpointMapping() ─────────────────────────────────────────────
+// ─── V3 cache generation ──────────────────────────────────────────────────────
+// Mirrors app/api/generate-checkpoint-mapping/route.ts and
+// app/api/generate-model-profiles/route.ts (kept inline here so the CLI
+// works standalone, without the Next.js server — see README-CLI.md). Unlike
+// the V2 CLI, this captures ALL checkpoint archs + versions per model (not
+// just the first) and no longer pre-selects a version or writes
+// `checkpointsDir`-prefixed source paths — checkpoints are resolved by the
+// operator from the Model CR at reconcile time (Q11).
 
 function stripGcsPrefix(p: string): string {
   return p.replace(/^gs:\/\/[^/]+\//, '').replace(/\/$/, '');
 }
 
-function highestVersion(versions: Record<string, any>): string {
-  const keys = Object.keys(versions);
-  return keys.sort((a, b) => {
-    const ap = a.split('.').map(Number);
-    const bp = b.split('.').map(Number);
-    for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
-      const d = (ap[i] || 0) - (bp[i] || 0);
-      if (d !== 0) return d;
-    }
-    return 0;
-  })[keys.length - 1];
-}
-
 const ckLog  = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[Checkpoint] ${msg}\n`)); };
+const mpLog  = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[Model Profiles] ${msg}\n`)); };
 const pefLog = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[PEF Generator] ${msg}\n`)); };
 
-async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, checkpointOverrides: Record<string, string> = {}, verbose = true, skipPefGeneration = false): Promise<{ count: number }> {
-  try {
-    const cfg = JSON.parse(readFileSync(path.join(PROJECT_ROOT, 'app-config.json'), 'utf-8'));
-    ckLog(`Using environment: ${cfg.currentKubeconfig || 'unknown'}`, verbose);
-  } catch { /* skip if config unreadable */ }
-  ckLog(`Using namespace: ${namespace}`, verbose);
+function kubectlErrorDetail(e: any): string {
+  const raw = e.stderr ? String(e.stderr).trim() : e.message;
+  const errField = raw.match(/err="([^"]+)"/);
+  const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
+  return errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
+}
+
+async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, verbose = true, chain = true): Promise<{ count: number }> {
   ckLog('Running kubectl get models -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
@@ -360,50 +267,60 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e: any) {
-    const raw = e.stderr ? String(e.stderr).trim() : e.message;
-    const errField = raw.match(/err="([^"]+)"/);
-    const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
-    const detail   = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
-    throw new Error(`kubectl get models failed: ${detail}`);
+    throw new Error(`kubectl get models failed: ${kubectlErrorDetail(e)}`);
   }
 
   const modelsData = JSON.parse(rawOutput);
-  const mapping: Record<string, any> = {};
+  const mapping: CheckpointMappingV3 = {};
 
   for (const item of modelsData.items || []) {
-    const modelName    = item.spec?.name;
+    const displayName  = item.spec?.name;
     const resourceName = item.metadata?.name;
     const checkpoints  = item.spec?.checkpoints;
-    if (!modelName || !resourceName || !checkpoints) continue;
+    if (!displayName || !resourceName || !checkpoints) continue;
 
-    const firstKey = Object.keys(checkpoints)[0];
-    if (!firstKey) continue;
+    const archs: CheckpointMappingV3[string]['checkpoints'] = {};
 
-    const versions = checkpoints[firstKey].versions;
-    if (!versions || Object.keys(versions).length === 0) continue;
+    // Capture ALL checkpoint archs (not just the first) so the arch dropdown
+    // and `crname:arch:version` refs work for multi-arch models (v3plan.md).
+    for (const [arch, checkpointEntry] of Object.entries(checkpoints) as [string, any][]) {
+      const versions = checkpointEntry?.versions;
+      if (!versions || Object.keys(versions).length === 0) continue;
 
-    const override = checkpointOverrides[modelName];
-    const selVer   = (override && versions[override]) ? override : highestVersion(versions);
-    const verData  = versions[selVer];
-    if (!verData?.source) continue;
-
-    const entry: any = {
-      path:          stripGcsPrefix(verData.source),
-      resource_name: resourceName,
-    };
-    if (verData.vision_embedding_checkpoint) {
-      entry.vision_embedding_checkpoint = stripGcsPrefix(verData.vision_embedding_checkpoint);
+      const archVersions: NonNullable<CheckpointMappingV3[string]['checkpoints'][string]>['versions'] = {};
+      for (const [version, versionData] of Object.entries(versions) as [string, any][]) {
+        if (!versionData?.source) continue;
+        archVersions[version] = {
+          source: stripGcsPrefix(versionData.source),
+          ...(versionData.checkpoint_status ? { checkpoint_status: versionData.checkpoint_status } : {}),
+          ...(versionData.tool_support !== undefined ? { tool_support: versionData.tool_support } : {}),
+          ...(versionData.vision_embedding_checkpoint
+            ? { vision_embedding_checkpoint: stripGcsPrefix(versionData.vision_embedding_checkpoint) }
+            : {}),
+        };
+      }
+      if (Object.keys(archVersions).length > 0) archs[arch] = { versions: archVersions };
     }
-    mapping[modelName] = entry;
+
+    if (Object.keys(archs).length === 0) continue;
+
+    mapping[displayName] = {
+      resource_name: resourceName,
+      checkpoints: archs,
+      capabilities: item.spec?.metadata?.capabilities ?? [],
+    };
   }
 
   const count = Object.keys(mapping).length;
-  const outputPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
-  writeFileSync(outputPath, JSON.stringify(mapping, null, 2) + '\n');
-  ckLog(`✓ Generated checkpoint_mapping.json with ${count} models`, verbose);
+  writeFileSync(path.join(DATA_DIR, 'checkpoint_mapping.json'), JSON.stringify(mapping, null, 2) + '\n');
+  ckLog(`✓ Generated checkpoint_mapping.json with ${count} models (multi-arch)`, verbose);
 
-  // Mirror UI: immediately generate pef_configs.json and populate model_type
-  if (!skipPefGeneration) {
+  if (chain) {
+    try {
+      await generateModelProfiles(kubeconfigPath, namespace, verbose);
+    } catch (e: any) {
+      if (verbose) process.stdout.write(chalk.yellow(`  Model profiles generation skipped: ${e.message.split('\n')[0]}\n`));
+    }
     try {
       await generatePefConfigs(kubeconfigPath, namespace, verbose);
     } catch (e: any) {
@@ -414,7 +331,54 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
   return { count };
 }
 
+// ─── generateModelProfiles() ──────────────────────────────────────────────────
+// New V3 cache (v3plan.md, "New" file inventory): caches `ModelProfile` CRs
+// keyed by `metadata.name`, joined to Models by `model_arch`.
+
+async function generateModelProfiles(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
+  mpLog('Running kubectl get modelprofiles -o json...', verbose);
+
+  const env = { ...process.env, KUBECONFIG: kubeconfigPath };
+  let rawOutput: string;
+  try {
+    rawOutput = execSync(`kubectl -n ${namespace} get modelprofiles -o json`, {
+      env,
+      encoding: 'utf-8',
+      timeout: 15000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch (e: any) {
+    throw new Error(`kubectl get modelprofiles failed: ${kubectlErrorDetail(e)}`);
+  }
+
+  const data = JSON.parse(rawOutput);
+  const cache: ModelProfilesCache = {};
+
+  for (const item of data.items || []) {
+    const name      = item.metadata?.name;
+    const modelArch = item.spec?.model_arch;
+    if (!name || !modelArch) continue;
+
+    cache[name] = {
+      model_arch: modelArch,
+      features: item.spec?.features ?? [],
+      batchingConfig: item.spec?.defaultBatchingConfig ?? item.status?.batchingConfig ?? {},
+      pefs: item.spec?.pefs ?? [],
+    };
+  }
+
+  const count = Object.keys(cache).length;
+  writeFileSync(path.join(DATA_DIR, 'model_profiles.json'), JSON.stringify(cache, null, 2) + '\n');
+  mpLog(`✓ Generated model_profiles.json with ${count} profiles`, verbose);
+  return { count };
+}
+
 // ─── generatePefConfigs() ─────────────────────────────────────────────────────
+// Retained as the PEF cache (still useful for validating batch sizes /
+// `sd`/DYT hints, per v3plan.md), but trimmed: the old DYT-precedence pruning
+// and `model_type` back-fill both read the now-obsolete `pef_mapping.json`
+// (SS/BS explosion is gone in V3 — batching is declarative via the profile,
+// and embedding detection comes from the Model CR's `capabilities`, Q10).
 
 function parsePefName(pefName: string): { ss: number; bs: number } | null {
   const ssMatch = pefName.match(/ss(\d+)/);
@@ -446,7 +410,7 @@ function selectDytSsValues(ssMin: number, ssMax: number, ssStep: number): number
   return selected.filter(ss => ss >= 32768);
 }
 
-async function generatePefConfigs(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number; modelTypeCount: number }> {
+async function generatePefConfigs(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
   pefLog('Running kubectl get pef -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
@@ -458,11 +422,7 @@ async function generatePefConfigs(kubeconfigPath: string, namespace: string, ver
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (e: any) {
-    const raw = e.stderr ? String(e.stderr).trim() : e.message;
-    const errField = raw.match(/err="([^"]+)"/);
-    const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
-    const detail   = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
-    throw new Error(`kubectl get pef failed: ${detail}`);
+    throw new Error(`kubectl get pef failed: ${kubectlErrorDetail(e)}`);
   }
 
   const pefData = JSON.parse(rawPef);
@@ -524,73 +484,20 @@ async function generatePefConfigs(kubeconfigPath: string, namespace: string, ver
 
   pefLog(`✓ Processed ${processedCount}/${items.length} PEFs`, verbose);
 
-  // Apply DYT precedence: if a model has DYT PEFs, remove non-DYT ones
-  const pefMappingPath = path.join(DATA_DIR, 'pef_mapping.json');
-  if (existsSync(pefMappingPath)) {
-    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
-    for (const pefNames of Object.values(pefMapping)) {
-      const hasDyt = pefNames.some(name => name.includes('dyt') && configs[name] !== undefined);
-      if (hasDyt) {
-        for (const name of pefNames) {
-          if (!name.includes('dyt')) delete configs[name];
-        }
-      }
-    }
-  }
-
-  // Update checkpoint_mapping.json with model_type from pef spec.metadata.task_name
-  let modelTypeCount = 0;
-  const checkpointMappingPath = path.join(DATA_DIR, 'checkpoint_mapping.json');
-  if (existsSync(checkpointMappingPath) && existsSync(pefMappingPath)) {
-    const checkpointMapping: Record<string, any> = JSON.parse(readFileSync(checkpointMappingPath, 'utf-8'));
-    const pefMapping: Record<string, string[]> = JSON.parse(readFileSync(pefMappingPath, 'utf-8'));
-    let updated = false;
-
-    for (const [modelName, pefNames] of Object.entries(pefMapping)) {
-      if (!checkpointMapping[modelName]) continue;
-      if (checkpointMapping[modelName].model_type) continue;
-
-      const repPef = pefNames.find(name => items.some((i: any) => i.metadata?.name === name));
-      if (!repPef) continue;
-
-      try {
-        const indOut = execSync(`kubectl -n ${namespace} get pef ${repPef} -o json`, {
-          env, encoding: 'utf-8', timeout: 15000,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-        const ind: any = JSON.parse(indOut);
-        const taskName = ind.spec?.metadata?.task_name;
-        if (taskName) {
-          checkpointMapping[modelName].model_type = taskName;
-          pefLog(`Set model_type="${taskName}" for ${modelName}`, verbose);
-          updated = true;
-          modelTypeCount++;
-        }
-      } catch { /* skip on error */ }
-    }
-
-    if (updated) {
-      writeFileSync(checkpointMappingPath, JSON.stringify(checkpointMapping, null, 2) + '\n');
-      pefLog('✓ Updated checkpoint_mapping.json with model_type fields', verbose);
-    }
-  }
-
-  // Write pef_configs.json
   const pefConfigsPath = path.join(DATA_DIR, 'pef_configs.json');
   writeFileSync(pefConfigsPath, JSON.stringify(configs, null, 2) + '\n');
 
   pefLog(`✓ Generated pef_configs.json with ${processedCount} entries`, verbose);
-  return { count: processedCount, modelTypeCount };
+  return { count: processedCount };
 }
 
 // ─── runDataFileStepTracker() ─────────────────────────────────────────────────
 // Shared step-tracker UI used at startup, activate, and add-env.
-// Shows [1/2] / [2/2] animated lines with spinner + timing.
+// Shows [1/3] / [2/3] / [3/3] animated lines with spinner + timing.
 
 async function runDataFileStepTracker(
   kPath: string,
   namespace: string,
-  overrides: Record<string, string>,
   label?: string,
 ): Promise<void> {
   const LABEL_W = 26;
@@ -606,60 +513,82 @@ async function runDataFileStepTracker(
   const lbl1 = 'checkpoint_mapping.json'.padEnd(LABEL_W);
   let fr1 = 0;
   const s1 = Date.now();
-  process.stdout.write(`  [1/2]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[0])}  `);
+  process.stdout.write(`  [1/3]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[0])}  `);
   const tick1 = setInterval(() => {
     fr1++;
-    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[fr1 % FRAMES.length])}  `);
+    process.stdout.write(`\r  [1/3]  ${lbl1}${DOTS}${chalk.cyan(FRAMES[fr1 % FRAMES.length])}  `);
   }, 80);
 
   let ckCount = 0; let ckOk = false;
   try {
-    const r = await generateCheckpointMapping(kPath, namespace, overrides, false, true);
+    const r = await generateCheckpointMapping(kPath, namespace, false, false);
     ckCount = r.count; ckOk = true;
   } catch { /* handled below */ }
   clearInterval(tick1);
   const t1 = ((Date.now() - s1) / 1000).toFixed(1) + 's';
 
   if (ckOk) {
-    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${chalk.green('✓')}  ${`${ckCount} models`.padEnd(12)}  ${chalk.reset(`(${t1})`)}\n`);
+    process.stdout.write(`\r  [1/3]  ${lbl1}${DOTS}${chalk.green('✓')}  ${`${ckCount} models`.padEnd(12)}  ${chalk.reset(`(${t1})`)}\n`);
   } else {
     const cached = existsSync(path.join(DATA_DIR, 'checkpoint_mapping.json'));
-    process.stdout.write(`\r  [1/2]  ${lbl1}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? 'cached' : 'failed').padEnd(12)}\n`);
+    process.stdout.write(`\r  [1/3]  ${lbl1}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? 'cached' : 'failed').padEnd(12)}\n`);
     if (!cached) {
-      process.stdout.write(chalk.yellow(`\n  Bundle Builder unavailable until cluster reachable.\n`));
+      process.stdout.write(chalk.yellow(`\n  Model Selection unavailable until cluster reachable.\n`));
     }
   }
 
-  // Step 2 — pef_configs.json
-  const lbl2 = 'pef_configs.json'.padEnd(LABEL_W);
+  // Step 2 — model_profiles.json
+  const lbl2 = 'model_profiles.json'.padEnd(LABEL_W);
   let fr2 = 0;
   const s2 = Date.now();
-  process.stdout.write(`  [2/2]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[0])}  `);
+  process.stdout.write(`  [2/3]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[0])}  `);
   const tick2 = setInterval(() => {
     fr2++;
-    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[fr2 % FRAMES.length])}  `);
+    process.stdout.write(`\r  [2/3]  ${lbl2}${DOTS}${chalk.cyan(FRAMES[fr2 % FRAMES.length])}  `);
   }, 80);
 
-  let pefCount = 0; let typeCount = 0; let pefOk = false;
+  let mpCount = 0; let mpOk = false;
+  try {
+    const r = await generateModelProfiles(kPath, namespace, false);
+    mpCount = r.count; mpOk = true;
+  } catch { /* handled below */ }
+  clearInterval(tick2);
+  const t2 = ((Date.now() - s2) / 1000).toFixed(1) + 's';
+
+  if (mpOk) {
+    process.stdout.write(`\r  [2/3]  ${lbl2}${DOTS}${chalk.green('✓')}  ${`${mpCount} profiles`.padEnd(12)}  ${chalk.reset(`(${t2})`)}\n`);
+  } else {
+    const cached = existsSync(path.join(DATA_DIR, 'model_profiles.json'));
+    process.stdout.write(`\r  [2/3]  ${lbl2}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? 'cached' : 'failed').padEnd(12)}\n`);
+  }
+
+  // Step 3 — pef_configs.json
+  const lbl3 = 'pef_configs.json'.padEnd(LABEL_W);
+  let fr3 = 0;
+  const s3 = Date.now();
+  process.stdout.write(`  [3/3]  ${lbl3}${DOTS}${chalk.cyan(FRAMES[0])}  `);
+  const tick3 = setInterval(() => {
+    fr3++;
+    process.stdout.write(`\r  [3/3]  ${lbl3}${DOTS}${chalk.cyan(FRAMES[fr3 % FRAMES.length])}  `);
+  }, 80);
+
+  let pefCount = 0; let pefOk = false;
   try {
     const r = await generatePefConfigs(kPath, namespace, false);
-    pefCount = r.count; typeCount = r.modelTypeCount; pefOk = true;
+    pefCount = r.count; pefOk = true;
   } catch {
     if (existsSync(path.join(DATA_DIR, 'pef_configs.json'))) {
       pefCount = Object.keys(JSON.parse(readFileSync(path.join(DATA_DIR, 'pef_configs.json'), 'utf-8'))).length;
     }
   }
-  clearInterval(tick2);
-  const t2 = ((Date.now() - s2) / 1000).toFixed(1) + 's';
+  clearInterval(tick3);
+  const t3 = ((Date.now() - s3) / 1000).toFixed(1) + 's';
 
   if (pefOk) {
-    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${chalk.green('✓')}  ${`${pefCount} PEFs`.padEnd(12)}  ${chalk.reset(`(${t2})`)}\n`);
-    if (typeCount > 0) {
-      process.stdout.write(`         ${chalk.reset('└─')} model_type set for ${typeCount} models\n`);
-    }
+    process.stdout.write(`\r  [3/3]  ${lbl3}${DOTS}${chalk.green('✓')}  ${`${pefCount} PEFs`.padEnd(12)}  ${chalk.reset(`(${t3})`)}\n`);
   } else {
     const cached = existsSync(path.join(DATA_DIR, 'pef_configs.json'));
-    process.stdout.write(`\r  [2/2]  ${lbl2}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? `cached (${pefCount} PEFs)` : 'failed').padEnd(12)}\n`);
+    process.stdout.write(`\r  [3/3]  ${lbl3}${DOTS}${cached ? chalk.yellow('⚠') : chalk.red('✖')}  ${chalk.reset(cached ? `cached (${pefCount} PEFs)` : 'failed').padEnd(12)}\n`);
   }
 
   process.stdout.write('\n');
@@ -1170,39 +1099,31 @@ async function addEnvironmentMenu(rl: any) {
 
   if (selected === 'add') {
     // ── Step 1: Environment name ──────────────────────────────────────────────
-    const name = await input(rl, '1/7  Environment name');
+    const name = await input(rl, '1/6  Environment name');
     if (!name || name === ESC) return;
     if (/\s/.test(name)) { errorMsg('Environment name cannot contain spaces.'); return; }
     if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
 
     // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
     process.stdout.write(chalk.reset('\n  Paste the base64-encoded kubeconfig or enter a file path.\n  The file will be saved as kubeconfigs/kubeconfig-' + name + '.yaml\n\n'));
-    const kubeconfigInput = await input(rl, '2/7  Kubeconfig (base64 or file path)');
+    const kubeconfigInput = await input(rl, '2/6  Kubeconfig (base64 or file path)');
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
     // ── Step 3: Namespace ─────────────────────────────────────────────────────
-    const ns = await input(rl, '3/7  Namespace', 'default');
+    const ns = await input(rl, '3/6  Namespace', 'default');
     if (ns === ESC) return;
 
     // ── Step 4: UI Domain ─────────────────────────────────────────────────────
-    const uiDomain = await input(rl, '4/7  UI Domain (optional)');
+    const uiDomain = await input(rl, '4/6  UI Domain (optional)');
     if (uiDomain === ESC) return;
 
     // ── Step 5: API Domain ────────────────────────────────────────────────────
-    const apiDomain = await input(rl, '5/7  API Domain (optional)');
+    const apiDomain = await input(rl, '5/6  API Domain (optional)');
     if (apiDomain === ESC) return;
 
     // ── Step 6: API Key ───────────────────────────────────────────────────────
-    const apiKey = await input(rl, '6/7  API Key (optional)');
+    const apiKey = await input(rl, '6/6  API Key (optional)');
     if (apiKey === ESC) return;
-
-    // ── Step 7: Checkpoints Directory (top-level, only prompt if not already set) ──
-    let checkpointsDirValue = appConfig.checkpointsDir || '';
-    if (!checkpointsDirValue) {
-      const ckDir = await input(rl, '7/7  Checkpoints Directory (e.g. gs://bucket/path)');
-      if (ckDir === ESC) return;
-      checkpointsDirValue = normalizeCheckpointsDir(ckDir);
-    }
 
     // ── Save kubeconfig file ──────────────────────────────────────────────────
     const kubeconfigsDir = path.join(PROJECT_ROOT, 'kubeconfigs');
@@ -1245,18 +1166,16 @@ async function addEnvironmentMenu(rl: any) {
       enableUpdates: true,
     };
     appConfig.currentKubeconfig = name;
-    if (checkpointsDirValue) appConfig.checkpointsDir = checkpointsDirValue;
 
     writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
     successMsg(`Environment "${name}" added and set as active.`);
     infoRow('Kubeconfig', destRelative);
     if (uiDomain)  infoRow('UI Domain',  uiDomain);
     if (apiDomain) infoRow('API Domain', apiDomain);
-    if (checkpointsDirValue) infoRow('Checkpoints Dir', checkpointsDirValue);
     process.stdout.write('\n');
 
-    // ── Auto-generate checkpoint mapping + PEF configs ────────────────────────
-    await runDataFileStepTracker(destPath, ns || 'default', appConfig.checkpoint_overrides || {});
+    // ── Auto-generate checkpoint mapping + model profiles + PEF configs ──────
+    await runDataFileStepTracker(destPath, ns || 'default');
 
     // ── Stay in sub-menu for the new environment ───────────────────────────────
     process.stdout.write('\n');
@@ -1291,9 +1210,6 @@ async function addEnvironmentMenu(rl: any) {
         if (apiD === ESC) continue;
         const aKey      = await input(rl, 'API Key',          ec.apiKey    || '');
         if (aKey === ESC) continue;
-        const curCkDir  = freshConfig.checkpointsDir || '';
-        const newCkDir  = await input(rl, 'Checkpoints Directory', curCkDir);
-        if (newCkDir === ESC) continue;
         const enableUpdStr = await input(rl, 'Enable Updates (y/n)', ec.enableUpdates === false ? 'n' : 'y');
         if (enableUpdStr === ESC) continue;
         freshConfig.kubeconfigs[name] = {
@@ -1305,7 +1221,6 @@ async function addEnvironmentMenu(rl: any) {
           apiKey:        aKey,
           enableUpdates: enableUpdStr.toLowerCase() !== 'n',
         };
-        if (newCkDir !== undefined) freshConfig.checkpointsDir = normalizeCheckpointsDir(newCkDir);
         writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
         successMsg(`Environment "${name}" updated.`);
       } else if (action === 'delete') {
@@ -1351,8 +1266,7 @@ async function addEnvironmentMenu(rl: any) {
       successMsg(`"${envName}" is now the active environment.`);
       const kPath  = path.join(PROJECT_ROOT, kFile);
       const ns     = ec.namespace || 'default';
-      const overrides: Record<string, string> = freshConfig.checkpoint_overrides || {};
-      await runDataFileStepTracker(kPath, ns, overrides);
+      await runDataFileStepTracker(kPath, ns);
       break; // leave sub-menu after activate
 
     } else if (action === 'validate') {
@@ -1378,9 +1292,6 @@ async function addEnvironmentMenu(rl: any) {
       if (apiDomain === ESC) continue;
       const apiKey    = await input(rl, 'API Key',          ec.apiKey    || '');
       if (apiKey === ESC) continue;
-      const curCkDir2  = freshConfig.checkpointsDir || '';
-      const newCkDir2  = await input(rl, 'Checkpoints Directory', curCkDir2);
-      if (newCkDir2 === ESC) continue;
       const enableUpdStr2 = await input(rl, 'Enable Updates (y/n)', ec.enableUpdates === false ? 'n' : 'y');
       if (enableUpdStr2 === ESC) continue;
 
@@ -1393,7 +1304,6 @@ async function addEnvironmentMenu(rl: any) {
         apiKey:        apiKey,
         enableUpdates: enableUpdStr2.toLowerCase() !== 'n',
       };
-      if (newCkDir2 !== undefined) freshConfig.checkpointsDir = normalizeCheckpointsDir(newCkDir2);
       writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`Environment "${envName}" updated.`);
       // stay in sub-menu after edit
@@ -1504,14 +1414,13 @@ async function startCli() {
     }
   }
 
-  let { appConfig: liveAppConfig, envConfig, namespace, currentEnv } = loaded;
+  let { envConfig, namespace, currentEnv } = loaded;
 
   // ── Startup: step tracker ────────────────────────────────────────────────────
   if (envConfig) {
     const kPath = path.join(PROJECT_ROOT, envConfig.file);
     if (existsSync(kPath)) {
-      const overrides: Record<string, string> = liveAppConfig.checkpoint_overrides || {};
-      await runDataFileStepTracker(kPath, namespace, overrides, `${currentEnv} / ${namespace}`);
+      await runDataFileStepTracker(kPath, namespace, `${currentEnv} / ${namespace}`);
     }
   }
 
@@ -1520,8 +1429,8 @@ async function startCli() {
     const envBadge = chalk.hex(BRAND)(`[${currentEnv}]`);
     const action = await select(rl, `Main Menu  ${envBadge}`, [
       { name: `⚙️   Manage Environments`,               value: 'add_env',        hint: 'Add, activate, edit, delete and validate' },
-      { name: `🧱  Bundle Builder`,                   value: 'bundle_builder', hint: 'Create and validate bundles' },
-      { name: `🚀  Bundle Deployment`,                  value: 'bundle_deploy',  hint: 'Deploy or delete bundles' },
+      { name: `🧱  Model Selection`,                   value: 'bundle_builder', hint: 'Create and validate ModelBundles' },
+      { name: `🚀  Model Deployment`,                  value: 'bundle_deploy',  hint: 'Deploy or delete ModelDeployments' },
       { name: `📈  Check Deployment Progress`,         value: 'monitor_deploy', hint: 'Live pod status monitor' },
       { name: `🤖  Playground (Chat Console)`,         value: 'playground',     hint: 'Chat with deployed models' },
       { name: chalk.yellow('⏹️   Exit'),               value: 'exit' },
@@ -1533,10 +1442,10 @@ async function startCli() {
       case 'add_env':
         await addEnvironmentMenu(rl);
         // Reload config in case environment changed
-        { const r = loadEnvConfig(); if (!r.error) ({ appConfig: liveAppConfig, envConfig, namespace, currentEnv } = r); }
+        { const r = loadEnvConfig(); if (!r.error) ({ envConfig, namespace, currentEnv } = r); }
         break;
       case 'bundle_builder':
-        await bundleBuilderMenu(rl, liveAppConfig, namespace);
+        await bundleBuilderMenu(rl, namespace);
         break;
       case 'bundle_deploy':
         await bundleDeploymentMenu(rl, namespace);
@@ -1767,29 +1676,17 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     }
   }
 
-  // 7. Checkpoints Directory
-  process.stdout.write('\n');
-  const appConf = requireJson(CONFIG_PATH);
-  const ckDir   = appConf.checkpointsDir || '';
-  if (!ckDir) {
-    checkRow(chalk.red('✖'), 'Checkpoints Dir', 'not configured (required for Bundle Builder)');
-    allPassed = false;
-  } else {
-    infoRow('Checkpoints Dir', ckDir);
-  }
-
   process.stdout.write('\n');
   hr();
   if (allPassed) {
     successMsg('All checks passed!');
-    // Regenerate checkpoint mapping now that cluster connectivity is confirmed
+    // Regenerate checkpoint mapping, model profiles and PEF configs now that
+    // cluster connectivity is confirmed.
     try {
-      const appConfig = requireJson(CONFIG_PATH);
-      const overrides: Record<string, string> = appConfig.checkpoint_overrides || {};
-      await generateCheckpointMapping(kPath, namespace, overrides);
+      await generateCheckpointMapping(kPath, namespace);
     } catch (e: any) {
       spinner.fail(`Checkpoint mapping failed: ${e.message.split('\n')[0]}`);
-      process.stdout.write(chalk.yellow(`\n  Bundle Builder will not work until checkpoint_mapping.json is generated.\n\n`));
+      process.stdout.write(chalk.yellow(`\n  Model Selection will not work until checkpoint_mapping.json is generated.\n\n`));
     }
   } else {
     errorMsg('Some checks failed — review app-config.json');
@@ -1800,37 +1697,220 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
 function tick() { return new Promise(r => setTimeout(r, 120)); }
 
 // ─── bundleBuilderMenu() ─────────────────────────────────────────────────────
+// Implements the v3plan.md "V3 SambaWiz UX & implementation plan" Steps 1–4:
+// select model(s) → pick arch (if multi-arch) → pick exactly one ModelProfile
+// per model (+ optional draft model for spec decoding) → override the
+// profile's batching config → emit a single ModelBundle.
 
-async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
-  sectionHeader('Bundle Builder', '🧱');
+/** Prints a profile "card" (display name, per-tier batch sizes, features). */
+function printProfileCard(profile: ModelProfile, siblings: ModelProfile[]) {
+  const label = getDisplayName(profile, siblings);
+  const cfg = getEffectiveBatchingConfig(profile);
+  process.stdout.write(chalk.reset.bold(`\n  ${label}\n`));
+  Object.entries(cfg).forEach(([tier, v]) => {
+    const bs = Array.isArray(v.batch_sizes) ? `[${v.batch_sizes.join(', ')}]` : v.batch_sizes;
+    process.stdout.write(chalk.reset(`    ${tier}: batch_sizes=${bs}\n`));
+  });
+  const features = profile.spec.features.length > 0 ? profile.spec.features.join(', ') : 'default';
+  process.stdout.write(chalk.reset(`    Features: ${features}\n\n`));
+}
 
-  const pefMapping        = requireJson(path.join(DATA_DIR, 'pef_mapping.json'));
-  const checkpointMapping = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
-  const pefConfigsPath    = path.join(DATA_DIR, 'pef_configs.json');
-  const pefConfigs        = requireJson(pefConfigsPath);
-
-  const availableModels = Object.keys(pefMapping).filter(m => checkpointMapping[m]?.path);
-  if (availableModels.length === 0) {
-    errorMsg('No models available — check checkpoint_mapping.json');
-    return;
+/**
+ * Step 2 (+ arch dropdown): resolves exactly one `{ arch, profile }` pair for
+ * a model. Returns `null` when the model has no matching profile (Q4 guard)
+ * or the user backs out.
+ */
+async function selectArchAndProfile(
+  rl: any,
+  displayName: string,
+  model: Model,
+  modelProfiles: ModelProfilesCache,
+): Promise<{ arch: string; profile: ModelProfile } | null> {
+  const archsWithProfiles = getArchsWithProfiles(model.spec.checkpoints, modelProfiles);
+  if (archsWithProfiles.length === 0) {
+    warnMsg(`No matching model profile was found for ${displayName} — it cannot be added to the bundle.`);
+    return null;
   }
 
-  const allSelections: any[] = [];
-  let addingModels = true;
+  let arch: string;
+  if (archsWithProfiles.length === 1) {
+    arch = archsWithProfiles[0];
+  } else {
+    const archChoices: Choice[] = archsWithProfiles.map((a) => {
+      const hv = getHighestVersion(model, a);
+      const status = model.spec.checkpoints[a].versions[hv]?.checkpoint_status;
+      return { name: `${a}${status ? `  (${status})` : ''}`, value: a };
+    });
+    archChoices.push({ name: chalk.reset('← Back'), value: 'back' });
+    const chosen = await select(rl, `Select checkpoint arch for ${displayName}:`, archChoices);
+    if (!chosen || chosen === 'back') return null;
+    arch = chosen;
+  }
+
+  const profiles = getProfilesForArch(arch, modelProfiles);
+  let profile: ModelProfile;
+  if (profiles.length === 1) {
+    profile = profiles[0];
+    process.stdout.write(chalk.reset(`  Auto-selected profile: ${chalk.bold(getDisplayName(profile, profiles))}\n`));
+  } else {
+    const choices: Choice[] = profiles.map((p) => {
+      const label = getDisplayName(p, profiles);
+      const cfg = getEffectiveBatchingConfig(p);
+      const tiers = Object.entries(cfg)
+        .map(([t, v]) => `${t}:[${Array.isArray(v.batch_sizes) ? v.batch_sizes.join(',') : v.batch_sizes}]`)
+        .join(' ');
+      const features = p.spec.features.length > 0 ? p.spec.features.join(', ') : 'default';
+      return { name: label, value: p, hint: `${tiers}   Features: ${features}` };
+    });
+    choices.push({ name: chalk.reset('← Back'), value: 'back' });
+    const chosen = await select(rl, `Select a profile for ${displayName}:`, choices);
+    if (!chosen || chosen === 'back') return null;
+    profile = chosen;
+  }
+
+  printProfileCard(profile, profiles);
+  return { arch, profile };
+}
+
+/** Step 3: optional bundle-level batching-config override, seeded from the profile's effective default. */
+async function promptBatchingOverride(rl: any, profile: ModelProfile): Promise<BatchingConfig | undefined> {
+  const effective = getEffectiveBatchingConfig(profile);
+  const tiers = Object.keys(effective);
+  if (tiers.length === 0) return undefined;
+
+  const wantsOverride = await confirm(rl, "Override this profile's batching config for the bundle?", false);
+  if (!wantsOverride) return undefined;
+
+  const override: BatchingConfig = {};
+  for (const tier of tiers) {
+    const current = effective[tier].batch_sizes;
+    const defaultStr = Array.isArray(current) ? current.join(',') : current;
+    const raw = await input(rl, `Batch sizes for tier ${tier} (comma-separated, or * for all)`, String(defaultStr));
+    const effectiveRaw = raw === ESC ? String(defaultStr) : (raw || String(defaultStr));
+    override[tier] = { batch_sizes: parseBatchSizesInput(effectiveRaw) };
+  }
+  return override;
+}
+
+/** Steps 1–3 combined: interactively builds the full `ModelBundleSelection[]` list, including spec-decoding drafts. */
+async function collectModelSelections(
+  rl: any,
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache
+): Promise<ModelBundleSelection[]> {
+  const selections: ModelBundleSelection[] = [];
+  const displayNames = Object.keys(checkpointMapping).sort();
+
+  let adding = true;
+  while (adding) {
+    const addedCrnames = new Set(selections.map((s) => s.model.metadata.name));
+    const choices: Choice[] = [
+      { name: chalk.green.bold('✅  Finish and Create Bundle'), value: 'finish',
+        hint: selections.length > 0 ? `${selections.length} model(s) selected` : '' },
+      ...displayNames.map((name) => {
+        const entry = checkpointMapping[name];
+        const already = addedCrnames.has(entry.resource_name);
+        const hasProfile = getArchsWithProfiles(entry.checkpoints, modelProfiles).length > 0;
+        const label = `${already ? chalk.green('✔ ') : ''}${name}${hasProfile ? '' : chalk.reset('  (no matching profile)')}`;
+        return { name: label, value: name };
+      }),
+      { name: chalk.red('✕  Cancel'), value: 'cancel' },
+    ];
+
+    const chosenName = await select(rl, `Model Selection  (${selections.length} added)`, choices);
+    if (!chosenName || chosenName === 'cancel') return [];
+    if (chosenName === 'finish') {
+      if (selections.length === 0) { warnMsg('Add at least one model first.'); continue; }
+      adding = false;
+      continue;
+    }
+
+    const entry = checkpointMapping[chosenName];
+    const model = toModelCR(chosenName, entry);
+
+    // Re-selecting an already-added model removes it (and its draft, if any)
+    // so the user can redo the flow — mirrors the old "edit by re-selecting" UX.
+    const existingIdx = selections.findIndex((s) => s.model.metadata.name === entry.resource_name && !s.isDraftFor);
+    if (existingIdx >= 0) {
+      const removedCrname = selections[existingIdx].model.metadata.name;
+      for (let i = selections.length - 1; i >= 0; i--) {
+        if (selections[i].model.metadata.name === removedCrname || selections[i].isDraftFor === removedCrname) {
+          selections.splice(i, 1);
+        }
+      }
+      successMsg(`Removed ${chosenName} — re-select to add it back`);
+      continue;
+    }
+
+    const picked = await selectArchAndProfile(rl, chosenName, model, modelProfiles);
+    if (!picked) continue;
+    const { arch, profile } = picked;
+
+    const batchingConfigOverride = await promptBatchingOverride(rl, profile);
+
+    selections.push({ model, arch, profile, batchingConfigOverride });
+    successMsg(`Added ${chosenName}  (${getDisplayName(profile, getProfilesForArch(arch, modelProfiles))})`);
+
+    // Spec-decoding draft model (Q12: experts always omitted; drives specDecodingPairs)
+    if (isSpecDecodingProfile(profile)) {
+      process.stdout.write(chalk.yellow(`\n  ⚡ ${chosenName}'s profile uses speculative-decoding PEFs.\n`));
+      process.stdout.write(chalk.reset('     A smaller draft model can significantly improve throughput.\n\n'));
+
+      const draftChoices: Choice[] = [
+        { name: chalk.reset('↩  Skip (no draft model)'), value: 'skip' },
+        ...displayNames.filter((n) => n !== chosenName).map((n) => ({ name: n, value: n })),
+        { name: chalk.reset('← Back'), value: 'back' },
+      ];
+      const draftName = await select(rl, `Draft model for ${chosenName}:`, draftChoices);
+      if (draftName && draftName !== 'skip' && draftName !== 'back') {
+        const draftEntry = checkpointMapping[draftName];
+        const draftModel = toModelCR(draftName, draftEntry);
+        const draftPicked = await selectArchAndProfile(rl, draftName, draftModel, modelProfiles);
+        if (draftPicked) {
+          const draftOverride = await promptBatchingOverride(rl, draftPicked.profile);
+          selections.push({
+            model: draftModel,
+            arch: draftPicked.arch,
+            profile: draftPicked.profile,
+            batchingConfigOverride: draftOverride,
+            isDraftFor: entry.resource_name,
+          });
+          successMsg(`Auto-added draft model ${draftName} for ${chosenName}`);
+        } else {
+          warnMsg(`Draft model ${draftName} has no matching profile — skipped`);
+        }
+      }
+    }
+  }
+
+  return selections;
+}
+
+async function bundleBuilderMenu(rl: any, namespace: string) {
+  sectionHeader('Model Selection', '🧱');
+
+  const checkpointMapping: CheckpointMappingV3 = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
+  const modelProfiles: ModelProfilesCache = requireJson(path.join(DATA_DIR, 'model_profiles.json'));
+
+  if (Object.keys(checkpointMapping).length === 0) {
+    errorMsg('No models available — check app/data/checkpoint_mapping.json (regenerate via Manage Environments → Validate)');
+    return;
+  }
+  if (Object.keys(modelProfiles).length === 0) {
+    errorMsg('No model profiles available — check app/data/model_profiles.json (regenerate via Manage Environments → Validate)');
+    return;
+  }
 
   // ── Load saved bundle shortcut ──────────────────────────────────────────────
   const artifactsDir  = path.join(PROJECT_ROOT, 'saved_artifacts');
   const savedArtifacts = existsSync(artifactsDir)
     ? readdirSync(artifactsDir)
         .filter(f => /\.(yaml|yml)$/i.test(f))
-        .filter(f => {
-          const c = readFileSync(path.join(artifactsDir, f), 'utf-8');
-          return c.includes('kind: BundleTemplate') && c.includes('kind: Bundle');
-        })
+        .filter(f => readFileSync(path.join(artifactsDir, f), 'utf-8').includes('kind: ModelBundle'))
     : [];
 
   if (savedArtifacts.length > 0) {
-    const loadChoice = await select(rl, 'Bundle Builder — start from:', [
+    const loadChoice = await select(rl, 'Model Selection — start from:', [
       { name: chalk.green.bold('🆕  Build new bundle'),       value: 'new'  },
       { name: '📂  Load from saved_artifacts/',               value: 'load' },
       { name: chalk.red('✕  Cancel'),                         value: 'cancel' },
@@ -1846,15 +1926,12 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       if (!chosenFile || chosenFile === 'back') return;
 
       const loadedYaml  = readFileSync(path.join(artifactsDir, chosenFile), 'utf-8');
-      const mName       = loadedYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-      const loadedBName = mName ? mName[1] : chosenFile.replace(/\.ya?ml$/i, '');
+      const loadedBName = extractBundleName(loadedYaml) || chosenFile.replace(/\.ya?ml$/i, '');
       yamlBox(`Loaded: ${chosenFile}`, loadedYaml);
 
-      // Jump straight to the What-next menu with the loaded YAML
       let finalYaml    = loadedYaml;
-      let activeBName  = loadedBName;
+      let activeBundleName  = loadedBName;
       let shouldApply  = false;
-      const bundleName = loadedBName;
 
       while (true) {
         const act = await select(rl, 'What next?', [
@@ -1885,405 +1962,157 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         } else if (act === 'save') {
           const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
           if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
-          const shortDefault = `saved_artifacts/${bundleName}.yaml`;
+          const shortDefault = `saved_artifacts/${activeBundleName}.yaml`;
           const fnameInput = await input(rl, 'Filename', shortDefault);
           if (fnameInput && fnameInput !== ESC) {
             const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
             try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
           }
         } else if (act === 'validate') {
-          const m  = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-          activeBName = m ? m[1] : loadedBName;
+          activeBundleName = extractBundleName(finalYaml) || loadedBName;
           shouldApply = true;
           break;
         } else if (act === 'skip') {
           process.stdout.write('\n');
-          process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
-          process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
+          process.stdout.write(chalk.reset(`  ModelBundle is ready.\n`));
+          process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Model Deployment  from the main menu to deploy it.\n\n`));
           return;
         }
       }
 
       if (shouldApply) {
-        const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
-        try {
-          writeFileSync(tempPath, finalYaml);
-          spinner.start('Applying bundle to cluster...');
-          await tick();
-          const applyOut1 = execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-          spinner.succeed('Bundle applied — polling for validation status...');
-          if (applyOut1?.trim()) {
-            process.stdout.write(chalk.reset('\nkubectl apply output:\n'));
-            applyOut1.trim().split('\n').forEach((line: string) => process.stdout.write(chalk.reset(`  ${line}\n`)));
-            process.stdout.write('\n');
-          }
-          const spinFrames2 = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
-          let   spinIdx2    = 0;
-          let   validated   = false;
-          const startMs2    = Date.now();
-          const maxWaitMs2  = 600_000; // 10 minutes
-
-          while ((Date.now() - startMs2) < maxWaitMs2) {
-            await new Promise(r => setTimeout(r, 3000));
-            const elapsed2   = Math.round((Date.now() - startMs2) / 1000);
-            const elapsedMin2 = Math.floor(elapsed2 / 60);
-            const elapsedSec2 = elapsed2 % 60;
-            const elapsedStr2 = elapsedMin2 > 0 ? `${elapsedMin2}m ${elapsedSec2}s` : `${elapsed2}s`;
-            const spin2      = chalk.magenta(spinFrames2[spinIdx2++ % spinFrames2.length]);
-
-            try {
-              const st   = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
-              const conds = st.status?.conditions || [];
-              const phase = st.status?.phase || 'Pending';
-
-              if (conds.length > 0) {
-                const latest = conds[conds.length - 1];
-                process.stdout.write(`\r  ${spin2}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr2)}  ${chalk.reset(latest.reason)}                    `);
-                if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
-                  process.stdout.write('\n'); successMsg('Bundle Validation Succeeded!');
-                  validated = true; break;
-                } else if (latest.reason === 'ValidationFailed' || latest.status === 'False') {
-                  process.stdout.write('\n');
-                  printValidationErrors(conds);
-                  validated = true; break;
-                }
-              } else {
-                process.stdout.write(`\r  ${spin2}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr2)}                    `);
-              }
-            } catch {
-              process.stdout.write(`\r  ${spin2}  Waiting for bundle resource...  ${chalk.reset(elapsedStr2)}                    `);
-            }
-          }
-          if (!validated) { process.stdout.write('\n'); warnMsg(`Validation timeout — check: kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o yaml`); }
-        } catch (e: any) { errorMsg(`Error applying bundle: ${e.message}`); }
-        finally { try { execSync(`rm "${tempPath}"`); } catch {} }
-        process.stdout.write('\n');
-        process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
-        process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
+        await applyModelBundle(rl, namespace, finalYaml, activeBundleName);
       }
       return;
     }
   }
   // ────────────────────────────────────────────────────────────────────────────
 
-  builderLoop: while (true) {   // outer loop — allows "Go Back" from SD warning or validation failure to re-enter model selection
-    addingModels = true;
+  builderLoop: while (true) {   // outer loop — allows "Go Back" after validation failure to re-enter model selection
+    const selections = await collectModelSelections(rl, checkpointMapping, modelProfiles);
+    if (selections.length === 0) return;
 
-  while (addingModels) {
-    const choices: Choice[] = [
-      { name: chalk.green.bold('✅  Finish and Create Bundle'), value: 'finish',
-        hint: allSelections.length > 0 ? `${allSelections.length} model(s) selected` : '' },
-      ...availableModels.map(m => ({ name: m, value: m })),
-      { name: chalk.red('✕  Cancel'), value: 'cancel' },
-    ];
-
-    const selectedModel = await select(rl, `Bundle Builder  ${chalk.reset(`(${allSelections.length} added)`)}`, choices);
-
-    if (!selectedModel || selectedModel === 'cancel') return;
-    if (selectedModel === 'finish') {
-      if (allSelections.length === 0) { warnMsg('Add at least one model first.'); continue; }
-      addingModels = false;
-      continue;
-    }
-
-    const modelPefs: string[] = pefMapping[selectedModel] || [];
-    const modelConfigs: any[] = [];
-
-    for (const pef of modelPefs) {
-      const cd = pefConfigs[pef];
-      if (cd) {
-        if (Array.isArray(cd)) modelConfigs.push(...cd.map((c: any) => ({ ...c, ss: String(c.ss), bs: String(c.bs), pefName: pef })));
-        else if (cd.ss) modelConfigs.push({ ...cd, ss: String(cd.ss), bs: String(cd.bs), pefName: pef });
-      } else {
-        const m = pef.match(/ss(\d+)-bs(\d+)/);
-        if (m) {
-          const ssNum = parseInt(m[1]);
-          modelConfigs.push({ ss: ssNum >= 1024 ? ssNum / 1024 + 'k' : ssNum.toString(), bs: m[2], pefName: pef, latestVersion: '1' });
-        }
-      }
-    }
-
-    if (modelConfigs.length === 0) { warnMsg(`No PEF configs found for ${selectedModel}`); continue; }
-
-    // Sort by SS ascending, then BS ascending
-    const ssToNum = (ss: string) => ss.endsWith('k') ? parseFloat(ss) * 1024 : parseInt(ss, 10);
-    modelConfigs.sort((a, b) => {
-      const ssDiff = ssToNum(a.ss) - ssToNum(b.ss);
-      return ssDiff !== 0 ? ssDiff : parseInt(a.bs, 10) - parseInt(b.bs, 10);
+    // Summary
+    sectionHeader('Bundle Summary', '📋');
+    selections.forEach((sel, i) => {
+      const label = getDisplayName(sel.profile, getProfilesForArch(sel.arch, modelProfiles));
+      const draftTag = sel.isDraftFor ? chalk.yellow('  (draft)') : '';
+      process.stdout.write(
+        `  ${chalk.reset(`${i + 1}.`)} ${chalk.reset.bold(sel.model.spec.name.padEnd(38))} ${chalk.reset(label)}${draftTag}\n`
+      );
     });
-
-    // Find any previously selected configs for this model (for pre-checking on re-edit)
-    const prevSelForModel = allSelections.filter((s: BundleSelection) => s.model === selectedModel && !s.draftFor);
-
-    const comboChoices: Choice[] = [
-      { name: chalk.green('✅  Done - Confirm Selection'), value: 'finish' },
-      ...modelConfigs.map(c => {
-        const isSD   = /-sd\d+/.test(c.pefName);
-        const sdBadge = isSD ? chalk.yellow(' ⚡SD') : '';
-        const hint    = isSD ? 'requires draft model' : undefined;
-        return {
-          name:  `SS: ${String(c.ss).padEnd(6)} │ BS: ${String(c.bs).padEnd(3)} │ ${chalk.reset(c.pefName)}${sdBadge}`,
-          value: c,
-          hint,
-        };
-      }),
-      { name: chalk.red('✕  Back'), value: 'back' },
-    ];
-
-    // Pre-check indices that match previously selected configs for this model
-    const preChecked = new Set<number>();
-    comboChoices.forEach((choice, idx) => {
-      if (choice.value && choice.value !== 'finish' && choice.value !== 'back') {
-        const c = choice.value;
-        if (prevSelForModel.some((ps: BundleSelection) => ps.pef === c.pefName && ps.ss === c.ss && ps.bs === c.bs)) {
-          preChecked.add(idx);
-        }
-      }
-    });
-
-    const selectedCombos = await multiSelect(rl, `Configurations for ${chalk.bold(selectedModel)}:`, comboChoices, preChecked);
-    if (!selectedCombos || selectedCombos.includes('back')) continue;
-
-    // User confirmed with zero selections → remove this model entirely
-    if (selectedCombos.length === 0) {
-      const keep = allSelections.filter((s: BundleSelection) => s.model !== selectedModel && s.draftFor !== selectedModel);
-      allSelections.length = 0;
-      allSelections.push(...keep);
-      successMsg(`Removed all configs for ${selectedModel}`);
-      continue;
-    }
-
-    // Remove existing entries for this model (and its draft) before adding new selection
-    const keep = allSelections.filter((s: BundleSelection) => s.model !== selectedModel && s.draftFor !== selectedModel);
-    allSelections.length = 0;
-    allSelections.push(...keep);
-
-    selectedCombos.forEach((c: any) => {
-      allSelections.push({ model: selectedModel, ss: c.ss, bs: c.bs, pef: c.pefName, version: c.latestVersion || '1' });
-    });
-    successMsg(`Added ${selectedCombos.length} config(s) for ${selectedModel}`);
-
-    // Draft model (speculative decoding)
-    const supportsSD = modelPefs.length > 0 && modelPefs.some(p => p.split('-').some((s: string) => /^sd\d+$/.test(s)));
-    if (supportsSD) {
-      // Check if ALL PEFs for this model are SD PEFs — if so, draft model is mandatory
-      const allPefsAreSD = modelPefs.length > 0 && modelPefs.every(p => /-sd\d+/.test(p));
-
-      if (allPefsAreSD) {
-        process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} uses ONLY speculative decoding PEFs.\n`));
-        process.stdout.write(chalk.reset('     A draft model is REQUIRED — this model cannot run without one.\n\n'));
-      } else {
-        process.stdout.write(chalk.yellow(`\n  ⚡ ${selectedModel} supports speculative decoding.\n`));
-        process.stdout.write(chalk.reset('     A smaller draft model can significantly improve throughput.\n'));
-      }
-      process.stdout.write(chalk.reset(`     Selected configs: ${selectedCombos.map((c: any) => `SS:${c.ss} BS:${c.bs}`).join(', ')}\n\n`));
-
-      const draftChoices: Choice[] = [
-        { name: chalk.reset('↩  Skip (no draft model)'), value: 'skip' },
-        ...availableModels.filter(m => m !== selectedModel).map(m => ({ name: m, value: m })),
-        { name: chalk.reset('← Back'), value: 'back' },
-      ];
-
-      const draftModel = await select(rl, `${allPefsAreSD ? '⚠  Required' : 'Optional'}: Draft model for ${selectedModel}:`, draftChoices);
-      if (draftModel && draftModel !== 'skip' && draftModel !== 'back') {
-        if (!checkpointMapping[draftModel]?.path) {
-          warnMsg(`Draft model "${draftModel}" has no checkpoint — skipping`);
-        } else {
-          const draftPefs: string[] = pefMapping[draftModel] || [];
-          let draftAdded = 0;
-          const matchedConfigs: string[] = [];
-          selectedCombos.forEach((targetConfig: any) => {
-            for (const dp of draftPefs) {
-              const dcd = pefConfigs[dp];
-              let entries: any[] = [];
-              if (Array.isArray(dcd)) entries = dcd;
-              else if (dcd?.ss) entries = [dcd];
-              else {
-                const dm = dp.match(/ss(\d+)-bs(\d+)/);
-                if (dm) { const sn = parseInt(dm[1]); entries = [{ ss: sn >= 1024 ? sn/1024+'k' : sn.toString(), bs: dm[2], latestVersion: '1' }]; }
-              }
-              const match = entries.find(e => e.ss === targetConfig.ss && e.bs === targetConfig.bs);
-              if (match) {
-                allSelections.push({ model: draftModel, ss: match.ss, bs: match.bs, pef: dp, version: match.latestVersion || '1', draftFor: selectedModel });
-                matchedConfigs.push(`SS:${match.ss} BS:${match.bs}`);
-                draftAdded++;
-                break;
-              }
-            }
-          });
-          if (draftAdded > 0) {
-            successMsg(`Auto-added ${draftAdded} draft config(s) for ${draftModel}`);
-            process.stdout.write(chalk.reset(`  Note: matched configs — ${matchedConfigs.join(', ')}\n\n`));
-          } else {
-            warnMsg(`No matching SS/BS found for draft model ${draftModel}`);
-          }
-        }
-      }
-    }
-  }
-
-  if (allSelections.length === 0) return;
-  if (!appConfig.checkpointsDir) { errorMsg('checkpointsDir not set in app-config.json — set it via Manage Environments → Edit'); return; }
-  appConfig.checkpointsDir = normalizeCheckpointsDir(appConfig.checkpointsDir);
-
-  // Warn if any SD PEFs selected without a matching draft model
-  const sdWithoutDraft = allSelections.filter(s =>
-    !s.draftFor &&
-    /-sd\d+/.test(s.pef) &&
-    !allSelections.some(d => d.draftFor === s.model && d.ss === s.ss && d.bs === s.bs)
-  );
-  if (sdWithoutDraft.length > 0) {
     process.stdout.write('\n');
-    process.stdout.write(chalk.yellow('  ⚠  The following SD PEFs have no draft model assigned and will fail cluster validation:\n'));
-    sdWithoutDraft.forEach(s => process.stdout.write(chalk.yellow(`     • ${s.pef}  (${s.model}  SS:${s.ss}  BS:${s.bs})\n`)));
-    process.stdout.write(chalk.reset('     Either go back and assign a draft model, or the bundle will fail with ValidationFailed.\n\n'));
-    const sdAction = await select(rl, 'How to proceed?', [
-      { name: chalk.reset('← Go back to Bundle Builder  (re-edit selections)'), value: 'back'     },
-      { name: chalk.yellow('▶ Continue anyway  (bundle may fail validation)'),  value: 'continue' },
-      { name: chalk.red('✕  Cancel'),                                           value: 'cancel'   },
-    ]);
-    if (!sdAction || sdAction === 'cancel') return;
-    if (sdAction === 'back') continue;  // restart outer loop → re-enter model selection
-  }
+    hr();
 
-  // no SD issues, or user chose Continue — fall through to YAML generation
+    const previewYaml = generateModelBundleYaml('my-bundle', selections);
+    let workingYaml = previewYaml;
+    yamlBox('YAML Preview  (my-bundle = placeholder)', workingYaml);
 
-  // Summary
-  sectionHeader('Bundle Summary', '📋');
-  allSelections.forEach((sel: BundleSelection, i: number) => {
-    const isSD     = /-sd\d+/.test(sel.pef);
-    const hasDraft = sel.draftFor || allSelections.some((d: BundleSelection) => d.draftFor === sel.model && d.ss === sel.ss && d.bs === sel.bs);
-    const warn     = (isSD && !hasDraft) ? chalk.yellow('  ⚠ no draft — will fail validation') : '';
-    process.stdout.write(
-      `  ${chalk.reset(`${i+1}.`)} ${chalk.reset.bold(sel.model.padEnd(38))} ` +
-      `${chalk.reset.bold(`SS:${sel.ss}`)}  ${chalk.reset.bold(`BS:${sel.bs}`)}${warn}\n`
-    );
-  });
-  process.stdout.write('\n');
-  hr();
+    // Name prompt:
+    //   • pre-populated with the placeholder name (updates if user edits YAML via 'e')
+    //   • e    → open YAML in editor; name auto-updates from saved YAML
+    //   • Esc  → back to Model Selection (selections preserved)
+    //   • invalid name → re-prompt
+    let bundleName = '';
+    let suggestedName = 'my-bundle';
+    while (true) {
+      const nameInput = await input(rl, chalk.yellow.bold('Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu'), suggestedName, '', { e: EDIT });
 
-  // Build YAML preview with placeholder name
-  const { yaml: previewYaml } = buildBundleYaml({
-    selections: allSelections as BundleSelection[],
-    checkpointMapping,
-    checkpointsDir: appConfig.checkpointsDir,
-    bundleName: 'my-bundle',
-    pefConfigs,
-  });
+      if (!nameInput || nameInput === ESC) continue builderLoop;
 
-  // Extract base bundle name from YAML (strips b- prefix from Bundle metadata.name)
-  const extractBundleName = (yaml: string): string => {
-    const m = yaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-    return m ? m[1].replace(/^b-/, '') : '';
-  };
-
-  let workingYaml = previewYaml;
-  yamlBox('YAML Preview  (my-bundle = placeholder)', workingYaml);
-
-  // Name prompt:
-  //   • pre-populated from YAML (updates if user edits YAML via 'e')
-  //   • e    → open YAML in editor; name auto-updates from saved YAML
-  //   • Esc  → back to Bundle Builder (selections preserved)
-  //   • invalid name → re-prompt
-  let bundleName = '';
-  let suggestedName = extractBundleName(workingYaml);
-  while (true) {
-    const nameInput = await input(rl, chalk.yellow.bold('Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu'), suggestedName, '', { e: EDIT });
-
-    if (!nameInput || nameInput === ESC) continue builderLoop;
-
-    if (nameInput === EDIT) {
-      const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
-      const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
-      writeFileSync(tmp, workingYaml);
-      try {
-        process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
-        try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
-        execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
-        try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
-        workingYaml = readFileSync(tmp, 'utf-8');
-        try { execSync(`rm "${tmp}"`); } catch {}
-        suggestedName = extractBundleName(workingYaml);
-        yamlBox('Updated YAML', workingYaml);
-      } catch (e: any) {
-        errorMsg(`Editor error: ${e.message}`);
-        try { execSync(`rm "${tmp}"`); } catch {}
+      if (nameInput === EDIT) {
+        const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
+        const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+        writeFileSync(tmp, workingYaml);
+        try {
+          process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+          try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+          execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+          try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+          workingYaml = readFileSync(tmp, 'utf-8');
+          try { execSync(`rm "${tmp}"`); } catch {}
+          suggestedName = extractBundleName(workingYaml) || suggestedName;
+          yamlBox('Updated YAML', workingYaml);
+        } catch (e: any) {
+          errorMsg(`Editor error: ${e.message}`);
+          try { execSync(`rm "${tmp}"`); } catch {}
+        }
+        continue;
       }
-      continue;
-    }
 
-    // Strip accidental b- / bt- prefix (user may copy it from the YAML preview)
-    const cleanedName = nameInput.replace(/^bt-/, '').replace(/^b-/, '');
-    if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(cleanedName)) {
-      errorMsg('Name must be lowercase letters, numbers and hyphens only, 2–63 chars, and start/end with a letter or digit. Please try again.');
-      continue;
-    }
-    bundleName = cleanedName;
-    break;
-  }
-
-  // Build final YAML — if user edited the preview, substitute name; otherwise rebuild cleanly
-  let finalYaml = '';
-  let activeBName = '';
-  if (workingYaml !== previewYaml) {
-    // Single-pass replacement to avoid double-substitution when bundleName itself
-    // contains "my-bundle" (e.g. "test-my-bundle" → would corrupt on a 3rd pass)
-    finalYaml = workingYaml.replace(/bt-my-bundle|b-my-bundle|my-bundle/g, (m) =>
-      m === 'bt-my-bundle' ? `bt-${bundleName}` : m === 'b-my-bundle' ? `b-${bundleName}` : bundleName
-    );
-    activeBName = `b-${bundleName}`;
-  } else {
-    const { yaml: builtYaml, bundleManifestName: builtBName } = buildBundleYaml({
-      selections: allSelections as BundleSelection[],
-      checkpointMapping,
-      checkpointsDir: appConfig.checkpointsDir,
-      bundleName,
-      pefConfigs,
-    });
-    finalYaml   = builtYaml;
-    activeBName = builtBName;
-  }
-
-  yamlBox(`Final YAML  (${bundleName})`, finalYaml);
-
-  let shouldApply = false;
-
-  while (true) {
-    const act = await select(rl, 'What next?', [
-      { name: '✅  Apply to cluster to validate',   value: 'validate' },
-      { name: '💾  Save to file',                   value: 'save' },
-      { name: chalk.reset('← Skip (deploy later)'), value: 'skip' },
-      { name: chalk.red('✕  Cancel'),               value: 'cancel' },
-    ]);
-
-    if (!act || act === 'cancel') return;
-
-    if (act === 'save') {
-      const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
-      if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
-      const shortDefault = `saved_artifacts/${bundleName}.yaml`;
-      const fnameInput = await input(rl, 'Filename', shortDefault);
-      if (fnameInput && fnameInput !== ESC) {
-        const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
-        try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+      if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(nameInput)) {
+        errorMsg('Name must be lowercase letters, numbers and hyphens only, 2–63 chars, and start/end with a letter or digit. Please try again.');
+        continue;
       }
-    } else if (act === 'validate') {
-      // Re-derive bundle name in case user edited the YAML
-      const m = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-      activeBName = m ? m[1] : activeBName;
-      shouldApply = true;
+      bundleName = nameInput;
       break;
-    } else if (act === 'skip') {
-      process.stdout.write('\n');
-      process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
-      process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
-      return;
     }
-  }
 
-  if (!shouldApply) break builderLoop;
+    // Build final YAML — if user edited the preview, substitute the placeholder name; otherwise rebuild cleanly
+    let finalYaml = '';
+    if (workingYaml !== previewYaml) {
+      finalYaml = workingYaml.replace(/my-bundle/g, bundleName);
+    } else {
+      finalYaml = generateModelBundleYaml(bundleName, selections);
+    }
 
+    yamlBox(`Final YAML  (${bundleName})`, finalYaml);
+
+    let shouldApply = false;
+    let activeBundleName = bundleName;
+
+    while (true) {
+      const act = await select(rl, 'What next?', [
+        { name: '✅  Apply to cluster to validate',   value: 'validate' },
+        { name: '💾  Save to file',                   value: 'save' },
+        { name: chalk.reset('← Skip (deploy later)'), value: 'skip' },
+        { name: chalk.red('✕  Cancel'),               value: 'cancel' },
+      ]);
+
+      if (!act || act === 'cancel') return;
+
+      if (act === 'save') {
+        const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
+        if (!existsSync(saveDir)) mkdirSync(saveDir, { recursive: true });
+        const shortDefault = `saved_artifacts/${bundleName}.yaml`;
+        const fnameInput = await input(rl, 'Filename', shortDefault);
+        if (fnameInput && fnameInput !== ESC) {
+          const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
+          try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+        }
+      } else if (act === 'validate') {
+        activeBundleName = extractBundleName(finalYaml) || bundleName;
+        shouldApply = true;
+        break;
+      } else if (act === 'skip') {
+        process.stdout.write('\n');
+        process.stdout.write(chalk.reset(`  ModelBundle is ready.\n`));
+        process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Model Deployment  from the main menu to deploy it.\n\n`));
+        return;
+      }
+    }
+
+    if (!shouldApply) break builderLoop;
+
+    const result = await applyModelBundle(rl, namespace, finalYaml, activeBundleName);
+    if (result === 'restart') continue builderLoop;
+    break builderLoop;
+  }  // end builderLoop
+
+  process.stdout.write('\n');
+  process.stdout.write(chalk.reset(`  ModelBundle is ready.\n`));
+  process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Model Deployment  from the main menu to deploy it.\n\n`));
+}
+
+/**
+ * Applies a `ModelBundle` YAML document to the cluster and polls
+ * `status.conditions` (Q5 — `{ type: Valid, status, reason, message }`) until
+ * it resolves. Returns `'restart'` when the user chooses to go back to
+ * Model Selection after a validation failure (so the caller can re-loop).
+ */
+async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'done' | 'restart'> {
   const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
+  let activeBundleName = bundleName;
   try {
     writeFileSync(tempPath, finalYaml);
     spinner.start('Applying bundle to cluster...');
@@ -2295,10 +2124,6 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       applyOut.trim().split('\n').forEach((line: string) => process.stdout.write(chalk.reset(`  ${line}\n`)));
       process.stdout.write('\n');
     }
-
-    // Derive BundleTemplate name: b-xxx → bt-xxx
-    const activeBtName = activeBName.replace(/^b-/, 'bt-');
-
 
     // Enable keypress so user can cancel
     const valIsRaw = process.stdin.isRaw;
@@ -2316,6 +2141,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     let   validated       = false;
     let   validationFailed = false;
     const startMs          = Date.now();
+    let   elapsedStr       = '0s';
 
     while (!valUserExit) {
       await new Promise(r => setTimeout(r, 3000));
@@ -2324,42 +2150,30 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
       const elapsed    = Math.round((Date.now() - startMs) / 1000);
       const elapsedMin = Math.floor(elapsed / 60);
       const elapsedSec = elapsed % 60;
-      const elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsed}s`;
+      elapsedStr = elapsedMin > 0 ? `${elapsedMin}m ${elapsedSec}s` : `${elapsed}s`;
       const spin       = chalk.magenta(spinFrames[spinIdx++ % spinFrames.length]);
 
       try {
-        const st    = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        const st    = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
-
-        // BundleTemplate status while bundle is still pending
-        let btLine = '';
-        if (phase === 'Pending' || conds.length === 0) {
-          try {
-            const bt       = JSON.parse(execSync(`kubectl get bundletemplate.sambanova.ai ${activeBtName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
-            const btPhase  = bt.status?.phase || '';
-            const btConds  = bt.status?.conditions || [];
-            const btLatest = btConds[btConds.length - 1];
-            const btMsg    = btLatest?.reason || btPhase || '…';
-            btLine = `  │  BT: ${btMsg}`;
-          } catch {}
-        }
+        const outcome = readValidCondition(conds);
 
         if (conds.length > 0) {
           const latest = conds[conds.length - 1];
-          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}  ${chalk.reset(latest.reason)}                    `);
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}  ${chalk.reset(latest.reason || latest.type)}                    `);
 
-          if (latest.reason === 'ValidationSucceeded' || (latest.type === 'Validated' && latest.status === 'True')) {
+          if (outcome === 'succeeded') {
             process.stdout.write('\n');
             successMsg('Bundle Validation Succeeded!');
             validated = true; break;
-          } else if (latest.reason === 'ValidationFailed' || latest.status === 'False') {
+          } else if (outcome === 'failed') {
             process.stdout.write('\n');
             printValidationErrors(conds);
             validated = true; validationFailed = true; break;
           }
         } else {
-          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}${chalk.reset(btLine)}                    `);
+          process.stdout.write(`\r  ${spin}  ${chalk.bold(phase)}  ${chalk.reset(elapsedStr)}                    `);
         }
       } catch {
         process.stdout.write(`\r  ${spin}  Waiting for bundle resource...  ${chalk.reset(elapsedStr)}                    `);
@@ -2372,59 +2186,20 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     if (!validated) {
       process.stdout.write('\n');
       warnMsg('Still validating — check status with:');
-      process.stdout.write(chalk.reset(`  kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o yaml\n\n`));
+      process.stdout.write(chalk.reset(`  kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o yaml\n\n`));
     }
 
-    // ── Recovery menu after ValidationFailed ──────────────────────────────────
+    // ── Recovery menu after validation failure ────────────────────────────────
     if (validationFailed) {
       process.stdout.write('\n');
+      const fix = await select(rl, 'What would you like to do?', [
+        { name: '✏️   Edit YAML in editor and re-apply',                             value: 'edit'    },
+        { name: chalk.reset('← Go back to Model Selection  (re-edit selections)'),    value: 'builder' },
+        { name: `🗑️   Delete ${activeBundleName} from cluster`,                       value: 'delete'  },
+        { name: chalk.reset('← Back to main menu'),                                  value: 'back'    },
+      ]);
 
-      // Parse SD PEF names from the error message to offer auto-fix
-      const allConds: any[] = [];
-      try {
-        const st = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${activeBName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
-        allConds.push(...(st.status?.conditions || []));
-      } catch {}
-      const errText    = allConds.map((c: any) => c.message || '').join('\n');
-      const badPefMatches = [...errText.matchAll(/PEF ([\w-]+) is a spec decoding PEF/g)];
-      const badPefs    = badPefMatches.map(m => m[1]);
-
-      const fixChoices: Choice[] = [];
-      if (badPefs.length > 0) {
-        fixChoices.push({ name: `🔧  Remove ${badPefs.length} SD PEF(s) without draft model and re-apply`, value: 'autofix' });
-      }
-      fixChoices.push(
-        { name: '✏️   Edit YAML in editor and re-apply',             value: 'edit'    },
-        { name: chalk.reset('← Go back to Bundle Builder  (re-edit selections)'), value: 'builder' },
-        { name: `🗑️   Delete ${activeBName} from cluster`,           value: 'delete'  },
-        { name: chalk.reset('← Back to main menu'),                  value: 'back'    },
-      );
-
-      const fix = await select(rl, 'What would you like to do?', fixChoices);
-
-      if (fix === 'autofix') {
-        // Remove the offending SD PEF config lines from the YAML
-        let fixedYaml = finalYaml;
-        for (const pef of badPefs) {
-          // Remove the config block that references this PEF (the - pef: line and any following spec_decoding lines)
-          const safePef = pef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/-/g, '\\-');
-          fixedYaml = fixedYaml.replace(
-            new RegExp(`\\s*- pef: ${safePef}:[^\\n]*(?:\\n\\s+spec_decoding:[^\\n]*(?:\\n\\s+[^\\n]+)*)?`, 'g'),
-            ''
-          );
-        }
-        yamlBox('Fixed YAML (SD PEFs removed)', fixedYaml);
-        const reApplyFixed = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
-        try {
-          writeFileSync(reApplyFixed, fixedYaml);
-          spinner.start('Re-applying fixed bundle...');
-          await tick();
-          execSync(`kubectl apply -f ${reApplyFixed} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
-          spinner.succeed('Fixed bundle re-applied — use 📈 Check Deployment Progress to monitor validation');
-        } catch (e: any) { spinner.fail(`Re-apply failed: ${e.message.split('\n')[0]}`); }
-        finally { try { execSync(`rm "${reApplyFixed}"`); } catch {} }
-
-      } else if (fix === 'edit') {
+      if (fix === 'edit') {
         const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_fix_${Date.now()}.yaml`);
         const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
         writeFileSync(tmp, finalYaml);
@@ -2437,9 +2212,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
           try { execSync(`rm "${tmp}"`); } catch {}
         } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { execSync(`rm "${tmp}"`); } catch {} }
 
-        // Re-derive bundle name from edited YAML
-        const mFixed = finalYaml.match(/kind:\s+Bundle\b[\s\S]*?name:\s+(\S+)/);
-        if (mFixed) activeBName = mFixed[1];
+        activeBundleName = extractBundleName(finalYaml) || activeBundleName;
 
         const reApplyPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
         try {
@@ -2452,26 +2225,18 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
         finally { try { execSync(`rm "${reApplyPath}"`); } catch {} }
 
       } else if (fix === 'builder') {
-        // Delete the failed bundle from the cluster so the builder can create fresh
-        try {
-          execSync(`kubectl delete bundle.sambanova.ai ${activeBName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
-        } catch {}
-        try {
-          execSync(`kubectl delete bundletemplate.sambanova.ai ${activeBtName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
-        } catch {}
-        // Clear selections and restart model selection with old selections preserved (pre-checked)
-        continue builderLoop;
+        try { execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
+        return 'restart';
 
       } else if (fix === 'delete') {
-        spinner.start(`Deleting ${activeBName} and ${activeBtName}...`);
+        spinner.start(`Deleting ${activeBundleName}...`);
         await tick();
         try {
-          try { execSync(`kubectl delete bundle.sambanova.ai ${activeBName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
-          try { execSync(`kubectl delete bundletemplate.sambanova.ai ${activeBtName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
-          spinner.succeed(`Deleted ${activeBName} and ${activeBtName} from cluster`);
+          execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          spinner.succeed(`Deleted ${activeBundleName} from cluster`);
         } catch (e: any) { spinner.fail(`Delete failed: ${e.message.split('\n')[0]}`); }
       }
-      return;  // don't show "bundle ready" hint after failure
+      return 'done';
     }
   } catch (e: any) {
     errorMsg(`Error applying bundle: ${e.message}`);
@@ -2479,12 +2244,7 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
     try { execSync(`rm "${tempPath}"`); } catch {}
   }
 
-  break builderLoop;
-  }  // end builderLoop
-
-  process.stdout.write('\n');
-  process.stdout.write(chalk.reset(`  Bundle template is ready.\n`));
-  process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Bundle Deployment  from the main menu to deploy it.\n\n`));
+  return 'done';
 }
 
 // ─── bundleDeploymentMenu() ──────────────────────────────────────────────────
@@ -2492,11 +2252,11 @@ async function bundleBuilderMenu(rl: any, appConfig: any, namespace: string) {
 async function bundleDeploymentMenu(rl: any, namespace: string) {
   let back = false;
   while (!back) {
-    sectionHeader('Bundle Deployment', '🚀');
+    sectionHeader('Model Deployment', '🚀');
 
     // Show current deployments
     try {
-      const list = JSON.parse(execSync(`kubectl get bundledeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8', stdio: ['pipe','pipe','pipe'] }));
+      const list = JSON.parse(execSync(`kubectl get modeldeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8', stdio: ['pipe','pipe','pipe'] }));
       const items: any[] = list.items || [];
       if (items.length > 0) {
         process.stdout.write(chalk.reset.bold('  Current Deployments:\n'));
@@ -2513,7 +2273,7 @@ async function bundleDeploymentMenu(rl: any, namespace: string) {
       process.stdout.write(chalk.reset('  (Could not fetch deployments)\n\n'));
     }
 
-    const action = await select(rl, 'Bundle Deployment:', [
+    const action = await select(rl, 'Model Deployment:', [
       { name: `${chalk.green('▶')}  Deploy a Bundle`,              value: 'deploy' },
       { name: `${chalk.red('✕')}  Delete a Bundle / Deployment`, value: 'delete' },
       { name: chalk.reset('← Back'),                               value: 'back' },
@@ -2528,14 +2288,14 @@ async function bundleDeployAction(rl: any, namespace: string) {
   spinner.start('Fetching bundles from cluster...');
   await tick();
   try {
-    const list = JSON.parse(execSync(`kubectl get bundle.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
+    const list = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
     spinner.info(`Found ${list.items?.length || 0} bundle(s)`);
 
     if (!list.items?.length) { warnMsg('No bundles found in this namespace.'); return; }
 
     const bundles = list.items.map((i: any) => ({
       name:  i.metadata.name,
-      valid: (i.status?.conditions || []).some((c: any) => c.reason === 'ValidationSucceeded'),
+      valid: readValidCondition(i.status?.conditions || []) === 'succeeded',
     }));
 
     process.stdout.write('\n');
@@ -2557,7 +2317,7 @@ async function bundleDeployAction(rl: any, namespace: string) {
     const bundleToDeploy = await select(rl, 'Select bundle to deploy:', choices);
     if (!bundleToDeploy || bundleToDeploy === 'back') return;
 
-    const { yaml, deploymentName: depName } = buildDeploymentYaml(bundleToDeploy);
+    const { yaml, deploymentName: depName } = buildModelDeploymentYaml(bundleToDeploy);
 
     yamlBox('Deployment YAML', yaml);
 
@@ -2582,17 +2342,15 @@ async function bundleDeployAction(rl: any, namespace: string) {
 
 async function bundleDeleteAction(rl: any, namespace: string) {
   const deleteType = await select(rl, 'What to delete?', [
-    { name: 'BundleDeployment',       value: 'deployment' },
-    { name: 'Bundle',                 value: 'bundle' },
-    { name: 'BundleTemplate',         value: 'template' },
-    { name: chalk.reset('← Back'),    value: 'back' },
+    { name: 'ModelDeployment',       value: 'deployment' },
+    { name: 'ModelBundle',           value: 'bundle' },
+    { name: chalk.reset('← Back'),   value: 'back' },
   ]);
   if (!deleteType || deleteType === 'back') return;
 
   const rm: Record<string, { kind: string; label: string }> = {
-    deployment: { kind: 'bundledeployment.sambanova.ai', label: 'BundleDeployment' },
-    bundle:     { kind: 'bundle.sambanova.ai',           label: 'Bundle' },
-    template:   { kind: 'bundletemplate.sambanova.ai',   label: 'BundleTemplate' },
+    deployment: { kind: 'modeldeployment.sambanova.ai', label: 'ModelDeployment' },
+    bundle:     { kind: 'modelbundle.sambanova.ai',      label: 'ModelBundle' },
   };
   const res = rm[deleteType];
 
@@ -2617,10 +2375,6 @@ async function bundleDeleteAction(rl: any, namespace: string) {
     process.stdout.write(chalk.red.bold(`  ⚠  The following will be permanently deleted:\n\n`));
     selected.forEach((n: string) => {
       process.stdout.write(chalk.red(`  ·  ${n}\n`));
-      if (deleteType === 'template') {
-        const assocBundle = n.replace(/^bt-/, 'b-');
-        process.stdout.write(chalk.red(`     ↳  ${assocBundle}  (associated Bundle)\n`));
-      }
     });
     process.stdout.write('\n');
 
@@ -2637,19 +2391,6 @@ async function bundleDeleteAction(rl: any, namespace: string) {
       } catch (e: any) {
         spinner.fail(`Failed to delete ${name}: ${e.message.split('\n')[0]}`);
       }
-
-      // Cascade: when a BundleTemplate is deleted, also delete the associated Bundle
-      if (deleteType === 'template') {
-        const assocBundle = name.replace(/^bt-/, 'b-');
-        spinner.start(`Deleting associated Bundle ${assocBundle}...`);
-        await tick();
-        try {
-          execSync(`kubectl delete bundle.sambanova.ai ${assocBundle} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
-          spinner.succeed(`Deleted associated Bundle ${assocBundle}`);
-        } catch {
-          spinner.info(`Bundle ${assocBundle} not found or already deleted — skipping`);
-        }
-      }
     }
   } catch (e: any) {
     spinner.fail(`Error: ${e.message.split('\n')[0]}`);
@@ -2662,7 +2403,7 @@ async function monitorMenu(rl: any, namespace: string) {
   spinner.start('Fetching deployments...');
   await tick();
   try {
-    const list = JSON.parse(execSync(`kubectl get bundledeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
+    const list = JSON.parse(execSync(`kubectl get modeldeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
     spinner.info(`Found ${list.items?.length || 0} deployment(s)`);
 
     if (!list.items?.length) { warnMsg('No deployments found.'); return; }
@@ -2813,7 +2554,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
   let modelName = '';
 
   try {
-    const list = JSON.parse(execSync(`kubectl get bundledeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
+    const list = JSON.parse(execSync(`kubectl get modeldeployment.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
     spinner.info(`Found ${list.items?.length || 0} deployment(s)`);
 
     if (!list.items?.length) {
@@ -2869,9 +2610,16 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
         } else {
           const depItem = depChoices.find(d => d.value === selDep);
           const bn = depItem?.bundle ?? '';
+          const checkpointMapping: CheckpointMappingV3 = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
           try {
-            const bundle = JSON.parse(execSync(`kubectl get bundle.sambanova.ai ${bn} -n ${namespace} -o json`, { encoding: 'utf-8' }));
-            const models = Object.keys(bundle.spec.models || {}).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+            const bundle = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${bn} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+            const modelConfigs: any[] = bundle.spec?.modelConfigs || [];
+            const models = Array.from(new Set(
+              modelConfigs
+                .map((mc) => (typeof mc.model === 'string' ? mc.model.split(':')[0] : null))
+                .filter((crname): crname is string => !!crname)
+                .map((crname) => crNameToDisplayName(checkpointMapping, crname) ?? crname)
+            )).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
             if (!models.length) {
               warnMsg('No models found in bundle.');
@@ -2905,8 +2653,8 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
   if (!modelName || modelName === ESC) return;
 
-  const checkpointMapping = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
-  const isEmbedding       = checkpointMapping[modelName]?.model_type === 'embedding';
+  const checkpointMapping: CheckpointMappingV3 = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
+  const isEmbedding       = checkpointMapping[modelName]?.capabilities?.includes('embeddings') ?? false;
 
   let base = envConfig.apiDomain.replace(/\/v1\/chat\/completions\/?$/, '');
   if (!base.endsWith('/')) base += '/';
@@ -3199,8 +2947,18 @@ async function installSambaStackMenu(rl: any, namespace: string) {
 
       process.stdout.write('\r\x1b[K');
       if (logs) {
-        logs.split('\n').forEach(l => process.stdout.write(chalk.reset(`  ${l}\n`)));
-        if (logs.includes('configure_default_ingress')) {
+        const logLines = logs.split('\n');
+        logLines.forEach(l => process.stdout.write(chalk.reset(`  ${l}\n`)));
+        // Completion markers differ between SambaStack helm versions:
+        // - 1.x: the final step is `configure_default_ingress` (last line).
+        // - 2.x: the installer continues with a `create_keycloak_user` step,
+        //   which finishes once the service user is created or already exists.
+        const lastLine = logLines[logLines.length - 1] || '';
+        const oneXComplete = lastLine.includes('configure_default_ingress');
+        const twoXComplete = logLines.some(
+          l => l.includes('create_keycloak_user') && /already exists|created/i.test(l)
+        );
+        if (oneXComplete || twoXComplete) {
           successMsg('SambaStack installation complete!');
           done = true;
           break;
@@ -3218,7 +2976,14 @@ async function installSambaStackMenu(rl: any, namespace: string) {
 }
 
 // ─── Entry ───────────────────────────────────────────────────────────────────
-
-startCli().catch(err => {
-  console.error(chalk.red('\nFatal error:'), err);
-});
+// Guard the interactive entry point so importing this module for its
+// exported pure functions (e.g. from bin/__tests__/cli.test.ts, or a
+// ts-node/tsx scratch script) doesn't also launch the interactive CLI and
+// hang waiting on stdin. Only auto-starts when this file is the process's
+// actual entry script (`tsx bin/cli.ts`, `node dist/cli.js`, ...).
+const isMainModule = /(^|[\\/])cli\.(ts|js)$/.test(process.argv[1] || '');
+if (isMainModule) {
+  startCli().catch(err => {
+    console.error(chalk.red('\nFatal error:'), err);
+  });
+}

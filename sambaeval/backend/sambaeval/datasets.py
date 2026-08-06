@@ -15,7 +15,7 @@ import json
 from typing import Any
 
 from .models import DatasetRow, Message
-from .paths import dataset_file_path
+from .paths import dataset_file_path, find_dataset_file
 
 _VALID_ROLES = {"system", "user", "assistant", "tool"}
 
@@ -84,12 +84,17 @@ def row_from_obj(row: dict[str, Any]) -> DatasetRow:
     weight = row.get("weight")
     weight = float(weight) if isinstance(weight, (int, float)) else 1.0
 
+    tools = row.get("tools")
+    if not isinstance(tools, list):
+        tools = None
+
     return DatasetRow(
         example_id=example_id,
         messages=messages,
         system_prompt=system_prompt,
         expected_output=expected_output,
         weight=weight,
+        tools=tools,
     )
 
 
@@ -128,8 +133,10 @@ def load_dataset(dataset: str | list[Any]) -> list[DatasetRow]:
     """Resolve an experiment's ``dataset`` field into normalized rows."""
     if isinstance(dataset, list):
         return [row_from_obj(item) for item in dataset]
+    # Resolve from whichever tree holds it (public or private); fall back to the
+    # public path so a missing file still raises FileNotFoundError as before.
+    path = find_dataset_file(dataset) or dataset_file_path(dataset)
+    raw = path.read_text(encoding="utf-8")
     if dataset.lower().endswith(".jsonl"):
-        raw = dataset_file_path(dataset).read_text(encoding="utf-8")
         return parse_jsonl(raw)
-    raw = dataset_file_path(dataset).read_text(encoding="utf-8")
     return parse_csv(raw)

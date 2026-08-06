@@ -15,6 +15,7 @@ placeholder ``providers.json`` — a missing file raises ``FileNotFoundError``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -60,6 +61,13 @@ def ensure_dirs() -> None:
         paths.datasets_dir(),
         paths.results_dir(),
         paths.scorers_dir(),
+        # Mirror the private tree so listing/globbing it is always safe. Empty
+        # dirs are gitignored, so this is harmless on checkouts that don't use
+        # private experiments.
+        paths.private_experiments_dir(),
+        paths.private_datasets_dir(),
+        paths.private_results_dir(),
+        paths.private_scorers_dir(),
     ):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -289,8 +297,11 @@ def _validate_scorer_name(name: str) -> None:
 def get_scorer(name: str) -> Optional[LlmJudgeScorerDef]:
     ensure_dirs()
     _validate_scorer_name(name)
+    path = paths.find_scorer_file(name)
+    if path is None:
+        return None
     try:
-        raw = paths.scorer_file_path(name).read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     import json
@@ -303,9 +314,9 @@ def get_scorer(name: str) -> Optional[LlmJudgeScorerDef]:
         name=parsed.get("name") or name,
         provider_name=parsed.get("provider_name") or "",
         model=parsed.get("model") or "",
-        temperature=parsed.get("temperature") if isinstance(parsed.get("temperature"), (int, float)) else 0,
         judge_prompt=parsed.get("judge_prompt") or "",
         max_score=int(max_score),
+        additional_kwargs=parsed.get("additional_kwargs") if isinstance(parsed.get("additional_kwargs"), dict) else None,
     )
 
 
@@ -339,18 +350,22 @@ def _reconcile_orphan_run(experiment_id: str, meta: RunMeta) -> RunMeta:
 
 def list_runs(experiment_id: str) -> list[RunMeta]:
     ensure_dirs()
-    d = paths.experiment_runs_dir(experiment_id)
-    try:
-        entries = [e.name for e in d.iterdir()]
-    except OSError:
-        return []
+    # Union both trees: an experiment toggled between public/private may hold
+    # older runs in one tree and newer ones in the other.
+    seen: set[str] = set()
     runs: list[RunMeta] = []
-    for entry in entries:
-        if entry.startswith("."):
+    for d in paths.experiment_runs_dirs(experiment_id):
+        try:
+            entries = [e.name for e in d.iterdir()]
+        except OSError:
             continue
-        meta = _read_run_meta_unlocked(experiment_id, entry)
-        if meta:
-            runs.append(_reconcile_orphan_run(experiment_id, meta))
+        for entry in entries:
+            if entry.startswith(".") or entry in seen:
+                continue
+            seen.add(entry)
+            meta = _read_run_meta_unlocked(experiment_id, entry)
+            if meta:
+                runs.append(_reconcile_orphan_run(experiment_id, meta))
     runs.sort(key=lambda m: m.started_at, reverse=True)
     return runs
 
@@ -373,7 +388,168 @@ def find_latest_run(experiment_id: str) -> Optional[RunMeta]:
     return runs[0] if runs else None
 
 
-def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
+def find_retryable_run(experiment_id: str) -> Optional[RunMeta]:
+    """Latest run that still has failed (error) rows worth retrying.
+
+    Unlike ``find_resumable_run`` (which only matches an unfinished run), this
+    matches any run — including ``completed`` ones — as long as it recorded at
+    least one error. Used by the "Retry Failed" flow to default the dropdown to
+    the most recent run with failures when no run is explicitly chosen.
+    """
+    for run in list_runs(experiment_id):
+        if run.errors > 0:
+            return run
+    return None
+
+
+def read_run_experiment_snapshot(
+    experiment_id: str, run_id: str
+) -> Optional[Experiment]:
+    """The experiment config as captured when ``run_id`` was created.
+
+    Retrying a past run should re-run it with the same models/dataset/scorer it
+    originally used, not whatever the experiment looks like now. Returns None if
+    the snapshot is missing or unreadable, so callers can fall back to the live
+    experiment.
+    """
+    try:
+        raw = paths.run_experiment_snapshot_path(experiment_id, run_id).read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return None
+    try:
+        return Experiment.model_validate(json.loads(raw))
+    except Exception:
+        return None
+
+
+def dataset_key(dataset) -> str:
+    """A stable identifier for an ``experiment.dataset`` value.
+
+    Returns the filename for file-backed datasets, or a short content hash for
+    inline datasets (so two datasets with identical inline rows compare equal).
+    """
+    if isinstance(dataset, str):
+        return dataset
+    digest = hashlib.sha256(
+        json.dumps(dataset, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return f"inline:{digest[:16]}"
+
+
+def run_dataset_key(experiment_id: str, run_id: str) -> Optional[str]:
+    """The :func:`dataset_key` of the dataset a run used, for "same dataset"
+    checks. None when the run's experiment snapshot is missing/unreadable.
+    """
+    snap = read_run_experiment_snapshot(experiment_id, run_id)
+    if snap is None:
+        return None
+    return dataset_key(snap.dataset)
+
+
+def merge_run_results(
+    experiment_id: str,
+    from_run_id: str,
+    into_run_id: str,
+    overwrite: bool,
+) -> dict:
+    """Merge the ``from`` run's rows into the ``into`` run, modifying it in place.
+
+    The ``into`` run's existing rows keep their ``result_id``s; the ``from``
+    rows are appended with fresh ``result_id``s that continue past ``into``'s
+    maximum so they never collide. A conflict is a ``(provider, model,
+    example_id)`` tuple present in both runs:
+
+      * ``overwrite=False`` and any conflict exists → nothing is written;
+        returns ``{"status": "conflict", "conflicts": [{"from", "into"}, …]}``.
+      * ``overwrite=True`` → the conflicting ``into`` rows are dropped and the
+        ``from`` versions win.
+
+    Raises ValueError / FileNotFoundError for invalid selections (same run,
+    different datasets, missing results, active run).
+    """
+    if from_run_id == into_run_id:
+        raise ValueError("Cannot merge a run into itself.")
+    if is_run_active(experiment_id, from_run_id) or is_run_active(
+        experiment_id, into_run_id
+    ):
+        raise ValueError("A selected run is still active. Wait for it to finish.")
+    if run_dataset_key(experiment_id, from_run_id) != run_dataset_key(
+        experiment_id, into_run_id
+    ):
+        raise ValueError("The selected runs use different datasets.")
+
+    from_rows = read_run_results(experiment_id, from_run_id)
+    into_rows = read_run_results(experiment_id, into_run_id)
+    if from_rows is None:
+        raise FileNotFoundError("The 'From' run has no results.")
+    if into_rows is None:
+        raise FileNotFoundError("The 'Into' run has no results.")
+
+    into_by_key = {
+        _row_key(r.provider, r.model, r.example_id): r for r in into_rows
+    }
+    conflicts = []
+    for fr in from_rows:
+        ir = into_by_key.get(_row_key(fr.provider, fr.model, fr.example_id))
+        if ir is not None:
+            conflicts.append({"from": fr.result_id, "into": ir.result_id})
+
+    if conflicts and not overwrite:
+        return {"status": "conflict", "conflicts": conflicts}
+
+    from_keys = {_row_key(fr.provider, fr.model, fr.example_id) for fr in from_rows}
+    # With overwrite, drop the into rows the from rows replace; otherwise (no
+    # conflicts at this point) keep every into row untouched.
+    kept_into = (
+        [
+            r
+            for r in into_rows
+            if _row_key(r.provider, r.model, r.example_id) not in from_keys
+        ]
+        if overwrite
+        else list(into_rows)
+    )
+
+    next_id = max((r.result_id for r in kept_into), default=-1) + 1
+    appended = []
+    for fr in from_rows:
+        appended.append(fr.model_copy(update={"result_id": next_id}))
+        next_id += 1
+
+    merged = kept_into + appended
+    merged.sort(key=lambda r: r.result_id)
+    save_run_results(experiment_id, into_run_id, merged)
+
+    # Bump the destination's expected-task count by the number of genuinely new
+    # (provider, model, example) rows merged in — appended rows minus the ones
+    # that merely overwrote an existing destination row — so its progress
+    # (completed/total) reflects the larger merged run, not the original size.
+    # save_run_results above already recounted completed/errors but leaves total
+    # untouched.
+    replaced = len(into_rows) - len(kept_into)
+    net_new = len(appended) - replaced
+    if net_new:
+        with with_run_lock(experiment_id, into_run_id):
+            meta = _read_run_meta_unlocked(experiment_id, into_run_id)
+            if meta:
+                _write_run_meta_unlocked(
+                    experiment_id,
+                    meta.model_copy(update={"total": meta.total + net_new}),
+                )
+
+    return {
+        "status": "merged",
+        "added": len(appended),
+        "replaced": replaced,
+        "total": len(merged),
+    }
+
+
+def create_run(
+    experiment: Experiment, total_tasks: int, *, partial: bool = False
+) -> RunMeta:
     ensure_dirs()
     run_id = new_run_id()
     d = paths.run_dir(experiment.id, run_id)
@@ -390,6 +566,10 @@ def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
         total=total_tasks,
         completed=0,
         errors=0,
+        # A new run that covers only a subset of the experiment's models is
+        # flagged partial so a later resume rebuilds it from its own rows instead
+        # of re-expanding to every model in the (full) experiment.
+        partial=partial,
     )
     _write_run_meta_unlocked(experiment.id, meta)
     atomic_write(paths.run_results_path(experiment.id, run_id), serialize_rows([]))
@@ -397,19 +577,29 @@ def create_run(experiment: Experiment, total_tasks: int) -> RunMeta:
 
 
 def mark_run_resumed(
-    experiment_id: str, run_id: str, total_tasks: int
+    experiment_id: str,
+    run_id: str,
+    total_tasks: int,
+    *,
+    merged: Optional[bool] = None,
 ) -> Optional[RunMeta]:
+    """Re-arm an existing run as "running" with a refreshed total.
+
+    ``merged`` defaults to None (leave the run's existing flag untouched); pass
+    True when a merged run executes so a later resume knows to rebuild it safely.
+    """
     with with_run_lock(experiment_id, run_id):
         meta = _read_run_meta_unlocked(experiment_id, run_id)
         if meta is None:
             return None
-        updated = meta.model_copy(
-            update={
-                "status": "running",
-                "resumed_at": [*meta.resumed_at, iso_now()],
-                "total": total_tasks,
-            }
-        )
+        update = {
+            "status": "running",
+            "resumed_at": [*meta.resumed_at, iso_now()],
+            "total": total_tasks,
+        }
+        if merged is not None:
+            update["merged"] = merged
+        updated = meta.model_copy(update=update)
         _write_run_meta_unlocked(experiment_id, updated)
         return updated
 
@@ -444,6 +634,115 @@ def upsert_run_result_row(experiment_id: str, run_id: str, row: ResultRow) -> No
         meta = _read_run_meta_unlocked(experiment_id, run_id)
         if meta:
             _write_run_meta_unlocked(experiment_id, _recount_meta(meta, nxt))
+
+
+# --------------------------------------------------------------------------- #
+# Per-run error log (errors.json)
+# --------------------------------------------------------------------------- #
+# Schema: { "<example_id>": { "<provider>/<model>": {"phase": ..., "message": ...} } }
+#   * example_id is stringified (JSON object keys must be strings);
+#   * the inner key is the "provider/model" pair so the same model name served by
+#     two providers doesn't collide;
+#   * "phase" is "generation" or "scoring" — which stage raised the error.
+# The file is created lazily on the first error and the per-run lock serializes
+# writes, mirroring results.csv / run.json.
+def _read_errors_unlocked(experiment_id: str, run_id: str) -> dict:
+    try:
+        raw = paths.run_errors_path(experiment_id, run_id).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def record_run_error(
+    experiment_id: str,
+    run_id: str,
+    *,
+    example_id: int,
+    provider: str,
+    model: str,
+    error: Optional[dict],
+) -> None:
+    """Set or clear the error entry for one (example, provider/model) pair.
+
+    ``error`` is ``{"phase": ..., "message": ...}`` to record a failure, or
+    ``None`` to clear a previously recorded one (e.g. the task succeeded on a
+    resume/retry). Clearing when nothing is recorded is a no-op and never
+    creates an empty file.
+    """
+    ex_key = str(example_id)
+    model_key = f"{provider}/{model}"
+    with with_run_lock(experiment_id, run_id):
+        data = _read_errors_unlocked(experiment_id, run_id)
+        if error is None:
+            if ex_key not in data or model_key not in data[ex_key]:
+                return
+            del data[ex_key][model_key]
+            if not data[ex_key]:
+                del data[ex_key]
+        else:
+            data.setdefault(ex_key, {})[model_key] = error
+        path = paths.run_errors_path(experiment_id, run_id)
+        if not data:
+            # Last error cleared — drop the file rather than leave an empty {}.
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, json.dumps(data, indent=2))
+
+
+def read_run_errors(experiment_id: str, run_id: str) -> dict:
+    with with_run_lock(experiment_id, run_id):
+        return _read_errors_unlocked(experiment_id, run_id)
+
+
+# Marker formats the executor embeds in a result row's ``output`` (see
+# executor.run_task): a generation failure replaces the output with
+# ``ERROR: <msg>``; a scoring failure appends ``\n\n[JUDGE ERROR: <msg>]``.
+_JUDGE_ERROR_RE = re.compile(r"\[JUDGE ERROR: (?P<msg>.*)\]\s*\Z", re.DOTALL)
+
+
+def _error_from_output(output: str) -> dict:
+    """Recover ``{phase, message}`` from a status=="error" row's output column.
+
+    Inverse of how ``executor.run_task`` embeds the error, used to reconstruct
+    the log for runs with no errors.json.
+    """
+    m = _JUDGE_ERROR_RE.search(output)
+    if m:
+        return {"phase": "scoring", "message": m.group("msg")}
+    if output.startswith("ERROR: "):
+        return {"phase": "generation", "message": output[len("ERROR: ") :]}
+    return {"phase": "unknown", "message": output}
+
+
+def _derive_errors_from_results(experiment_id: str, run_id: str) -> dict:
+    out: dict = {}
+    for r in read_run_results(experiment_id, run_id) or []:
+        if r.status != "error":
+            continue
+        out.setdefault(str(r.example_id), {})[f"{r.provider}/{r.model}"] = (
+            _error_from_output(r.output)
+        )
+    return out
+
+
+def get_run_errors(experiment_id: str, run_id: str) -> dict:
+    """A run's error log for display.
+
+    Prefers the canonical errors.json; when it's absent (e.g. the run predates
+    the log, or was executed by an older server process that never wrote it),
+    falls back to reconstructing the log from the error rows in results.csv so
+    every run that recorded failures still surfaces them in the UI.
+    """
+    logged = read_run_errors(experiment_id, run_id)
+    if logged:
+        return logged
+    return _derive_errors_from_results(experiment_id, run_id)
 
 
 def read_run_results(experiment_id: str, run_id: str) -> Optional[list[ResultRow]]:
@@ -490,49 +789,74 @@ def delete_run(experiment_id: str, run_id: str) -> str:
 def list_experiments() -> list[Experiment]:
     ensure_dirs()
     out: list[Experiment] = []
-    for entry in paths.experiments_dir().iterdir():
-        if entry.name.startswith(".") or entry.suffix != ".json":
+    seen: set[str] = set()
+    for d in paths.experiments_dirs():  # public first; public id shadows private
+        if not d.exists():
             continue
-        try:
-            raw = json.loads(entry.read_text(encoding="utf-8"))
+        is_private = d == paths.private_experiments_dir()
+        for entry in d.iterdir():
+            if entry.name.startswith(".") or entry.suffix != ".json":
+                continue
             slug = entry.stem
-            if raw.get("id") != slug:
-                raw["id"] = slug
-            out.append(Experiment.model_validate(raw))
-        except Exception:
-            continue  # skip malformed files
+            if slug in seen:
+                continue
+            seen.add(slug)
+            try:
+                raw = json.loads(entry.read_text(encoding="utf-8"))
+                if raw.get("id") != slug:
+                    raw["id"] = slug
+                # The folder is the source of truth for privacy.
+                raw["private"] = is_private
+                out.append(Experiment.model_validate(raw))
+            except Exception:
+                continue  # skip malformed files
     out.sort(key=lambda e: e.id)
     return out
 
 
 def get_experiment(experiment_id: str) -> Optional[Experiment]:
     ensure_dirs()
+    path = paths.find_experiment_file(experiment_id)
+    if path is None:
+        return None
     try:
-        raw = paths.experiment_file_path(experiment_id).read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
-        return Experiment.model_validate(json.loads(raw))
+        data = json.loads(raw)
+        data["private"] = paths.experiment_is_private(experiment_id)
+        return Experiment.model_validate(data)
     except Exception:
         return None
 
 
 def save_experiment(experiment: Experiment) -> None:
     ensure_dirs()
-    paths.experiment_file_path(experiment.id).write_text(
-        json.dumps(experiment.model_dump(exclude_none=True), indent=2),
+    private = bool(experiment.private)
+    target = paths.experiment_file_path(experiment.id, private=private)
+    # If the experiment's scope changed, drop the stale file in the other tree
+    # so it isn't listed twice.
+    other = paths.experiment_file_path(experiment.id, private=not private)
+    if other != target:
+        other.unlink(missing_ok=True)
+    # ``private`` is derived from the folder, not stored in the JSON.
+    target.write_text(
+        json.dumps(experiment.model_dump(exclude_none=True, exclude={"private"}), indent=2),
         encoding="utf-8",
     )
 
 
 def delete_experiment(experiment_id: str) -> None:
     ensure_dirs()
-    paths.experiment_file_path(experiment_id).unlink(missing_ok=True)
-    runs = paths.experiment_runs_dir(experiment_id)
-    if runs.exists():
-        import shutil
+    for private in (False, True):
+        paths.experiment_file_path(experiment_id, private=private).unlink(missing_ok=True)
+    import shutil
 
-        shutil.rmtree(runs, ignore_errors=True)
+    for base in (paths.results_dir(), paths.private_results_dir()):
+        runs = base / experiment_id
+        if runs.exists():
+            shutil.rmtree(runs, ignore_errors=True)
 
 
 def next_experiment_id() -> str:
@@ -582,6 +906,23 @@ def save_providers(providers: list[Provider]) -> None:
     )
 
 
+def read_pricing_defaults() -> dict:
+    """Default token prices ($/1M) keyed by provider -> model -> {input, output}.
+
+    Generated by scripts/update_pricing.py; returns {} when the file is missing
+    or malformed so the UI just falls back to live /models pricing.
+    """
+    try:
+        raw = paths.pricing_defaults_file().read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # --------------------------------------------------------------------------- #
 # Scorers CRUD
 # --------------------------------------------------------------------------- #
@@ -593,22 +934,29 @@ def _scorer_from_raw(raw: dict, fallback_name: str) -> LlmJudgeScorerDef:
         name=raw.get("name") or fallback_name,
         provider_name=raw.get("provider_name") or "",
         model=raw.get("model") or "",
-        temperature=raw.get("temperature") if isinstance(raw.get("temperature"), (int, float)) else 0,
         judge_prompt=raw.get("judge_prompt") or "",
         max_score=int(max_score),
+        additional_kwargs=raw.get("additional_kwargs") if isinstance(raw.get("additional_kwargs"), dict) else None,
     )
 
 
 def list_scorers() -> list[LlmJudgeScorerDef]:
     ensure_dirs()
     out: list[LlmJudgeScorerDef] = []
-    for entry in paths.scorers_dir().iterdir():
-        if entry.name.startswith(".") or entry.suffix != ".json":
+    seen: set[str] = set()
+    for d in paths.scorers_dirs():  # public first; a public name shadows private
+        if not d.exists():
             continue
-        try:
-            out.append(_scorer_from_raw(json.loads(entry.read_text(encoding="utf-8")), entry.stem))
-        except Exception:
-            continue
+        for entry in d.iterdir():
+            if entry.name.startswith(".") or entry.suffix != ".json":
+                continue
+            if entry.stem in seen:
+                continue
+            seen.add(entry.stem)
+            try:
+                out.append(_scorer_from_raw(json.loads(entry.read_text(encoding="utf-8")), entry.stem))
+            except Exception:
+                continue
     out.sort(key=lambda s: s.name)
     return out
 
@@ -616,7 +964,10 @@ def list_scorers() -> list[LlmJudgeScorerDef]:
 def save_scorer(scorer: LlmJudgeScorerDef) -> None:
     ensure_dirs()
     _validate_scorer_name(scorer.name)
-    paths.scorer_file_path(scorer.name).write_text(
+    # Keep an existing scorer in whatever tree it already lives in; new scorers
+    # default to the public tree.
+    path = paths.find_scorer_file(scorer.name) or paths.scorer_file_path(scorer.name)
+    path.write_text(
         json.dumps(scorer.model_dump(), indent=2), encoding="utf-8"
     )
 
@@ -624,7 +975,9 @@ def save_scorer(scorer: LlmJudgeScorerDef) -> None:
 def delete_scorer(name: str) -> None:
     ensure_dirs()
     _validate_scorer_name(name)
-    paths.scorer_file_path(name).unlink(missing_ok=True)
+    path = paths.find_scorer_file(name)
+    if path is not None:
+        path.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -632,22 +985,31 @@ def delete_scorer(name: str) -> None:
 # --------------------------------------------------------------------------- #
 def list_datasets() -> list[str]:
     ensure_dirs()
-    return sorted(
-        e.name
-        for e in paths.datasets_dir().iterdir()
-        if e.name.lower().endswith((".csv", ".jsonl"))
-    )
+    names: set[str] = set()
+    for d in paths.datasets_dirs():
+        if not d.exists():
+            continue
+        for e in d.iterdir():
+            if e.name.lower().endswith((".csv", ".jsonl")):
+                names.add(e.name)
+    return sorted(names)
 
 
 def read_dataset(name: str) -> str:
-    return paths.dataset_file_path(name).read_text(encoding="utf-8")
+    path = paths.find_dataset_file(name) or paths.dataset_file_path(name)
+    return path.read_text(encoding="utf-8")
 
 
-def write_dataset(name: str, content: str) -> None:
+def write_dataset(name: str, content: str, *, private: bool = False) -> None:
     ensure_dirs()
-    paths.dataset_file_path(name).write_text(content, encoding="utf-8")
+    # Keep an existing dataset in its current tree; a new dataset goes to the
+    # private tree when requested, otherwise public.
+    path = paths.find_dataset_file(name) or paths.dataset_file_path(name, private=private)
+    path.write_text(content, encoding="utf-8")
 
 
 def delete_dataset(name: str) -> None:
     ensure_dirs()
-    paths.dataset_file_path(name).unlink(missing_ok=True)
+    path = paths.find_dataset_file(name)
+    if path is not None:
+        path.unlink(missing_ok=True)

@@ -4,21 +4,21 @@
   "models": [
     {
       "name": "MiniMax-M2.7",
-      "temperature": 0,
+      "additional_kwargs": { "temperature": 0 },
       "seed": 42,
       "system_prompt": "global",
       "provider_name": "SambaNova"
     },
     {
       "name": "gemma-4-31B-it",
-      "temperature": 0,
+      "additional_kwargs": { "temperature": 0 },
       "seed": 42,
       "system_prompt": "global",
       "provider_name": "SambaNova"
     },
     {
       "name": "Meta-Llama-3.3-70B-Instruct",
-      "temperature": 0,
+      "additional_kwargs": { "temperature": 0 },
       "seed": 42,
       "system_prompt": "global",
       "provider_name": "SambaNova"

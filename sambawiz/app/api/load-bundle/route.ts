@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { parseBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
+import { parseModelBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
 
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const fileName = searchParams.get('fileName');
-    const convert = searchParams.get('convert') === 'true';
 
     if (!fileName) {
       return NextResponse.json({
@@ -26,7 +25,7 @@ export async function GET(request: NextRequest) {
     }
 
     const fileContent = fs.readFileSync(filePath, 'utf-8');
-    const result = parseBundleYamlContent(fileContent, { skipUnknownPefs: convert });
+    const result = parseModelBundleYamlContent(fileContent);
 
     if ('error' in result) {
       return NextResponse.json({ success: false, error: result.error }, { status: 400 });

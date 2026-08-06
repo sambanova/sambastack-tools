@@ -84,6 +84,9 @@ app/data/pef_configs.json
 # auto-generated PEF configs (generated from cluster on startup)
 app/data/checkpoint_mapping.json
 
+# auto-generated model profiles cache (generated from cluster on startup)
+app/data/model_profiles.json
+
 # custom configurations and files
 custom/
 
