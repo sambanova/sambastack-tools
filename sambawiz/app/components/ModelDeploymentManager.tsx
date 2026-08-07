@@ -110,6 +110,23 @@ const PROMPT_CACHING_ENV_VARS = {
 } as const;
 
 /**
+ * The `engineConfig.env_vars` that make generation ignore the End-of-Sequence
+ * token. Injected when the "Ignore EOS" box is checked. Unlike prompt caching
+ * this is always offered (independent of the profile's features). String value
+ * (not boolean) so it serializes as quoted `"true"`, matching the engine.
+ */
+const IGNORE_EOS_ENV_VARS = {
+  ENABLE_IGNORE_EOS: 'true',
+} as const;
+
+/** Tooltip copy for the "Ignore EOS" checkbox. */
+const IGNORE_EOS_TOOLTIP =
+  'Ignores the End-of-Sequence (EOS) token so generation always runs to a set token length ' +
+  'regardless of the model’s natural stopping point — useful for benchmarking runs. ' +
+  'Use with caution: it can be abused to keep the hardware generating tokens indefinitely ' +
+  '(a denial-of-service risk).';
+
+/**
  * The features cache served by `/api/model-profiles` (the `model_profiles.json`
  * cache), keyed by ModelProfile `metadata.name`. Only `features` is needed here.
  */
@@ -214,6 +231,9 @@ export default function ModelDeploymentManager() {
   // selection and injects `engineConfig.env_vars` into the YAML when checked.
   const [modelProfileFeatures, setModelProfileFeatures] = useState<ModelProfileFeatures>({});
   const [enablePromptCaching, setEnablePromptCaching] = useState<boolean>(false);
+  // "Ignore EOS" checkbox: always available (not gated by profile features).
+  // Resets on each new selection and injects `ENABLE_IGNORE_EOS` when checked.
+  const [ignoreEos, setIgnoreEos] = useState<boolean>(false);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -363,10 +383,11 @@ export default function ModelDeploymentManager() {
         setDeploymentName(data.state.deploymentName || '');
         setDeploymentYaml(data.state.deploymentYaml || '');
         setMonitoredDeployment(data.state.monitoredDeployment || '');
-        // Reflect prompt caching if the restored YAML already carries the env var.
+        // Reflect prompt caching / ignore-EOS if the restored YAML already carries the env var.
         setEnablePromptCaching(
           (data.state.deploymentYaml || '').includes('ENABLE_KV_CACHE_MANAGER')
         );
+        setIgnoreEos((data.state.deploymentYaml || '').includes('ENABLE_IGNORE_EOS'));
       }
     } catch (error) {
       console.error('Failed to load saved deployment state:', error);
@@ -395,8 +416,9 @@ export default function ModelDeploymentManager() {
         }
         setDeploymentName(suggestedName);
 
-        // New selection → prompt caching starts unchecked.
+        // New selection → prompt caching / ignore-EOS start unchecked.
         setEnablePromptCaching(false);
+        setIgnoreEos(false);
 
         // Generate YAML
         const yaml = generateDeploymentYaml(bundleParam, suggestedName);
@@ -424,8 +446,9 @@ export default function ModelDeploymentManager() {
       const suggestedName = deriveModelDeploymentName(modelPath);
       setDeploymentName(suggestedName);
 
-      // New selection → prompt caching starts unchecked.
+      // New selection → prompt caching / ignore-EOS start unchecked.
       setEnablePromptCaching(false);
+      setIgnoreEos(false);
 
       // Generate YAML
       setDeploymentYaml(
@@ -728,6 +751,51 @@ export default function ModelDeploymentManager() {
   };
 
   /**
+   * Parse `deploymentYaml` and add or remove the ignore-EOS `engineConfig.env_vars`
+   * (see IGNORE_EOS_ENV_VARS), preserving the user's other edits (including any
+   * prompt-caching vars). Mirrors `applyPromptCaching`: `env_vars` is written first
+   * within `engineConfig`, and disabling removes only `ENABLE_IGNORE_EOS` (dropping
+   * `env_vars` entirely if that empties it).
+   */
+  const applyIgnoreEos = (yamlStr: string, enabled: boolean): string => {
+    if (!yamlStr.trim()) return yamlStr;
+    try {
+      const doc = yaml.load(yamlStr) as { spec?: { engineConfig?: Record<string, unknown> } };
+      if (!doc || typeof doc !== 'object') return yamlStr;
+      doc.spec = doc.spec || {};
+      const engineConfig = { ...(doc.spec.engineConfig || {}) };
+      const existingEnv = { ...(engineConfig.env_vars as Record<string, string> | undefined) };
+
+      if (enabled) {
+        engineConfig.env_vars = { ...existingEnv, ...IGNORE_EOS_ENV_VARS };
+      } else {
+        delete existingEnv.ENABLE_IGNORE_EOS;
+        if (Object.keys(existingEnv).length > 0) {
+          engineConfig.env_vars = existingEnv;
+        } else {
+          delete engineConfig.env_vars;
+        }
+      }
+
+      // Rebuild engineConfig with env_vars first (if present), then the rest.
+      const { env_vars, ...restEngineConfig } = engineConfig;
+      doc.spec.engineConfig = {
+        ...(env_vars ? { env_vars } : {}),
+        ...restEngineConfig,
+      };
+      return yaml.dump(doc, { lineWidth: -1, quotingType: '"' }).trimEnd();
+    } catch {
+      return yamlStr;
+    }
+  };
+
+  // Toggle ignore-EOS: flip the checkbox and patch the current YAML in place.
+  const handleToggleIgnoreEos = (checked: boolean) => {
+    setIgnoreEos(checked);
+    setDeploymentYaml((current) => applyIgnoreEos(current, checked));
+  };
+
+  /**
    * Generate a `ModelDeployment` document (replaces the old hand-built
    * `BundleDeployment` template-literal string). Serialized with `js-yaml`'s
    * `dump()` rather than manual indentation.
@@ -737,17 +805,25 @@ export default function ModelDeploymentManager() {
    * knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) carry
    * over unchanged from the V2 `BundleDeployment` defaults.
    */
-  // Build the `spec.engineConfig`, prepending the prompt-caching env vars when
-  // requested (env_vars first for readability, then the default startupTimeout).
-  const buildEngineConfig = (withPromptCaching: boolean) => ({
-    ...(withPromptCaching ? { env_vars: { ...PROMPT_CACHING_ENV_VARS } } : {}),
-    startupTimeout: 7200,
-  });
+  // Build the `spec.engineConfig`, prepending the prompt-caching and/or ignore-EOS
+  // env vars when requested (env_vars first for readability, then the default
+  // startupTimeout). `env_vars` is omitted entirely when neither is requested.
+  const buildEngineConfig = (withPromptCaching: boolean, withIgnoreEos: boolean) => {
+    const env_vars = {
+      ...(withPromptCaching ? PROMPT_CACHING_ENV_VARS : {}),
+      ...(withIgnoreEos ? IGNORE_EOS_ENV_VARS : {}),
+    };
+    return {
+      ...(Object.keys(env_vars).length > 0 ? { env_vars } : {}),
+      startupTimeout: 7200,
+    };
+  };
 
   const generateDeploymentYaml = (
     bundleName: string,
     deploymentName: string,
-    withPromptCaching = false
+    withPromptCaching = false,
+    withIgnoreEos = false
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -766,7 +842,7 @@ export default function ModelDeploymentManager() {
         ],
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
-        engineConfig: buildEngineConfig(withPromptCaching),
+        engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
       },
     };
 
@@ -794,7 +870,8 @@ export default function ModelDeploymentManager() {
     modelRef: string,
     profile: string,
     deploymentName: string,
-    withPromptCaching = false
+    withPromptCaching = false,
+    withIgnoreEos = false
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -820,7 +897,7 @@ export default function ModelDeploymentManager() {
         ],
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
-        engineConfig: buildEngineConfig(withPromptCaching),
+        engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
       },
     };
 
@@ -842,8 +919,9 @@ export default function ModelDeploymentManager() {
     }
 
     setDeployMode(mode);
-    // Switching source → prompt caching starts unchecked.
+    // Switching source → prompt caching / ignore-EOS start unchecked.
     setEnablePromptCaching(false);
+    setIgnoreEos(false);
 
     if (mode === 'model' && modelPath && profileName) {
       const suggestedName = deriveModelDeploymentName(modelPath);
@@ -859,8 +937,9 @@ export default function ModelDeploymentManager() {
     const bundleName = event.target.value;
     setSelectedBundle(bundleName);
 
-    // New selection → prompt caching starts unchecked.
+    // New selection → prompt caching / ignore-EOS start unchecked.
     setEnablePromptCaching(false);
+    setIgnoreEos(false);
 
     // Auto-suggest deployment name
     let suggestedName = '';
@@ -886,14 +965,15 @@ export default function ModelDeploymentManager() {
     setDeploymentName(newName);
 
     // Regenerate YAML with new deployment name, preserving the prompt-caching
-    // choice (only meaningful when the selection actually supports it).
+    // (only meaningful when the selection supports it) and ignore-EOS choices.
     const withPromptCaching = enablePromptCaching && promptCachingAvailable;
+    const withIgnoreEos = ignoreEos;
     if (deployMode === 'model' && modelPath && profileName && newName) {
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching)
+        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching, withIgnoreEos)
       );
     } else if (selectedBundle && newName) {
-      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching);
+      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching, withIgnoreEos);
       setDeploymentYaml(yaml);
     }
   };
@@ -1196,6 +1276,24 @@ export default function ModelDeploymentManager() {
           label="Enable prompt caching"
         />
       )}
+
+      {/* Ignore EOS — always available. Checking it injects ENABLE_IGNORE_EOS
+          into the deployment's engineConfig.env_vars. */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+        <FormControlLabel
+          sx={{ mr: 0 }}
+          control={
+            <Checkbox
+              checked={ignoreEos}
+              onChange={(e) => handleToggleIgnoreEos(e.target.checked)}
+            />
+          }
+          label="Ignore EOS"
+        />
+        <Tooltip title={IGNORE_EOS_TOOLTIP} arrow>
+          <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+        </Tooltip>
+      </Box>
 
       {/* Generated YAML */}
       <Box>

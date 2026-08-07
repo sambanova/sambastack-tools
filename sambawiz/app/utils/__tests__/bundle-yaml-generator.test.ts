@@ -7,6 +7,7 @@ import {
   deriveIsDefaultTier,
   batchingConfigsEqual,
   collapseTiersToWildcard,
+  resolveWildcardTiers,
   orderBatchingConfigDescending,
   getDisplayName,
   isSpecDecodingProfile,
@@ -208,6 +209,39 @@ describe('bundle-yaml-generator', () => {
     });
   });
 
+  describe('resolveWildcardTiers', () => {
+    const profileDefault = {
+      '8k': { batch_sizes: [2, 4, 6, 8] as number[] },
+      '32k': { batch_sizes: [2, 4] as number[] },
+    };
+
+    it("expands a tier's '*' sentinel to the profile default's batch sizes", () => {
+      const result = resolveWildcardTiers({ '8k': { batch_sizes: '*' } }, profileDefault);
+      expect(result['8k'].batch_sizes).toEqual([2, 4, 6, 8]);
+    });
+
+    it('leaves explicit batch sizes untouched, and passes through a wildcard with no matching default', () => {
+      const result = resolveWildcardTiers(
+        { '8k': { batch_sizes: [2] }, '128k': { batch_sizes: '*' } },
+        profileDefault
+      );
+      expect(result['8k'].batch_sizes).toEqual([2]);
+      expect(result['128k'].batch_sizes).toBe('*');
+    });
+
+    it('preserves is_default while expanding the wildcard tier', () => {
+      const result = resolveWildcardTiers({ '8k': { batch_sizes: '*', is_default: true } }, profileDefault);
+      expect(result['8k']).toEqual({ batch_sizes: [2, 4, 6, 8], is_default: true });
+    });
+
+    it("round-trips with collapseTiersToWildcard (expand ∘ collapse leaves a matching tier at the default)", () => {
+      const collapsed = collapseTiersToWildcard({ '8k': { batch_sizes: [8, 6, 4, 2] } }, profileDefault);
+      expect(collapsed['8k'].batch_sizes).toBe('*');
+      const resolved = resolveWildcardTiers(collapsed, profileDefault);
+      expect(resolved['8k'].batch_sizes).toEqual([2, 4, 6, 8]);
+    });
+  });
+
   describe('orderBatchingConfigDescending', () => {
     it('reinserts tiers in descending sequence-length order', () => {
       const config = {
@@ -327,6 +361,49 @@ describe('bundle-yaml-generator', () => {
       ];
       const bundle = buildModelBundleObject('default-bundle', selections);
       expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+
+    it("omits batchingConfig when every tier is the '*' wildcard (all batch sizes left checked)", () => {
+      // Reproduces the "batchingConfig full of '*'" bug: an override that leaves
+      // every tier at the wildcard is semantically the profile default, so the
+      // whole batchingConfig must be omitted (not emitted as all-'*').
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: {
+            '8k': { batch_sizes: '*' },
+            '32k': { batch_sizes: '*' },
+            '64k': { batch_sizes: '*' },
+            '128k': { batch_sizes: '*' },
+          },
+        },
+      ];
+      const bundle = buildModelBundleObject('wildcard-default-bundle', selections);
+      expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+
+    it("still emits batchingConfig when some tiers are '*' but another diverges from the default", () => {
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockHighInteractivityProfile,
+          batchingConfigOverride: {
+            '8k': { batch_sizes: '*' }, // matches default [2, 4, 6, 8]
+            '32k': { batch_sizes: '*' }, // matches default [2, 4, 6, 8]
+            '64k': { batch_sizes: [2] }, // diverges from default [2, 4]
+            '128k': { batch_sizes: '*' }, // matches default [2]
+          },
+        },
+      ];
+      const batchingConfig = buildModelBundleObject('wildcard-partial-bundle', selections).spec
+        .modelConfigs[0].batchingConfig;
+      expect(batchingConfig).toBeDefined();
+      // The divergent tier keeps its explicit list; matching tiers stay '*'.
+      expect(batchingConfig!['64k'].batch_sizes).toEqual([2]);
+      expect(batchingConfig!['8k'].batch_sizes).toBe('*');
     });
 
     it('drops a model entirely when all its batching tiers are cleared in Step 3', () => {

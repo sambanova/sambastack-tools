@@ -284,15 +284,19 @@ function ProfileCard({
   return disabled && disabledTooltip ? <Tooltip title={disabledTooltip}>{card}</Tooltip> : card;
 }
 
-/** Fixed batch-size columns for the override grid (plus a leading "All" column). */
-const BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
+/**
+ * Fallback batch-size columns for the override grid, used only when a profile tier declares its
+ * batch sizes as `'*'` (or omits them). Real profiles enumerate explicit batch sizes, and the grid
+ * derives its columns from those (see `BatchingOverrideEditor`), so this is a defensive default.
+ */
+const DEFAULT_BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
 
 /**
  * Editable batching-config override for a single model, rendered as a checkbox grid.
  *
- * Rows are the profile's context-length tiers; columns are "All" + the batch-size columns up to
- * the largest batch size the profile supports anywhere (columns beyond that max are dropped, e.g.
- * a profile whose highest supported batch size is 32 never shows 64). A cell is supported only
+ * Rows are the profile's context-length tiers; columns are "All" + one column per batch size the
+ * profile declares anywhere (the union across tiers, ascending), so every supported batch size —
+ * including values like 6 or 128 — gets a checkbox. A cell is supported only
  * when that batch size is supported for the tier by the profile (`universe` — the profile's
  * effective config, which is the complete universe of supported tiers × batch sizes); unsupported
  * cells render blank (no disabled checkbox). "All" reflects/controls every supported cell in its
@@ -320,19 +324,19 @@ function BatchingOverrideEditor({
     );
   }
 
-  // Batch sizes the profile supports for a tier, restricted to the fixed columns.
+  // Batch sizes the profile supports for a tier — the tier's declared batch sizes verbatim (a `'*'`
+  // or omitted tier falls back to the default columns). Sorted ascending for stable rendering.
   const supportedFor = (tier: string): number[] => {
     const bs = universe[tier]?.batch_sizes;
-    if (bs === '*' || bs === undefined) return [...BATCH_COLUMNS];
-    return BATCH_COLUMNS.filter((c) => bs.includes(c));
+    if (bs === '*' || bs === undefined) return [...DEFAULT_BATCH_COLUMNS];
+    return [...bs].sort((a, b) => a - b);
   };
 
-  // Largest batch size supported anywhere in this profile; columns beyond it are dropped entirely.
-  const maxSupported = tiers.reduce((max, tier) => {
-    const supported = supportedFor(tier);
-    return supported.length > 0 ? Math.max(max, ...supported) : max;
-  }, 0);
-  const columns = BATCH_COLUMNS.filter((c) => c <= maxSupported);
+  // Columns are the union of every batch size the profile declares across all tiers, so every
+  // supported batch size gets a checkbox. Deriving columns from the profile (rather than a fixed
+  // list) ensures values like 6 or 128 are visible and removable — otherwise they stay hidden in
+  // the override state and leak silently into the generated YAML.
+  const columns = Array.from(new Set(tiers.flatMap(supportedFor))).sort((a, b) => a - b);
 
   const setTier = (tier: string, batch_sizes: BatchingConfig[string]['batch_sizes']) => {
     onChange({ ...override, [tier]: { batch_sizes } });

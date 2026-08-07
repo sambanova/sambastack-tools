@@ -176,6 +176,28 @@ export function collapseTiersToWildcard(
 }
 
 /**
+ * Returns a copy of `batchingConfig` with each tier's `'*'` sentinel expanded to
+ * that same tier's batch sizes in `profileDefault`. `'*'` means "the profile
+ * default's batch sizes for this tier", so this makes a wildcard tier directly
+ * comparable to the explicit default — used to decide whether an override is
+ * really just the default (and can be omitted from the YAML). Tiers that aren't
+ * `'*'`, or that have no matching default, are passed through unchanged. This is
+ * the inverse of `collapseTiersToWildcard`.
+ */
+export function resolveWildcardTiers(
+  batchingConfig: BatchingConfig,
+  profileDefault: BatchingConfig
+): BatchingConfig {
+  const result: BatchingConfig = {};
+  for (const [tier, cfg] of Object.entries(batchingConfig)) {
+    const def = profileDefault[tier];
+    result[tier] =
+      cfg.batch_sizes === '*' && def !== undefined ? { ...cfg, batch_sizes: def.batch_sizes } : cfg;
+  }
+  return result;
+}
+
+/**
  * Deep, order-independent equality for two batching configs: same set of tiers,
  * and for each tier the same batch sizes and the same `is_default` flag.
  */
@@ -325,8 +347,13 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
 
     // Only emit batchingConfig when it diverges from what the operator would use
     // by default (the profile's effective batching config); an identical config
-    // is redundant. When emitted, order tiers by descending sequence length.
-    if (!batchingConfigsEqual(batchingConfig, profileDefault)) {
+    // is redundant. A tier left at the `'*'` sentinel means "the profile default's
+    // batch sizes", so resolve those before comparing — otherwise a selection that
+    // equals the default but is expressed with `'*'` (e.g. every batch size left
+    // checked, or a reloaded bundle) looks different and gets emitted redundantly.
+    // When emitted, keep the original (`'*'`-preserving) config and order tiers by
+    // descending sequence length; the downstream collapse step shrinks it.
+    if (!batchingConfigsEqual(resolveWildcardTiers(batchingConfig, profileDefault), profileDefault)) {
       entry.batchingConfig = orderBatchingConfigDescending(batchingConfig);
     }
 

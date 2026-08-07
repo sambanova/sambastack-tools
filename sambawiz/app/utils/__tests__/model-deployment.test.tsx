@@ -521,6 +521,101 @@ describe('Model Deployment Manager', () => {
     jest.useFakeTimers();
   });
 
+  it('always offers "Ignore EOS" (even without prompt_caching) and injects/removes ENABLE_IGNORE_EOS', async () => {
+    jest.useRealTimers();
+    mockNav.params = { modelPath: 'minimax-m2-7:minimax-m2p5:1', profileName: 'plain-profile' };
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            // No `prompt_caching` feature — Ignore EOS must still be offered.
+            data: { 'plain-profile': { model_arch: 'minimax-m2p5', features: [], batchingConfig: {}, pefs: [] } },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [], bundles: [] }) });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+    // Unchecked by default → no ignore-EOS env var yet.
+    expect(yamlField.value).not.toContain('ENABLE_IGNORE_EOS');
+
+    // Dismiss the pre-deploy reminder dialog so its backdrop isn't hiding Section 2.
+    await user.click(await screen.findByRole('button', { name: 'Got it' }));
+
+    // Prompt caching is NOT offered (no feature), but Ignore EOS always is.
+    expect(screen.queryByRole('checkbox', { name: 'Enable prompt caching' })).not.toBeInTheDocument();
+    const checkbox = await screen.findByRole('checkbox', { name: 'Ignore EOS' });
+    await user.click(checkbox);
+
+    await waitFor(() => expect(yamlField.value).toMatch(/ENABLE_IGNORE_EOS:\s*["']true["']/));
+    expect(yamlField.value).toContain('env_vars:');
+    expect(yamlField.value).toContain('startupTimeout: 7200');
+
+    // Unchecking removes it (and the now-empty env_vars), leaving startupTimeout.
+    await user.click(checkbox);
+    await waitFor(() => expect(yamlField.value).not.toContain('ENABLE_IGNORE_EOS'));
+    expect(yamlField.value).not.toContain('env_vars:');
+    expect(yamlField.value).toContain('startupTimeout: 7200');
+
+    jest.useFakeTimers();
+  });
+
+  it('toggles "Ignore EOS" independently of prompt caching (both can coexist in env_vars)', async () => {
+    jest.useRealTimers();
+    mockNav.params = { modelPath: 'minimax-m2-7:minimax-m2p5:1', profileName: 'minimax-m2p5-dyt-pc-cd' };
+
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            data: {
+              'minimax-m2p5-dyt-pc-cd': {
+                model_arch: 'minimax-m2p5',
+                features: ['prompt_caching'],
+                batchingConfig: {},
+                pefs: [],
+              },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [], bundles: [] }) });
+    });
+
+    const user = userEvent.setup();
+    await act(async () => {
+      renderWithProviders(<ModelDeploymentManager />);
+    });
+
+    const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+    await user.click(await screen.findByRole('button', { name: 'Got it' }));
+
+    // Enable both → both env vars present together.
+    await user.click(await screen.findByRole('checkbox', { name: 'Enable prompt caching' }));
+    await user.click(await screen.findByRole('checkbox', { name: 'Ignore EOS' }));
+    await waitFor(() => expect(yamlField.value).toMatch(/ENABLE_IGNORE_EOS:\s*["']true["']/));
+    expect(yamlField.value).toMatch(/ENABLE_KV_CACHE_MANAGER:\s*["']true["']/);
+
+    // Disabling prompt caching leaves ignore-EOS intact (independent env vars).
+    await user.click(screen.getByRole('checkbox', { name: 'Enable prompt caching' }));
+    await waitFor(() => expect(yamlField.value).not.toContain('ENABLE_KV_CACHE_MANAGER'));
+    expect(yamlField.value).toMatch(/ENABLE_IGNORE_EOS:\s*["']true["']/);
+    expect(yamlField.value).toContain('env_vars:');
+
+    jest.useFakeTimers();
+  });
+
   it('redirects to the Model Selection page when "Model" is chosen without model params', async () => {
     jest.useRealTimers();
     // No modelPath/profileName → defaults to bundle mode.

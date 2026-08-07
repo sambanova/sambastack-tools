@@ -159,6 +159,19 @@ const maverickV2Profile: ModelProfile = {
   },
 };
 
+// Regression fixture: a profile whose batch sizes include 6 — a value the old fixed column list
+// ([1, 2, 4, 8, 16, 32, 64]) omitted, so 6 had no checkbox and could only leak silently into the
+// generated YAML. The grid now derives its columns from the profile, so 6 is visible/removable.
+const hiddenBatchSizeProfile: ModelProfile = {
+  metadata: { name: 'llama-3p2-1b-bs6' },
+  spec: {
+    model_arch: 'llama-3p2-1b',
+    features: [],
+    defaultBatchingConfig: { '4k': { batch_sizes: [2, 4, 6, 8] } },
+    pefs: ['llama-3p2-1b-bs6:1'],
+  },
+};
+
 describe('ModelSelection (V3)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -395,10 +408,10 @@ describe('ModelSelection (V3)', () => {
     // Step 3 is optional and collapsed by default — expand it before interacting with the grid.
     await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
 
-    // This profile's largest supported batch size is 4 (4k: [1,4], 16k: [1]), so columns are
-    // trimmed to [1, 2, 4] — 8/16/32/64 are dropped entirely. The '4k' tier supports [1, 4]: cells
-    // 1 and 4 are (seeded from the profile) checked; an unsupported size like 2 renders blank (no
-    // checkbox at all); and since every supported cell is checked, the row's "All" is auto-checked.
+    // Columns are the union of the profile's declared batch sizes (4k: [1,4], 16k: [1]) → [1, 4],
+    // so 2/8/16/32/64 never get a column. The '4k' tier supports [1, 4]: cells 1 and 4 are (seeded
+    // from the profile) checked; an undeclared size like 2 has no checkbox at all; and since every
+    // supported cell is checked, the row's "All" is auto-checked.
     const cell1 = await screen.findByRole('checkbox', { name: 'Batch size 1 for 4k' });
     const cell4 = screen.getByRole('checkbox', { name: 'Batch size 4 for 4k' });
     const allCell = screen.getByRole('checkbox', { name: 'All batch sizes for 4k' });
@@ -419,24 +432,81 @@ describe('ModelSelection (V3)', () => {
       expect(doc.spec.modelConfigs[0].batchingConfig).toBeUndefined();
     });
 
-    // Unchecking a supported cell diverges from the default, so batchingConfig is
-    // now emitted with the reduced list, and "All" clears.
+    // Unchecking a supported cell in 4k diverges from the default, so batchingConfig
+    // is now emitted with 4k's reduced list — while the untouched 16k tier (still at
+    // its default) collapses to the '*' sentinel. "All" for 4k clears.
     await user.click(cell4);
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
         spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
       };
       expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([1]);
+      // The at-default tier serializes as '*', not its explicit list.
+      expect(doc.spec.modelConfigs[0].batchingConfig['16k'].batch_sizes).toBe('*');
     });
     expect(screen.getByRole('checkbox', { name: 'All batch sizes for 4k' })).not.toBeChecked();
 
-    // Checking "All" collapses the tier to the '*' sentinel.
+    // Re-checking "All" restores 4k to its full default. Now every tier matches the
+    // profile default (even though 4k is stored as the '*' sentinel), so the whole
+    // batchingConfig is omitted rather than emitted as all-'*' — the fix for the
+    // "batchingConfig full of '*'" bug.
     await user.click(screen.getByRole('checkbox', { name: 'All batch sizes for 4k' }));
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as {
+        spec: { modelConfigs: Array<{ batchingConfig?: Record<string, { batch_sizes: unknown }> }> };
+      };
+      expect(doc.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+  });
+
+  it('gives every declared batch size its own checkbox (e.g. 6) so none can leak into the YAML unseen', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [hiddenBatchSizeProfile.metadata.name]: toProfileEntry(hiddenBatchSizeProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
+
+    // 6 is declared by the profile, so it now has its own checkbox (previously it was invisible and
+    // could only surface as a surprise value in the YAML). It starts checked, seeded from the default.
+    const cell6 = await screen.findByRole('checkbox', { name: 'Batch size 6 for 4k' });
+    const cell4 = screen.getByRole('checkbox', { name: 'Batch size 4 for 4k' });
+    expect(cell6).toBeChecked();
+    expect(cell4).toBeChecked();
+
+    // Grid seeded from the profile default → batchingConfig omitted entirely.
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as {
+        spec: { modelConfigs: Array<{ batchingConfig?: Record<string, { batch_sizes: unknown }> }> };
+      };
+      expect(doc.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+    });
+
+    // Unchecking 4 removes exactly 4 — 6 stays because it is genuinely supported and still checked
+    // (before the fix, unchecking 4 produced [2, 6, 8] with 6 appearing "hallucinated").
+    await user.click(cell4);
     await waitFor(() => {
       const doc = yaml.load(getYamlText()) as {
         spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
       };
-      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toBe('*');
+      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([2, 6, 8]);
+    });
+
+    // And 6 can now be unchecked (previously impossible), removing it from the YAML.
+    await user.click(screen.getByRole('checkbox', { name: 'Batch size 6 for 4k' }));
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as {
+        spec: { modelConfigs: Array<{ batchingConfig: Record<string, { batch_sizes: unknown }> }> };
+      };
+      expect(doc.spec.modelConfigs[0].batchingConfig['4k'].batch_sizes).toEqual([2, 8]);
     });
   });
 
