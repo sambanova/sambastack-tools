@@ -67,7 +67,7 @@ if [[ "$CHART_PATH" == *.tar || "$CHART_PATH" == *.tgz ]]; then
 
   # Find the actual chart directory inside the temporary directory
   # Assuming the tarball contains a single top-level directory (the chart)
-  FOUND_CHART_ROOT=$(find "$TEMP_CHART_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)
+  FOUND_CHART_ROOT=$(find "$TEMP_CHART_DIR" -maxdepth 1 -mindepth 1 -type d -print -quit)
   if [[ -z "$FOUND_CHART_ROOT" ]]; then
     error "Could not find chart root directory in extracted tarball."
   fi
