@@ -9,7 +9,14 @@ set -euo pipefail
 #   BundleTemplate / Bundle   references held inline in the manifest
 #   ModelBundle               references a ModelProfile (PEFs) and a Model (checkpoint)
 #
-# Requires the helm chart (.tgz or extracted directory) to resolve those references.
+# Requires a helm chart (.tgz or extracted directory) to resolve those references, and
+# accepts either chart that carries the model definitions:
+#   sambastack        the umbrella chart, definitions nested under its subcharts
+#   sambastack-models the standalone models chart, definitions at the chart root
+# Which one applies is detected from the chart's own layout, so no flag selects it.
+# Under global.modelComponents.enabled=false the umbrella chart no longer renders the
+# model CRs and sambastack-models owns them, making it the chart to pass here.
+#
 # Validates every artifact exists before downloading anything, then downloads while
 # preserving the directory layout below the bucket. Run with -h for usage.
 #######################################
@@ -33,10 +40,21 @@ DEBUG=0
 DEFAULT_CHART_ENVS=(sambastack prod dev)
 CHART_ENVS=()
 
-# Paths to definitions within the chart; each is suffixed with an environment at lookup.
-PEF_DEFINITIONS_ROOT="charts/bundles/pefs"
-PROFILE_DEFINITIONS_ROOT="charts/bundles/bundles-v3"
-MODEL_DEFINITIONS_ROOT="charts/configs/models"
+# Chart layouts, each naming where its PEF, ModelProfile and Model definitions sit
+# relative to the chart root. Both charts hold the same definitions; only the depth
+# differs, because the umbrella chart nests them inside its 'bundles' and 'configs'
+# subcharts while the models chart roots them directly.
+#
+# Usage: <layout>_LAYOUT=(<pef-root> <profile-root> <model-root>)
+SAMBASTACK_LAYOUT=(charts/bundles/pefs charts/bundles/bundles-v3 charts/configs/models)
+MODELS_LAYOUT=(pefs bundles-v3 models)
+
+# Detected chart layout. Set by detect_chart_layout; CHART_LAYOUT names it for messages,
+# and each root is suffixed with an environment at lookup.
+CHART_LAYOUT=""
+PEF_DEFINITIONS_ROOT=""
+PROFILE_DEFINITIONS_ROOT=""
+MODEL_DEFINITIONS_ROOT=""
 
 # Temporary files, created during artifact collection and removed by the EXIT trap.
 PATHS_FILE=""
@@ -115,6 +133,32 @@ yaml_keys() {
 #######################################
 # CLI
 #######################################
+
+# Print the two charts' definition roots side by side, for the help text.
+#
+# The column width is computed from the values themselves so the table stays aligned
+# when a root is renamed.
+layout_table() {
+  local rows=(
+    "PEFs|${SAMBASTACK_LAYOUT[0]}/<env>/|${MODELS_LAYOUT[0]}/<env>/"
+    "Profiles|${SAMBASTACK_LAYOUT[1]}/<env>/model-profiles/|${MODELS_LAYOUT[1]}/<env>/model-profiles/"
+    "Models|${SAMBASTACK_LAYOUT[2]}/<env>/|${MODELS_LAYOUT[2]}/<env>/"
+  )
+
+  local width=16 row middle
+  for row in "${rows[@]}"; do
+    middle="${row#*|}"
+    middle="${middle%%|*}"
+    [[ "${#middle}" -ge "$width" ]] && width=$((${#middle} + 2))
+  done
+
+  printf '    %-10s %-*s %s\n' "" "$width" "sambastack chart" "sambastack-models chart"
+  for row in "${rows[@]}"; do
+    IFS='|' read -r label stack models <<< "$row"
+    printf '    %-10s %-*s %s\n' "$label" "$width" "$stack" "$models"
+  done
+}
+
 show_help() {
   cat <<EOF
 Usage: $0 [OPTIONS] <bundle.yaml>
@@ -132,6 +176,11 @@ REQUIRED OPTIONS (mutually exclusive):
                             (used to resolve PEF/profile/model references)
   -d, --chart-dir DIR       Path to extracted helm chart directory
                             (used to resolve PEF/profile/model references)
+
+  Either the sambastack chart or the standalone sambastack-models chart may be
+  given; which one it is is detected from the chart's layout. When the infra
+  release runs with global.modelComponents.enabled=false, sambastack-models owns
+  the model CRs and is the chart to pass.
 
 OPTIONS:
   -o, --output DIR          Output directory (default: ./artifacts)
@@ -151,13 +200,13 @@ ENVIRONMENT VARIABLES:
   OUTPUT_DIR               Output directory for artifacts
 
 REQUIRED CHART STRUCTURE:
-  When using -d/--chart-dir, v2 bundles need:
-    - <dir>/$PEF_DEFINITIONS_ROOT/<env>/
-  v3 bundles additionally need:
-    - <dir>/$PROFILE_DEFINITIONS_ROOT/<env>/model-profiles/
-    - <dir>/$MODEL_DEFINITIONS_ROOT/<env>/
-  Note the last of these lives in the 'configs' subchart, so a chart trimmed to only
-  the 'bundles' subchart cannot resolve v3 checkpoints.
+  Definitions sit at a different depth in each chart. v2 bundles need the PEF root;
+  v3 bundles need all three.
+
+$(layout_table)
+
+  In the sambastack chart the Model definitions live in the 'configs' subchart, so a
+  chart trimmed to only the 'bundles' subchart cannot resolve v3 checkpoints.
 
 EXAMPLES:
   # Download artifacts for a v2 bundle with an extracted chart
@@ -168,6 +217,10 @@ EXAMPLES:
 
   # Download artifacts for prebuilt bundle with helm chart
   $0 -c sambastack-<VERSION>.tgz 70b-ss-4-8k-tk.yaml
+
+  # Use the standalone models chart, which owns the model CRs when the infra
+  # release sets global.modelComponents.enabled=false
+  $0 -c sambastack-models-<VERSION>.tgz 70b-ss-4-8k-tk.yaml
 
   # Use custom output directory
   $0 -d ./sambastack 70b-ss-4-8k-tk.yaml -o /tmp/artifacts
@@ -388,8 +441,88 @@ resolve_chart_dir() {
 }
 
 #######################################
+# Chart layout detection
+#######################################
+
+# Adopt a layout's three definition roots.
+# Usage: apply_chart_layout <name> <pef-root> <profile-root> <model-root>
+apply_chart_layout() {
+  CHART_LAYOUT="$1"
+  PEF_DEFINITIONS_ROOT="$2"
+  PROFILE_DEFINITIONS_ROOT="$3"
+  MODEL_DEFINITIONS_ROOT="$4"
+
+  debug "Chart layout '$CHART_LAYOUT':"
+  debug "  PEFs:     $PEF_DEFINITIONS_ROOT/<env>"
+  debug "  Profiles: $PROFILE_DEFINITIONS_ROOT/<env>/model-profiles"
+  debug "  Models:   $MODEL_DEFINITIONS_ROOT/<env>"
+}
+
+# Return 0 when a layout's PEF root holds definitions for any searched environment.
+# Usage: layout_matches <chart-dir> <pef-root>
+#
+# The PEF root alone identifies the layout: every bundle needs it, and the two charts
+# place it at different depths. The remaining roots are checked by
+# validate_chart_structure, which reports what a bundle of this kind actually needs.
+layout_matches() {
+  local chart_dir="$1"
+  local pef_root="$2"
+
+  local env
+  for env in "${CHART_ENVS[@]}"; do
+    [[ -d "$chart_dir/$pef_root/$env" ]] && return 0
+  done
+
+  return 1
+}
+
+# Detect which chart was supplied and set the definition roots to match.
+#
+# Usage: detect_chart_layout <chart-dir>
+#
+# Both charts are accepted so an operator can pass whichever one their install owns the
+# model CRs through, without a flag to say which. Neither matching means the chart holds
+# no PEF definitions at all, so the error names both layouts rather than guessing.
+detect_chart_layout() {
+  local chart_dir="$1"
+
+  if layout_matches "$chart_dir" "${SAMBASTACK_LAYOUT[0]}"; then
+    apply_chart_layout sambastack "${SAMBASTACK_LAYOUT[@]}"
+  elif layout_matches "$chart_dir" "${MODELS_LAYOUT[0]}"; then
+    apply_chart_layout sambastack-models "${MODELS_LAYOUT[@]}"
+  else
+    error "Could not find PEF definitions in chart: $chart_dir
+
+Expected one of these layouts:
+$(printf '  %-40s (%s chart)\n' \
+    "<chart-dir>/${SAMBASTACK_LAYOUT[0]}/<env>" sambastack \
+    "<chart-dir>/${MODELS_LAYOUT[0]}/<env>" sambastack-models)
+
+Environments searched: ${CHART_ENVS[*]}
+
+Pass the sambastack chart, or the sambastack-models chart that owns the model CRs when
+the infra release runs with global.modelComponents.enabled=false."
+  fi
+
+  info "Detected chart layout: $CHART_LAYOUT"
+}
+
+#######################################
 # Chart structure validation
 #######################################
+
+# Explain why a chart may lack Model definitions, in terms of the detected layout.
+#
+# The two charts omit them for different reasons: the umbrella chart when trimmed to
+# its 'bundles' subchart, the models chart when packaged without its models data.
+model_definitions_hint() {
+  if [[ "$CHART_LAYOUT" == "sambastack-models" ]]; then
+    echo "They ship at the root of the sambastack-models chart; a chart packaged
+without them cannot resolve v3 checkpoints."
+  else
+    echo "They live in the 'configs' subchart, which is absent from a bundles-only chart."
+  fi
+}
 
 # Count *.yaml definitions under a chart-relative root across the searched environments.
 # Usage: count_definitions <chart-dir> <root> [subdir]  ->  "<count> <first-existing-dir>"
@@ -455,7 +588,7 @@ validate_chart_structure() {
 
     require_definitions "$chart_dir" "$MODEL_DEFINITIONS_ROOT" "" "Model" \
       "These definitions map a v3 modelConfigs[].model to its checkpoint source.
-They live in the 'configs' subchart, which is absent from a bundles-only chart."
+$(model_definitions_hint)"
   fi
 
   info "✓ Chart structure is valid"
@@ -820,7 +953,7 @@ Bundle file: $BUNDLE_FILE
 Searched:
 $(searched_dirs "$MODEL_DEFINITIONS_ROOT" "")
 
-Model definitions live in the 'configs' subchart. Ensure the chart includes it."
+$(model_definitions_hint)"
   fi
 
   debug "Reading Model definition: $model_file"
@@ -1388,6 +1521,7 @@ main() {
   detect_bundle_kind
   validate_chart_options
   resolve_chart_dir
+  detect_chart_layout "$CHART_DIR"
   validate_chart_structure "$CHART_DIR"
 
   authenticate

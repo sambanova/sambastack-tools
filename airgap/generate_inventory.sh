@@ -85,7 +85,7 @@ VERSION="$(helm show chart "$CHART_ABS" | awk '/^version:/ {print $2}')"
 
 # Build values args if provided
 VALUES_ARGS=()
-for values_file in "${VALUES_FILES[@]}"; do
+for values_file in "${VALUES_FILES[@]+"${VALUES_FILES[@]}"}"; do
   VALUES_ARGS+=(-f "$values_file")
 done
 
@@ -93,19 +93,22 @@ done
 TMP_HELM_IMAGES="$STACKCHART_TMPDIR/images.txt"
 echo "" > "$TMP_HELM_IMAGES"
 
-# Extract images from helm template using grep and sed
+# Extract images from helm template using grep and sed.
+# The leading "-?[[:space:]]*" also catches the YAML list-item shorthand
+# some (esp. third-party) charts use, e.g. "- image: repo:tag" as the first
+# key of a containers[] entry, not just "  image: repo:tag" on its own line.
 info "Extracting images from helm template"
-helm template "$CHART_ABS" "${VALUES_ARGS[@]}" \
+helm template "$CHART_ABS" "${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"}" \
   2> >(cat >&2) \
-  | grep -E '^[[:space:]]*image:' \
-  | sed -E 's/^[[:space:]]*image:[[:space:]]*//' \
+  | grep -E '^[[:space:]]*-?[[:space:]]*image:' \
+  | sed -E 's/^[[:space:]]*-?[[:space:]]*image:[[:space:]]*//' \
   | sed -E 's/^"(.*)"$/\1/' \
   | sort -u > "$TMP_HELM_IMAGES" || error "Failed to extract images"
 
 
 # Extract images from helm chart annotations (for operators)
 info "Extracting images from annotations"
-helm template "$CHART_ABS" "${VALUES_ARGS[@]}" \
+helm template "$CHART_ABS" "${VALUES_ARGS[@]+"${VALUES_ARGS[@]}"}" \
   2> >(cat >&2) \
   | "$YQ" eval '
       select(.metadata.annotations != null)
@@ -149,5 +152,25 @@ echo "" > $IMAGES_YAML
 sed 's/^/- /' "$TMP_HELM_IMAGES" > "$IMAGES_YAML"
 "$YQ" eval -i "(.charts[0]).images = load(\"$IMAGES_YAML\")" "$OUTPUT_FILE"
 rm -f "$IMAGES_YAML"
+
+# Extract chart dependencies, skipping local (file://) references.
+# Aliased dependencies (e.g. the global-queue-redis and response-queue-redis
+# aliases of redis) point at the same upstream package, so they collapse to
+# identical name/version/repository entries once the alias is dropped. Only the
+# package matters for mirroring, so deduplicate them.
+info "Extracting chart dependencies"
+DEPS_YAML="$STACKCHART_TMPDIR/deps.yaml"
+helm show chart "$CHART_ABS" \
+  | "$YQ" eval '
+      [.dependencies // [] | .[]
+        | select((.repository // "") != "")
+        | select((.repository // "") | test("^file:") | not)
+        | {"name": .name, "version": .version, "repository": .repository}]
+      | unique_by([.name, .version, .repository])
+    ' - > "$DEPS_YAML" || error "Failed to extract chart dependencies"
+
+# Inject chart dependencies for the chart
+"$YQ" eval -i "(.charts[0]).charts = load(\"$DEPS_YAML\")" "$OUTPUT_FILE"
+rm -f "$DEPS_YAML"
 
 info "Inventory generation complete."
