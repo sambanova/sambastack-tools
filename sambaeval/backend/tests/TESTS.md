@@ -2,8 +2,10 @@
 
 This document catalogs the automated tests for the SambaEval evaluation engine.
 
-**Total Tests:** 63 automated (pytest), plus 1 opt-in Podman integration test
-(skipped unless `SCICODE_PODMAN_INTEGRATION=1`)
+**Total Tests:** 74 automated (pytest, `tests/`), plus 1 opt-in Podman
+integration test (skipped unless `SCICODE_PODMAN_INTEGRATION=1`). A separate
+6-test database-backed integration suite lives in `tests_db/` (opt-in; requires
+a local Postgres + MinIO — see [Database-Backed Integration Tests](#database-backed-integration-tests)).
 **Test Status:** ✅ All passing
 **Focus:** Run lifecycle (pause, terminate, cancel, resume), retrying the failed
 rows of a past run, cancelling orphaned runs, the per-run error log
@@ -12,9 +14,12 @@ new "merged" run into an existing one), running a chosen subset of the
 experiment's models (a "partial" run) for both new and merged runs,
 per-row tool definitions with tool-call capture (tool-calling evals), the
 private (gitignored) data tree (private experiments and the dataset/scorer/run
-results they touch), and the SciCode Podman sandbox lifecycle (auto-start,
-VM right-sizing, and the container-concurrency cap).
-**Runtime:** Fully offline. No provider, network, or API key is contacted.
+results they touch), the SciCode Podman sandbox lifecycle (auto-start,
+VM right-sizing, and the container-concurrency cap), and the large-fixture
+cache resolver (content-verified download + warm-cache reuse). The `tests_db/`
+suite additionally covers the Postgres/MinIO storage backend end-to-end.
+**Runtime:** The `tests/` suite is fully offline — no provider, network, or API
+key is contacted. (`tests_db/` needs the local infra containers up.)
 
 ## Table of Contents
 - [Test Philosophy](#test-philosophy)
@@ -34,6 +39,8 @@ VM right-sizing, and the container-concurrency cap).
 - [Tool-Calling Tests](#tool-calling-tests)
 - [Private Scope Tests](#private-scope-tests)
 - [Sandbox Runtime Tests](#sandbox-runtime-tests)
+- [Fixture Cache Tests](#fixture-cache-tests)
+- [Database-Backed Integration Tests](#database-backed-integration-tests)
 - [Continuous Integration](#continuous-integration)
 
 ---
@@ -62,6 +69,19 @@ From `sambaeval/backend`:
 ```bash
 uv sync --extra test          # install the package + pytest
 uv run python -m pytest tests/ -v
+```
+
+The default `tests/` suite is fully offline. The **database-backed** suite
+(`tests_db/`) is opt-in and needs the local infra (Postgres + MinIO) up first;
+it skips itself automatically when that infra is unreachable:
+
+```bash
+# from sambaeval/ :
+docker compose -f deploy/local/docker-compose.infra.yml up -d
+# from sambaeval/backend/ :
+DATABASE_URL=postgresql+psycopg://sambaeval:sambaeval@localhost:5433/sambaeval \
+  S3_ENDPOINT_URL=http://localhost:9100 \
+  uv run python -m pytest tests_db/ -v
 ```
 
 ---
@@ -519,19 +539,128 @@ A `machine start` that returns non-zero surfaces as `SandboxUnavailable`.
 Once ready, a second call is a pure cache hit — no further `podman` calls
 (the idempotency the per-run preflight + per-step lazy check both rely on).
 
-### 8-9. `test_cap_concurrency_*`
+### 8. `test_missing_podman_binary_raises_before_touching_the_cli`
+When no `podman` executable is on `PATH`, preparation raises `SandboxUnavailable`
+up front (with guidance) instead of failing obscurely deeper in the CLI calls.
+
+### 9-10. `test_cap_concurrency_*`
 Concurrency above `MAX_CONTAINERS` is clamped with a warning; at/below is passed
 through silently.
 
-### 10. `test_sizing_invariant_containers_fit_the_vm`
+### 11. `test_sizing_invariant_containers_fit_the_vm`
 Guards the sizing math: `MAX_CONTAINERS × PER_CONTAINER_MB < VM_MEMORY_MB`, and
 the container semaphore is sized to `MAX_CONTAINERS`.
 
-### 11. `test_real_podman_starts_and_connects` (opt-in, skipped in CI)
+### 12. `test_real_podman_starts_and_connects` (opt-in, skipped in CI)
 The only test that touches real Podman: it actually starts the VM and asserts
 the daemon connects and the VM is sized for the container cap. Guarded behind
 `SCICODE_PODMAN_INTEGRATION=1` so it never runs on Actions (no VM there) and
 doesn't slow the default suite.
+
+The last two are offline and cover the SciCode **generator's** verdict/error
+surfacing (in `scripts/generators/scicode_generator.py`) — so a broken harness
+is never silently scored as a wrong answer:
+
+### 13. `test_build_script_records_the_exception_type`
+The script the generator builds for the sandbox wraps execution in
+`except BaseException` and writes the exception *type* + detail into the verdict
+(`format_exception_only`, `FAIL\n<err>`), so a harness failure (missing
+`test_data.h5`, an `ImportError`) is distinguishable from a genuine wrong answer
+— both would otherwise collapse to an opaque `FAIL` / score `0`.
+
+### 14. `test_verdict_parser_surfaces_the_detail`
+`_verdict_to_result` maps `PASS → (True, "")`, `FAIL\n<detail> → (False, detail)`,
+a bare `FAIL` to the generic "assertion failed or runtime error", and `TIMEOUT`
+to "timed out (no verdict)".
+
+---
+
+## Fixture Cache Tests
+
+File: `tests/test_fixtures.py`
+
+The large-fixture resolver (`sambaeval/fixtures.py`) materialises big binary
+fixtures — e.g. SciCode's ~1 GB `test_data.h5` — from the object store onto
+local disk **once per worker**, content-verified, so a generator that needs a
+real file path gets one without holding the file in memory or re-downloading it
+each run. The object store is stubbed with an in-memory fake, so these run fully
+offline and assert the *decisions*.
+
+### 1. `test_key_and_cache_path_layout`
+`fixture_key("scicode/test_data.h5")` maps to `fixtures/scicode/test_data.h5`
+(leading slashes tolerated and never escaping the cache dir), and `cache_path`
+resolves under the configured cache directory.
+
+### 2. `test_cache_miss_downloads_then_returns_path`
+A cold cache downloads the object exactly once and returns a real file path whose
+bytes match the stored payload.
+
+### 3. `test_warm_cache_makes_no_network_call`
+A warm cache is a plain `isfile()` fast path — no `head`, no re-download — which
+matters because the real fixture is ~1 GB and is resolved once per run.
+
+### 4. `test_recorded_digest_is_verified_on_download`
+When the stored object carries a recorded `sha256`, the downloaded bytes are
+verified against it before the path is returned.
+
+### 5. `test_corrupt_object_is_rejected_and_leaves_no_file`
+If the object's bytes no longer match its recorded digest, `ensure_fixture`
+raises `FixtureUnavailable` (message mentions `sha256`) and leaves **no** usable
+cache file behind (the partial download is discarded).
+
+### 6. `test_missing_everywhere_raises_with_the_publish_command`
+A fixture that exists neither in cache nor in the store raises with an actionable
+message — the operator `push-fixture` command and the fixture name.
+
+### 7. `test_verify_re_downloads_a_locally_corrupted_cache`
+With `verify=True`, an on-disk-corrupted cache entry (bad volume / truncated
+write) is detected and re-downloaded, restoring the good bytes.
+
+### 8. `test_no_partial_files_remain_in_the_cache_dir`
+The atomic download (temp file + rename) leaves no `.partial-*` scratch files in
+the cache directory.
+
+---
+
+## Database-Backed Integration Tests
+
+File: `tests_db/test_db_backend.py`
+
+These exercise the **`db` storage backend** (`SAMBAEVAL_STORAGE_BACKEND=db`) end
+to end — the Postgres repositories, the MinIO object store, per-user provider
+encryption, and the decoupled worker — using the echo generator so no provider
+is contacted. The whole module **skips itself when the local infra (Postgres +
+MinIO) is unreachable**, so a bare `pytest tests_db/` is a no-op rather than a
+failure. Each test runs as a throwaway user (the `owner_ctx` fixture) so rows
+never collide across tests.
+
+### 1. `test_experiment_crud_and_scoping`
+Save / get / delete an experiment through the DB layer; a private experiment
+appears under its owner's **"mine"** scope with `visibility == "private"` and is
+absent from the **"public"** scope.
+
+### 2. `test_provider_crypto_roundtrip`
+A provider saved via the DB layer stores only ciphertext (`api_key_ciphertext`);
+`list_providers` decrypts the key back to the original — the `CREDS_KEY` round
+trip. (The plaintext never appears in the table.)
+
+### 3. `test_dataset_object_store_roundtrip`
+`write_dataset` uploads the blob to MinIO and `read_dataset` streams it back
+byte-for-byte; the dataset name shows up in `list_datasets`.
+
+### 4. `test_run_end_to_end_and_csv`
+An enqueued run is claimed and executed by the worker to `completed` (every row
+scored `1.0`, zero errors), and the CSV export keeps the exact `RESULT_HEADERS`
+byte-format (an integral score serialises as `1`, not `1.0`).
+
+### 5. `test_share_token_view`
+A private experiment given a share token is viewable by a **different** owner via
+that token (link sharing), while its ownership is unchanged.
+
+### 6. `test_quota_counter`
+Queued + running runs a user owns are counted toward the per-user concurrency
+quota — the input the run-enqueue guard uses to enforce the 4-concurrent-runs
+limit.
 
 ---
 
@@ -548,3 +677,8 @@ container runtime is needed. The one real-Podman integration test
 (`test_real_podman_starts_and_connects`) is skipped unless
 `SCICODE_PODMAN_INTEGRATION=1`, which CI never sets, so Actions never tries to
 start a VM.
+
+The `tests_db/` suite is **not** part of this job — it needs a live Postgres +
+MinIO. It skips itself when that infra is unreachable, so it is safe to include
+in a broader collection but only actually runs where the infra is provisioned
+(locally, or a dedicated integration job).

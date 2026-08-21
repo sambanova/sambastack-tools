@@ -1,0 +1,34 @@
+{{- if .Values.sandbox.enabled }}
+# RBAC for the worker to create/manage short-lived sandbox Jobs (code-exec).
+# Gated behind sandbox.enabled — OFF for the PoV (no gVisor on the RKE2 vcluster).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-worker-sandbox
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-worker-sandbox
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sambaeval.fullname" . }}-worker-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sambaeval.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

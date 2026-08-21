@@ -1,0 +1,73 @@
+{{- if .Values.backup.enabled }}
+# Nightly pg_dump -> MinIO (PoV data-safety stand-in for managed backups; §6).
+# initContainer dumps to a shared volume; the main container uploads via mc.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-backup
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "sambaeval.selectorLabels" (dict "root" . "component" "backup") | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumes:
+            - name: dump
+              emptyDir: {}
+          initContainers:
+            - name: pg-dump
+              image: {{ .Values.backup.pgImage }}
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  pg_dump -h {{ include "sambaeval.fullname" . }}-postgresql
+                  -U {{ .Values.postgresql.auth.username }}
+                  -d {{ .Values.postgresql.auth.database }}
+                  -Fc -f /backup/sambaeval-$(date +%Y%m%d-%H%M%S).pgc
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.secretName }}
+                      key: POSTGRES_PASSWORD
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          containers:
+            - name: upload
+              image: {{ .Values.backup.mcImage }}
+              command:
+                - /bin/sh
+                - -c
+                - >
+                  mc alias set store "$S3_ENDPOINT_URL" "$S3_ACCESS_KEY" "$S3_SECRET_KEY" &&
+                  mc cp --recursive /backup/ "store/$S3_BUCKET/{{ .Values.backup.s3Prefix }}/"
+              envFrom:
+                - configMapRef:
+                    name: {{ include "sambaeval.configMapName" . }}
+                - secretRef:
+                    name: {{ .Values.secretName }}
+              volumeMounts:
+                - name: dump
+                  mountPath: /backup
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+{{- end }}

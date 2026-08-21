@@ -98,6 +98,10 @@ def _reset_module_state(monkeypatch):
     # Polling never actually sleeps in these tests (the fake reconnects
     # immediately after start), but guard against a real sleep just in case.
     monkeypatch.setattr(sr.time, "sleep", lambda *_: None)
+    # These tests model the podman CLI with FakePodman, so the binary is
+    # "present" by definition. Stubbed explicitly so the suite stays green on a
+    # host without Podman installed (e.g. the ubuntu-latest CI runner).
+    monkeypatch.setattr(sr, "_podman_binary", lambda: "/usr/bin/podman")
     yield
 
 
@@ -189,6 +193,21 @@ def test_ready_is_cached_second_call_touches_no_podman(monkeypatch):
 # --------------------------------------------------------------------------- #
 # cap_concurrency
 # --------------------------------------------------------------------------- #
+def test_missing_podman_binary_raises_before_touching_the_cli(monkeypatch):
+    """No podman on PATH (e.g. the worker running inside a compose container)
+    fails fast with runtime-specific guidance, without shelling out at all."""
+    fake = _install(monkeypatch, FakePodman(running=True))
+    monkeypatch.setattr(sr, "_podman_binary", lambda: None)
+
+    with pytest.raises(sr.SandboxUnavailable) as excinfo:
+        sr.ensure_podman_ready()
+
+    assert "no `podman` executable" in str(excinfo.value)
+    assert "native host process" in str(excinfo.value)
+    assert fake.calls == []       # never shelled out
+    assert sr._ready is False
+
+
 def test_cap_concurrency_clamps_and_warns_above_max(caplog):
     with caplog.at_level("WARNING"):
         assert sr.cap_concurrency(sr.MAX_CONTAINERS + 4) == sr.MAX_CONTAINERS
@@ -224,3 +243,43 @@ def test_real_podman_starts_and_connects():
     assert sr._machine_field("State") == "running"
     mem = sr._machine_field("Memory")
     assert mem is not None and mem >= sr._MIN_VM_MEMORY_MB
+
+
+# --------------------------------------------------------------------------- #
+# verdict plumbing — a failing step must say WHY
+# --------------------------------------------------------------------------- #
+def _scicode():
+    import scicode_generator  # noqa: PLC0415 — same sys.path shim as sandbox_runtime
+
+    return scicode_generator
+
+
+def test_build_script_records_the_exception_type():
+    """Without this the verdict is a bare 'FAIL' and a wrong answer from the
+    model is indistinguishable from a broken harness (bad test_data.h5 key,
+    ImportError) — both score 0 with the same opaque message."""
+    g = _scicode()
+    gen = g.SciCodeGenerator.__new__(g.SciCodeGenerator)
+    src = g.SciCodeGenerator._build_script(
+        gen, "import numpy as np", "", "10.1", ["assert target is not None"],
+        h5_path="/data/test_data.h5", verdict_path="/sandbox/v",
+    )
+    assert "except BaseException as _e:" in src
+    assert "format_exception_only" in src
+    assert "'FAIL\\n' + _err" in src
+
+
+def test_verdict_parser_surfaces_the_detail():
+    g = _scicode()
+    assert g.SciCodeGenerator._verdict_to_result("PASS") == (True, "")
+    assert g.SciCodeGenerator._verdict_to_result("FAIL\nAssertionError") == (
+        False, "AssertionError",
+    )
+    assert g.SciCodeGenerator._verdict_to_result("FAIL\nKeyError: 'nope'") == (
+        False, "KeyError: 'nope'",
+    )
+    # A detail-less FAIL still degrades to the generic message.
+    assert g.SciCodeGenerator._verdict_to_result("FAIL")[1] == (
+        "assertion failed or runtime error"
+    )
+    assert g.SciCodeGenerator._verdict_to_result("TIMEOUT")[1] == "timed out (no verdict)"

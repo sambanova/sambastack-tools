@@ -70,10 +70,16 @@ function markFrontier(points: Point[]): void {
 // so one gridline step always means "twice the cost". Anchored to a power of
 // ten so the values stay round (…, 0.04, 0.08, 0.16, 0.32, …).
 function doublingTicks(min: number, max: number): number[] {
+  if (!(min > 0) || !(max > 0) || !Number.isFinite(min) || !Number.isFinite(max)) {
+    return [];
+  }
   let v = Math.pow(10, Math.floor(Math.log10(min)));
   while (v > min) v /= 2;
   const ticks: number[] = [];
-  for (; v <= max * 1.6; v *= 2) {
+  // A cap, not a real limit: min/max are floored to stay well-behaved before
+  // this is called, but this backstops any future zero/degenerate input from
+  // looping until the array allocation itself throws.
+  for (; v <= max * 1.6 && ticks.length < 200; v *= 2) {
     if (v >= min / 1.6) ticks.push(parseFloat(v.toPrecision(3)));
   }
   return ticks;
@@ -162,8 +168,13 @@ export function ModelTradeoffChart({
   const costs = points.map((p) => p.costCents);
   const minCost = Math.min(...costs);
   const maxCost = Math.max(...costs);
-  const costDomain: [number, number] = [minCost / 1.6, maxCost * 1.6];
-  const costTicks = doublingTicks(minCost, maxCost);
+  // A $0 cost (e.g. a model whose configured price is {input: 0, output: 0})
+  // can't sit on a log scale — floor it to a small fraction of the largest
+  // cost so the axis domain and doubling ticks stay well-defined.
+  const maxCostSafe = maxCost > 0 ? maxCost : 1;
+  const minCostSafe = minCost > 0 ? minCost : maxCostSafe / 1024;
+  const costDomain: [number, number] = [minCostSafe / 1.6, maxCostSafe * 1.6];
+  const costTicks = doublingTicks(minCostSafe, maxCostSafe);
 
   const scores = points.map((p) => p.score);
   const yDomain: [number, number] = fullScale

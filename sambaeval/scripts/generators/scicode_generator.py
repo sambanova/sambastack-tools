@@ -31,10 +31,18 @@ llm-sandbox library) — one fresh container per sub-step execution, torn down
 immediately after (the "Option B" model). With the executor's worker pool this
 naturally bounds concurrent containers to the pool size. There is no Docker
 dependency: containers run on Podman, and mounts are passed as plain OCI dicts.
-The backend is selectable with the SCICODE_SANDBOX env var:
+The backend is selectable with the SANDBOX_BACKEND env var (the same name the
+deployment config uses — see backend/sambaeval/config.py and deploy/CONTRACT.md):
 
     podman      (default) — ephemeral Podman container per execution
     subprocess  — UNSANDBOXED local subprocess (dev/CI only; see below)
+    k8s_job     — declared in the deploy contract, NOT implemented here
+
+SCICODE_SANDBOX is still honoured as a SciCode-specific override that wins over
+SANDBOX_BACKEND, so an operator can point one generator at a different backend.
+Whether code execution is permitted at all is a deployment decision, enforced
+once at run-enqueue from SANDBOX_ENABLED (see backend/sambaeval/api/main.py);
+invoking this script directly is an explicit developer opt-in and bypasses it.
 
 Regardless of backend, two extra guards apply as defense-in-depth (NOT a
 boundary): generated code is statically screened (AST) for disallowed imports
@@ -76,7 +84,9 @@ from sandbox_runtime import (
 # ---------------------------------------------------------------------------
 # >>> EDIT THIS <<<  Absolute path to your downloaded test_data.h5.
 # ---------------------------------------------------------------------------
-test_data_h5_path = "~/Downloads/test_data.h5"
+# SCICODE_H5_PATH overrides it without editing this file (preferred for a
+# worker process); the literal below stays the default for local checkouts.
+test_data_h5_path = os.environ.get("SCICODE_H5_PATH") or "~/Downloads/test_data.h5"
 
 
 GENERATORS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +114,14 @@ WITH_BACKGROUND = os.environ.get(
 ).strip().lower() not in ("0", "false", "no", "")
 
 # Code-execution backend: "podman" (default) | "subprocess".
-SANDBOX_BACKEND = os.environ.get("SCICODE_SANDBOX", "podman").lower()
+# SANDBOX_BACKEND is the canonical, deployment-wide name (config.py, helm values,
+# deploy/CONTRACT.md); SCICODE_SANDBOX is the narrower per-generator override and
+# therefore takes precedence when both are set.
+SANDBOX_BACKEND = (
+    os.environ.get("SCICODE_SANDBOX")
+    or os.environ.get("SANDBOX_BACKEND")
+    or "podman"
+).strip().lower()
 # Prebuilt sandbox image (see scripts/generators/scicode_sandbox.Dockerfile).
 SANDBOX_IMAGE = os.environ.get("SCICODE_SANDBOX_IMAGE", "scicode-sandbox")
 # Per-container memory cap. Kept small on purpose: the shared Podman VM is
@@ -115,11 +132,41 @@ SANDBOX_MEM_LIMIT = os.environ.get("SCICODE_SANDBOX_MEM", f"{PER_CONTAINER_MB}m"
 H5_CONTAINER_PATH = "/data/test_data.h5"
 
 
-def _resolved_h5_path() -> str:
-    """Absolute host path to test_data.h5, expanding '~' and env vars."""
+# Name of the reference data in the object store (prodplan §7a). When the file
+# isn't already on disk, prepare_sandbox fetches it from there and records the
+# cached path here so the mount below uses it.
+H5_FIXTURE_NAME = os.environ.get("SCICODE_H5_FIXTURE", "scicode/test_data.h5")
+_h5_resolved: str = ""
+
+
+def _configured_h5_path() -> str:
+    """Absolute host path from the explicit setting, expanding '~' and env vars."""
     return os.path.abspath(
         os.path.expandvars(os.path.expanduser(test_data_h5_path))
     )
+
+
+def _resolved_h5_path() -> str:
+    """Absolute host path to test_data.h5 — the explicit setting if it points at
+    a real file, otherwise whatever prepare_sandbox fetched from the object
+    store (empty until then)."""
+    return _h5_resolved or _configured_h5_path()
+
+
+def _fetch_h5_from_object_store():
+    """Materialise the reference data from the object store, or return None.
+
+    Optional by design: generator scripts are standalone and must not *require*
+    the sambaeval package (they can be run straight from a checkout). Inside the
+    worker the import succeeds and this is how the fixture reaches a pod that
+    was never hand-provisioned; outside it, callers fall back to the explicit
+    path setting.
+    """
+    try:
+        from sambaeval import fixtures  # noqa: PLC0415 — optional dependency
+    except ImportError:
+        return None
+    return fixtures.ensure_fixture(H5_FIXTURE_NAME)
 
 # Resource limits applied to each test subprocess (POSIX only).
 CPU_SECONDS = 120          # RLIMIT_CPU  (CPU time, not wall clock)
@@ -304,18 +351,47 @@ class SciCodeGenerator(OutputGenerator):
     def prepare_sandbox(cls, concurrency: int) -> int:
         """Backend preflight, run once before any task dispatches.
 
-        Ensures the code-execution sandbox is ready (auto-starting and
-        right-sizing the shared Podman VM) and returns the concurrency this
-        generator actually supports — clamped to the Podman container cap, so a
-        run configured for more parallelism is warned and throttled rather than
-        oversubscribing the VM.
+        Checks the two prerequisites every task shares — the reference data
+        (test_data.h5) and a ready sandbox (auto-starting and right-sizing the
+        shared Podman VM) — and returns the concurrency this generator actually
+        supports, clamped to the Podman container cap so a run configured for
+        more parallelism is warned and throttled rather than oversubscribing
+        the VM.
 
-        Raises ``SandboxUnavailable`` when the sandbox can't be prepared; the
-        executor turns that into a run-level abort. No-op for the subprocess
-        backend (no VM, no fixed container cap).
+        Raises ``SandboxUnavailable`` when a prerequisite is missing; the
+        executor turns that into a run-level abort with the reason attached, so
+        the failure is visible instead of every task scoring a silent 0. The
+        subprocess backend skips only the VM parts (no VM, no container cap).
         """
+        # Every task needs the reference outputs; without them each one returns
+        # a FAIL string and the run "succeeds" with a straight 0. Resolve once,
+        # here, so a missing fixture aborts the run with a reason the UI shows.
+        global _h5_resolved
+        if not os.path.isfile(_resolved_h5_path()):
+            try:
+                fetched = _fetch_h5_from_object_store()
+            except Exception as err:  # noqa: BLE001 — surface as a run abort
+                raise SandboxUnavailable(
+                    f"SciCode reference data could not be fetched: {err}"
+                ) from err
+            if not fetched or not os.path.isfile(fetched):
+                raise SandboxUnavailable(
+                    f"SciCode reference data not found at "
+                    f"{_configured_h5_path()!r} and not available from the "
+                    "object store. Publish it once with `sambaeval-seed "
+                    f"push-fixture <file> --name {H5_FIXTURE_NAME}`, or point "
+                    "SCICODE_H5_PATH at a local copy (see the SciCode section "
+                    "of the README)."
+                )
+            _h5_resolved = fetched
+        if SANDBOX_BACKEND == "subprocess":
+            return concurrency  # no VM, no fixed container cap
         if SANDBOX_BACKEND != "podman":
-            return concurrency
+            raise SandboxUnavailable(
+                f"unsupported sandbox backend {SANDBOX_BACKEND!r} — use 'podman' "
+                "or 'subprocess'. ('k8s_job' is declared in deploy/CONTRACT.md "
+                "but is not implemented.)"
+            )
         ensure_podman_ready()  # raises SandboxUnavailable -> run aborts
         return cap_concurrency(concurrency)
 
@@ -426,12 +502,22 @@ class SciCodeGenerator(OutputGenerator):
             dependencies,
             "",
             "_ok = False",
+            "_err = ''",
             "try:",
             *(f"    {line}" for line in guarded),
-            "except BaseException:",
+            # Record WHICH failure this was. Without it every outcome collapses
+            # to "assertion failed or runtime error", so a wrong answer from the
+            # model (AssertionError) is indistinguishable from a broken harness
+            # (KeyError from a missing test_data.h5 key, ImportError, ...) — and
+            # both score 0. The verdict parser already understands this form.
+            "except BaseException as _e:",
             "    _ok = False",
+            "    import traceback as _tb",
+            "    _err = ''.join("
+            "_tb.format_exception_only(type(_e), _e)).strip()[:500]",
             "finally:",
-            f"    open({verdict_path!r}, 'w').write('PASS' if _ok else 'FAIL')",
+            f"    open({verdict_path!r}, 'w').write("
+            "'PASS' if _ok else 'FAIL\\n' + _err)",
             "",
         ]
         return "\n".join(lines)
@@ -470,8 +556,8 @@ class SciCodeGenerator(OutputGenerator):
                 dependencies, cumulative_code, step_number, test_cases
             )
         return False, (
-            f"unknown SCICODE_SANDBOX backend {SANDBOX_BACKEND!r} "
-            "(use 'podman' or 'subprocess')"
+            f"unknown sandbox backend {SANDBOX_BACKEND!r} "
+            "(set SANDBOX_BACKEND to 'podman' or 'subprocess')"
         )
 
     @staticmethod
@@ -502,7 +588,7 @@ class SciCodeGenerator(OutputGenerator):
             return False, (
                 f"podman backend needs llm-sandbox: {e}. "
                 "Install it (pip install 'llm-sandbox[podman]') or set "
-                "SCICODE_SANDBOX=subprocess."
+                "SANDBOX_BACKEND=subprocess."
             )
 
         # Make sure the shared Podman VM is up. The backend preflight normally
@@ -673,9 +759,9 @@ class SciCodeGenerator(OutputGenerator):
         if not os.path.isfile(_resolved_h5_path()):
             return (
                 "FAIL\ntest_data.h5 not found at "
-                f"{_resolved_h5_path()!r}. Download it and set "
-                "test_data_h5_path in scicode_generator.py (see the SciCode "
-                "section of the README)."
+                f"{_resolved_h5_path()!r}. Download it and set SCICODE_H5_PATH "
+                "(or test_data_h5_path in scicode_generator.py) — see the "
+                "SciCode section of the README."
             )
 
         ctx = self._problem_context()
@@ -819,8 +905,8 @@ class SciCodeDebugger(SciCodeGenerator):
         # ...tweak code[i] by hand, then re-test without regenerating:
         print(dbg.format_report(dbg.diagnose(code, step_numbers=["12.1"])))
 
-    Execution respects the SCICODE_SANDBOX backend like the base class; for
-    quick local debugging `SCICODE_SANDBOX=subprocess` is usually fastest.
+    Execution respects the SANDBOX_BACKEND setting like the base class; for
+    quick local debugging `SANDBOX_BACKEND=subprocess` is usually fastest.
     """
 
     @classmethod

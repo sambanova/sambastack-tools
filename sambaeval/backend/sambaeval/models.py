@@ -176,3 +176,7 @@ class RunMeta(BaseModel):
     # not the full experiment — so resuming/retrying must rebuild from those rows
     # and must not re-expand to the models the run deliberately left out.
     partial: bool = False
+    # Why a run aborted, when it failed as a whole rather than per task (e.g.
+    # the code-execution sandbox could not be prepared, so no task ever ran).
+    # Surfaced in the UI next to the status; per-task failures live in errors.json.
+    error: Optional[str] = None

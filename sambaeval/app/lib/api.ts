@@ -9,3 +9,12 @@ export const API_BASE =
 export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
+
+// Fetch a backend `/api/...` path with cookies attached. The app now requires
+// an authenticated session (a backend-issued cookie), and because the UI and
+// API run cross-origin, every request must opt in to sending cookies with
+// `credentials: "include"`. Use this in place of `fetch(apiUrl(...))` for every
+// API call so the session travels with it.
+export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(apiUrl(path), { ...init, credentials: "include" });
+}

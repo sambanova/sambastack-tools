@@ -18,22 +18,152 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .. import paths, run_registry, storage
+from .. import context, paths, run_registry, storage
+from ..config import settings
+
+try:  # DB backend helpers (queue/control) — only importable when deps present.
+    from .. import storage_db
+except Exception:  # pragma: no cover
+    storage_db = None  # type: ignore
 from ..datasets import load_dataset
 from ..executor import ExecutorProgress, run_experiment
 from ..models import Experiment, LlmJudgeScorerDef, Provider
 from ..run_registry import RunControl
+from . import admin as admin_routes
+from . import auth as auth_routes
 
 app = FastAPI(title="SambaEval API")
 
-# The frontend runs on a different origin (e.g. http://localhost:3001), so
-# allow cross-origin requests.
+# CORS: with cookie-based sessions we cannot use "*" — pin to the frontend
+# origin(s) and allow credentials so the session cookie is sent cross-origin.
+_ALLOWED_ORIGINS = list(
+    {
+        settings.frontend_origin,
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    }
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_routes.router)
+app.include_router(admin_routes.router)
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    if settings.use_db:
+        try:
+            from ..bootstrap import bootstrap
+
+            bootstrap()
+        except Exception as err:  # noqa: BLE001 — don't crash serving on seed hiccup
+            print(f"[api] bootstrap warning: {err}")
+        # Native dev convenience: run the worker in-process when asked (compose
+        # runs a separate worker service instead).
+        import os
+
+        if os.environ.get("SAMBAEVAL_INPROC_WORKER", "").lower() in ("1", "true", "yes"):
+            from ..worker import start_in_process_worker
+
+            start_in_process_worker()
+            print("[api] in-process worker started")
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    """Attach the current user and set the owner scope for the request.
+
+    Data reads in the request thread resolve against ``active_owner`` so
+    visibility scoping works. Protected /api routes require a user.
+    """
+    path = request.url.path
+    token = None
+    if settings.use_db and path.startswith("/api"):
+        user = auth_routes.resolve_user(request)
+        request.state.user = user
+        if user is not None:
+            token = context.set_active_owner(user.id)
+        elif path not in auth_routes.PUBLIC_PATHS and not path.startswith("/api/auth"):
+            return JSONResponse({"error": "unauthenticated"}, status_code=401)
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            context._active_owner.reset(token)
+
+
+def _current_user(request: Request):
+    return getattr(request.state, "user", None)
+
+
+@app.get("/api/health")
+def health() -> dict:
+    return {"ok": True}
+
+
+@app.get("/api/generators")
+def list_generators(request: Request) -> dict:
+    """Enabled generator catalog for the picker (read-only for regular users)."""
+    if not settings.use_db:
+        return {"generators": []}
+    from sqlalchemy import select as _select
+
+    from ..db import session_scope
+    from ..models_db import Generator
+
+    with session_scope() as session:
+        rows = session.execute(
+            _select(Generator).where(Generator.enabled == True)  # noqa: E712
+        ).scalars().all()
+        return {
+            "generators": [
+                {
+                    "key": g.key,
+                    "display_name": g.display_name,
+                    "description": g.description,
+                    "requires_sandbox": g.requires_sandbox,
+                }
+                for g in rows
+            ]
+        }
+
+
+def _sandbox_block_reason(experiment: Experiment) -> Optional[str]:
+    """Why this experiment may not run here, if code execution is disabled.
+
+    ``SANDBOX_ENABLED`` is a deployment capability switch (see config.py and
+    deploy/CONTRACT.md); the generator catalog already records which generators
+    execute model-written code (``requires_sandbox``). Enforcing the two against
+    each other here — once, at enqueue — refuses the run up front with a clear
+    reason instead of letting it abort deep inside a worker.
+    """
+    if settings.sandbox_enabled or not settings.use_db:
+        return None
+    script_path = (experiment.output_generator or "").strip()
+    if not script_path:
+        return None
+    from sqlalchemy import select as _select
+
+    from ..db import session_scope
+    from ..models_db import Generator
+
+    with session_scope() as session:
+        g = session.execute(
+            _select(Generator).where(Generator.script_path == script_path)
+        ).scalars().first()
+        if g is None or not g.requires_sandbox:
+            return None
+        name = g.display_name or g.key
+    return (
+        f"'{name}' executes model-generated code, but code execution is "
+        "disabled in this deployment (SANDBOX_ENABLED=0)."
+    )
 
 
 def _exp_json(e: Experiment) -> dict:
@@ -62,7 +192,23 @@ def _build_experiment(body: dict, exp_id: str, *, with_example_count: bool) -> E
 # Experiments
 # --------------------------------------------------------------------------- #
 @app.get("/api/experiments")
-def list_experiments() -> dict:
+def list_experiments(request: Request) -> dict:
+    # Scope filter (db mode): mine | public | shared | all (default all-visible).
+    # Each experiment JSON is annotated with `visibility` and `owner`
+    # ("me"|"other"|"system") so the UI can render My/Public/Shared tabs +
+    # sharing controls.
+    if settings.use_db and storage_db is not None:
+        scope = request.query_params.get("scope") or "all"
+        out = []
+        for item in storage_db.list_experiments_scoped(scope):
+            ej = _exp_json(item["experiment"])
+            ej["visibility"] = item["visibility"]
+            ej["owner"] = item["owner"]
+            ej["is_owner"] = item["is_owner"]
+            if item["is_owner"] or (_current_user(request) and _current_user(request).is_admin):
+                ej["share_token"] = item["share_token"]
+            out.append(ej)
+        return {"experiments": out}
     return {"experiments": [_exp_json(e) for e in storage.list_experiments()]}
 
 
@@ -76,11 +222,51 @@ async def create_experiment(request: Request) -> dict:
 
 
 @app.get("/api/experiments/{exp_id}")
-def get_experiment(exp_id: str):
+def get_experiment(exp_id: str, request: Request):
     experiment = storage.get_experiment(exp_id)
+    if experiment is None and settings.use_db and storage_db is not None:
+        # Allow view via a valid share link (link-shared experiments).
+        token = request.query_params.get("token")
+        if token:
+            experiment = storage_db.get_experiment_by_share_token(token)
     if experiment is None:
         return JSONResponse({"error": "Not found"}, status_code=404)
     return {"experiment": _exp_json(experiment)}
+
+
+@app.post("/api/experiments/{exp_id}/visibility")
+async def set_experiment_visibility(exp_id: str, request: Request):
+    if not (settings.use_db and storage_db is not None):
+        return JSONResponse({"error": "not supported"}, status_code=400)
+    user = _current_user(request)
+    owner_id = storage_db.experiment_owner_id(exp_id)
+    if owner_id is None:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if not (user and (user.is_admin or user.id == owner_id)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    body = await request.json()
+    try:
+        result = storage_db.set_experiment_visibility(exp_id, body.get("visibility") or "")
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if result == "not_found":
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/api/experiments/{exp_id}/share")
+def share_experiment(exp_id: str, request: Request):
+    if not (settings.use_db and storage_db is not None):
+        return JSONResponse({"error": "not supported"}, status_code=400)
+    user = _current_user(request)
+    owner_id = storage_db.experiment_owner_id(exp_id)
+    if owner_id is None:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if not (user and (user.is_admin or user.id == owner_id)):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    token = storage_db.ensure_experiment_share_token(exp_id)
+    url = f"{settings.frontend_origin}/experiments/{exp_id}?token={token}"
+    return {"share_token": token, "url": url}
 
 
 @app.put("/api/experiments/{exp_id}")
@@ -154,6 +340,8 @@ async def run(exp_id: str, request: Request):
             )
         selected_models = chosen
 
+    update_snapshot = True  # for the DB enqueue path (retry-default keeps snapshot)
+
     if mode == "merged":
         # Generate the current experiment's results into an existing target run.
         # The two must share a dataset; the target must exist and be idle.
@@ -164,7 +352,7 @@ async def run(exp_id: str, request: Request):
         meta = storage.read_run_meta(exp_id, run_id)
         if meta is None:
             return JSONResponse({"error": "run_not_found"}, status_code=404)
-        if run_registry.is_run_active(exp_id, run_id):
+        if _is_active(exp_id, run_id):
             return JSONResponse({"error": "run_is_active"}, status_code=409)
         if storage.run_dataset_key(exp_id, run_id) != storage.dataset_key(
             experiment.dataset
@@ -173,6 +361,18 @@ async def run(exp_id: str, request: Request):
                 {"error": "Target run uses a different dataset."}, status_code=400
             )
 
+    if mode == "resume":
+        if not run_id:
+            target = storage.find_resumable_run(exp_id)
+            if target is None:
+                return JSONResponse({"error": "no_resumable_run"}, status_code=404)
+            run_id = target.run_id
+        meta = storage.read_run_meta(exp_id, run_id)
+        if meta is None:
+            return JSONResponse({"error": "run_not_found"}, status_code=404)
+        if _is_active(exp_id, run_id):
+            return JSONResponse({"error": "run_is_active"}, status_code=409)
+
     if mode == "retry":
         # Retrying re-runs only the failed rows of a past run, carrying over the
         # rows that already succeeded. By default it reproduces the original
@@ -180,6 +380,7 @@ async def run(exp_id: str, request: Request):
         # `config=live` instead applies the experiment's *current* settings
         # (e.g. an edited model param) to those failed rows.
         use_live_config = qp.get("config") == "live"
+        update_snapshot = use_live_config
         if not run_id:
             target = storage.find_retryable_run(exp_id)
             if target is None:
@@ -190,7 +391,7 @@ async def run(exp_id: str, request: Request):
         meta = storage.read_run_meta(exp_id, run_id)
         if meta is None:
             return JSONResponse({"error": "run_not_found"}, status_code=404)
-        if run_registry.is_run_active(exp_id, run_id):
+        if _is_active(exp_id, run_id):
             return JSONResponse({"error": "run_is_active"}, status_code=409)
         if not use_live_config:
             snapshot = storage.read_run_experiment_snapshot(exp_id, run_id)
@@ -206,6 +407,85 @@ async def run(exp_id: str, request: Request):
             )
         mode = "new"
 
+    blocked = _sandbox_block_reason(experiment)
+    if blocked is not None:
+        # 403, not 409: this is a policy refusal, not a conflict with existing
+        # state. 409 on this endpoint already means "a resumable run exists",
+        # which the UI reacts to by offering to resume.
+        return JSONResponse({"error": blocked}, status_code=403)
+
+    run_params = {
+        "concurrency": concurrency,
+        "merge_conflict": merge_conflict,
+        "selected_models": selected_models,
+    }
+
+    # ---- DB backend: enqueue + SSE-poll (decoupled worker executes) ---------
+    if settings.use_db:
+        user = _current_user(request)
+        owner_id = user.id if user is not None else context.active_owner()
+        # Concurrency quota (queued + running) per user.
+        active = storage_db.count_active_runs_for_owner(owner_id)
+        if active >= settings.max_concurrent_runs_per_user:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"max {settings.max_concurrent_runs_per_user} concurrent runs "
+                        "reached; wait for one to finish."
+                    )
+                },
+                status_code=429,
+            )
+        target_run_id = run_id if mode in ("resume", "retry", "merged") else None
+        try:
+            label = storage_db.enqueue_run(
+                experiment,
+                mode=mode,
+                params=run_params,
+                owner_id=owner_id,
+                target_run_id=target_run_id,
+                update_snapshot=update_snapshot,
+            )
+        except FileNotFoundError:
+            return JSONResponse({"error": "run_not_found"}, status_code=404)
+
+        async def db_stream():
+            while True:
+                if await request.is_disconnected():
+                    break
+                m = storage.read_run_meta(exp_id, label)
+                if m is None:
+                    await asyncio.sleep(0.5)
+                    continue
+                st = storage_db.run_status(exp_id, label)
+                yield "event: progress\ndata: " + json.dumps(
+                    {
+                        "total": m.total,
+                        "completed": m.completed,
+                        "errors": m.errors,
+                        "status": st,
+                        "runId": label,
+                    }
+                ) + "\n\n"
+                if st in ("completed", "aborted", "interrupted", "paused"):
+                    rows = storage.read_run_results(exp_id, label) or []
+                    yield "event: done\ndata: " + json.dumps(
+                        {
+                            "runId": label,
+                            "meta": m.model_dump(),
+                            "results": [r.model_dump() for r in rows],
+                        }
+                    ) + "\n\n"
+                    break
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            db_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive"},
+        )
+
+    # ---- Files backend (legacy): in-thread execution + SSE ------------------
     control = RunControl()
     q: "queue.Queue" = queue.Queue()
 
@@ -221,7 +501,7 @@ async def run(exp_id: str, request: Request):
             },
         ))
 
-    def worker() -> None:
+    def legacy_worker() -> None:
         try:
             result = run_experiment(
                 experiment,
@@ -246,16 +526,12 @@ async def run(exp_id: str, request: Request):
         finally:
             q.put(_SENTINEL)
 
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=legacy_worker, daemon=True).start()
 
     async def event_stream():
         loop = asyncio.get_event_loop()
         while True:
             if await request.is_disconnected():
-                # The client went away (tab closed / page refreshed). Stop
-                # streaming, but DO NOT stop the run — let it keep executing
-                # server-side so a reloaded page can reconnect to it (by polling
-                # the runs list). Only an explicit Cancel/Terminate stops a run.
                 break
             item = await loop.run_in_executor(None, _q_get, q)
             if item is _EMPTY:
@@ -280,11 +556,30 @@ def _resolve_active_run_id(exp_id: str, request: Request) -> Optional[str]:
     return active.run_id if active is not None else None
 
 
+def _is_active(exp_id: str, run_id: str) -> bool:
+    """Whether a run is queued or executing — DB-aware (cross-process) in db
+    mode, in-process registry otherwise."""
+    if settings.use_db and storage_db is not None:
+        return storage_db.run_status(exp_id, run_id) in ("queued", "running")
+    return run_registry.is_run_active(exp_id, run_id)
+
+
 @app.post("/api/experiments/{exp_id}/run/cancel")
 def cancel(exp_id: str, request: Request):
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
+    if settings.use_db:
+        # DB-backed control: the worker's poller applies this (cross-process).
+        st = storage_db.run_status(exp_id, run_id)
+        if st == "queued":
+            # Not yet claimed by a worker — finalize directly.
+            storage.complete_run(exp_id, run_id, "aborted")
+            return {"cancelled": True, "runId": run_id}
+        if st == "running":
+            storage_db.set_run_control(exp_id, run_id, "terminate")
+            return {"cancelled": True, "runId": run_id}
+        return {"cancelled": False, "runId": run_id}
     cancelled = run_registry.cancel_run(exp_id, run_id)
     if not cancelled:
         # Not in the in-process registry: the run lost its worker (server
@@ -304,6 +599,9 @@ def pause(exp_id: str, request: Request):
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
+    if settings.use_db:
+        paused = storage_db.set_run_control(exp_id, run_id, "pause")
+        return {"paused": paused, "runId": run_id}
     paused = run_registry.pause_run(exp_id, run_id)
     return {"paused": paused, "runId": run_id}
 
@@ -315,6 +613,9 @@ def terminate(exp_id: str, request: Request):
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
+    if settings.use_db:
+        terminated = storage_db.set_run_control(exp_id, run_id, "terminate")
+        return {"terminated": terminated, "runId": run_id}
     terminated = run_registry.cancel_run(exp_id, run_id)
     return {"terminated": terminated, "runId": run_id}
 

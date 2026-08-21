@@ -133,10 +133,19 @@ def load_dataset(dataset: str | list[Any]) -> list[DatasetRow]:
     """Resolve an experiment's ``dataset`` field into normalized rows."""
     if isinstance(dataset, list):
         return [row_from_obj(item) for item in dataset]
-    # Resolve from whichever tree holds it (public or private); fall back to the
-    # public path so a missing file still raises FileNotFoundError as before.
-    path = find_dataset_file(dataset) or dataset_file_path(dataset)
-    raw = path.read_text(encoding="utf-8")
+    from .config import settings
+
+    if settings.use_db:
+        # Resolve the named dataset from the object store (scoped to the active
+        # owner + public), via the storage layer.
+        from . import storage
+
+        raw = storage.read_dataset(dataset)
+    else:
+        # Resolve from whichever tree holds it (public or private); fall back to
+        # the public path so a missing file still raises FileNotFoundError.
+        path = find_dataset_file(dataset) or dataset_file_path(dataset)
+        raw = path.read_text(encoding="utf-8")
     if dataset.lower().endswith(".jsonl"):
         return parse_jsonl(raw)
     return parse_csv(raw)

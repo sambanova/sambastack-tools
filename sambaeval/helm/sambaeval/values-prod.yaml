@@ -1,0 +1,76 @@
+# SambaEval — PROD overlay (the single environment).
+# On-prem SambaNova RKE2 vcluster tenant `cloud-agents-dev-1` (prodplan §6b):
+# in-cluster postgres + minio, shared nginx-ingress + supplied TLS secret,
+# images pulled from Artifact Registry via regcred.
+#
+# Deploy:
+#   helm upgrade --install sambaeval helm/sambaeval \
+#     --values helm/sambaeval/values.yaml \
+#     --values helm/sambaeval/values-prod.yaml \
+#     --set image.tag=$(git rev-parse --short HEAD)
+
+image:
+  # Always re-pull the mutable tag on rollout (short-SHA tags are immutable but
+  # `latest`/re-tags are not); flip to IfNotPresent if you only deploy by SHA.
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: regcred
+
+env:
+  SAMBAEVAL_ENV: prod
+  AUTH_BACKEND: google
+  ALLOWED_DOMAINS: sambanovasystems.com,sambanova.ai
+  # Fill from the OAuth client (secret half lives in the K8s Secret).
+  GOOGLE_CLIENT_ID: ""
+  OAUTH_REDIRECT_URL: https://sambaeval.cloud.snova.ai/api/auth/callback
+  FRONTEND_ORIGIN: https://sambaeval.cloud.snova.ai
+  S3_ENDPOINT_URL: http://sambaeval-minio:9000
+  S3_BUCKET: sambaeval
+  SANDBOX_ENABLED: "0"
+
+ingress:
+  enabled: true
+  className: nginx
+  host: sambaeval.cloud.snova.ai
+  tlsSecretName: cloud-snova-ai-tls
+
+frontend:
+  # Same-origin /api behind the ingress.
+  apiBaseUrl: ""
+
+sandbox:
+  enabled: false
+
+# OFF on this tenant. The base chart's selector targets an `ingress-nginx`
+# namespace, which does not exist here: the nginx IngressClass comes from the
+# `rke2-ingress-nginx` release in kube-system and, being a vcluster, the
+# controller itself sits outside this pod network. The selector would therefore
+# match nothing and the policy would deny all ingress to api/frontend. The
+# aiskagents app already running in this namespace likewise carries no
+# app-level NetworkPolicy (only the bitnami subchart ones for its datastores).
+# Revisit with a verified selector rather than re-enabling blind.
+networkPolicy:
+  enabled: false
+
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+
+# In-cluster stateful deps. NOTE (prodplan §6b): the host StorageClass
+# (openebs-hostpath) defaults reclaim=Delete and PVs are node-bound on the
+# single-node tenant — the nightly pg_dump backup is essential. Set an explicit
+# storageClass here if the tenant's default differs.
+postgresql:
+  enabled: true
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+
+minio:
+  enabled: true
+  mode: standalone
+  persistence:
+    enabled: true
+    size: 20Gi

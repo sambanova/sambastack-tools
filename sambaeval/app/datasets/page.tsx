@@ -1,5 +1,5 @@
 "use client";
-import { apiUrl } from "@/app/lib/api";
+import { apiFetch, apiUrl } from "@/app/lib/api";
 
 import { useEffect, useRef, useState } from "react";
 import InfoTooltip from "@/app/components/InfoTooltip";
@@ -70,7 +70,7 @@ export default function DatasetsPage() {
 
   const refresh = async () => {
     setLoading(true);
-    const res = await fetch(apiUrl("/api/datasets"));
+    const res = await apiFetch("/api/datasets");
     const data = await res.json();
     setDatasets(data.datasets ?? []);
     setLoading(false);
@@ -78,7 +78,7 @@ export default function DatasetsPage() {
 
   useEffect(() => {
     (async () => {
-      const res = await fetch(apiUrl("/api/datasets"));
+      const res = await apiFetch("/api/datasets");
       const data = await res.json();
       setDatasets(data.datasets ?? []);
       setLoading(false);
@@ -143,7 +143,7 @@ export default function DatasetsPage() {
     });
     const content = lines.join("\n") + "\n";
     setSaving(true);
-    await fetch(apiUrl("/api/datasets"), {
+    await apiFetch("/api/datasets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: finalName, content, private: isPrivate }),
@@ -162,7 +162,7 @@ export default function DatasetsPage() {
     }
     setSaving(true);
     const text = await file.text();
-    await fetch(apiUrl("/api/datasets"), {
+    await apiFetch("/api/datasets", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: file.name, content: text, private: isPrivate }),
@@ -175,8 +175,13 @@ export default function DatasetsPage() {
   };
 
   const remove = async (n: string) => {
-    if (!confirm(`Delete dataset ${n}?`)) return;
-    await fetch(apiUrl(`/api/datasets?name=${encodeURIComponent(n)}`), {
+    if (
+      !confirm(
+        `Are you sure you want to delete the dataset "${n}"? This action cannot be undone.`,
+      )
+    )
+      return;
+    await apiFetch(`/api/datasets?name=${encodeURIComponent(n)}`, {
       method: "DELETE",
     });
     refresh();

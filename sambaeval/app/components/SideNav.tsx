@@ -1,5 +1,5 @@
 "use client";
-import { apiUrl } from "@/app/lib/api";
+import { apiFetch } from "@/app/lib/api";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -42,7 +42,7 @@ export default function SideNav() {
   useEffect(() => {
     const fetchAppVersion = async () => {
       try {
-        const response = await fetch(apiUrl("/api/app-version"));
+        const response = await apiFetch("/api/app-version");
         const data = await response.json();
         if (data.success) {
           setAppVersion(data.version);

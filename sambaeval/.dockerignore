@@ -1,0 +1,32 @@
+# Applies to BOTH image builds (context is the product root for each).
+# Keep backend source, scripts/, app/, package.json and VERSION; drop the heavy
+# and environment-specific stuff.
+
+# node / next
+node_modules
+.next
+npm-debug.log*
+
+# python virtualenvs & caches
+.venv
+backend/.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+backend/.pytest_cache
+
+# vcs / editor / os
+.git
+.gitignore
+.DS_Store
+**/.DS_Store
+
+# docs & local-only material
+private
+scripts/private
+images
+deploy/local/.env
+
+# large / regenerable data — keep only the pricing defaults the app reads
+data/*
+!data/pricing_defaults.json

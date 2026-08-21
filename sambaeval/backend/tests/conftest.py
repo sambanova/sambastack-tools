@@ -7,6 +7,13 @@ provider is ever contacted and no API key is needed.
 
 from __future__ import annotations
 
+import os
+
+# These tests exercise the original file-backed storage against a temp
+# SAMBAEVAL_DATA_DIR. Pin the storage backend to "files" BEFORE importing
+# sambaeval so the DB dispatch in storage.py stays inactive (no Postgres needed).
+os.environ.setdefault("SAMBAEVAL_STORAGE_BACKEND", "files")
+
 import threading
 import time
 from pathlib import Path

@@ -1,0 +1,117 @@
+# SambaEval — FULL local stack (Mode A): postgres + minio + api + worker + frontend.
+# Distinct project name so it does NOT collide with the infra-only
+# `sambaeval-local` stack (docker-compose.infra.yml).
+#
+#   cp deploy/local/.env.example deploy/local/.env
+#   docker compose -f deploy/local/docker-compose.yml up -d --build
+#   open http://localhost:3001
+#
+# Port map mirrors docker-compose.infra.yml: postgres 5433->5432, minio
+# 9100->9000 (S3) / 9101->9001 (console), api 8000, frontend 3001.
+name: sambaeval-app
+
+services:
+  postgres:
+    image: postgres:16
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sambaeval}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sambaeval}
+      POSTGRES_DB: ${POSTGRES_DB:-sambaeval}
+    ports:
+      - "5433:5432"          # 5433 on host to avoid clashing with any local pg
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sambaeval} -d ${POSTGRES_DB:-sambaeval}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-sambaeval}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-sambaeval-secret}
+    ports:
+      - "9100:9000"          # S3 API (host 9100; 9000 taken by langfuse clickhouse)
+      - "9101:9001"          # web console
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Creates the sambaeval bucket once MinIO is healthy, then exits.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-sambaeval} ${MINIO_ROOT_PASSWORD:-sambaeval-secret} &&
+      mc mb --ignore-existing local/${S3_BUCKET:-sambaeval} &&
+      mc anonymous set none local/${S3_BUCKET:-sambaeval} &&
+      echo 'bucket ready';
+      "
+
+  # api + worker share ONE image (built here); worker reuses it via `image:`.
+  api:
+    image: sambaeval-backend:local
+    build:
+      context: ../..                 # product root (see backend/Dockerfile header)
+      dockerfile: backend/Dockerfile
+    command: ["sambaeval-server", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    environment:
+      RUN_MIGRATIONS: "1"            # api runs `alembic upgrade head` before serving
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/app-version')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  worker:
+    image: sambaeval-backend:local   # same image as api (built by the api service)
+    command: ["sambaeval-worker"]
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      api:
+        condition: service_healthy    # ensures migrations have run
+    restart: unless-stopped
+
+  frontend:
+    image: sambaeval-frontend:local
+    build:
+      context: ../..                  # product root; Dockerfile at repo root
+      dockerfile: Dockerfile
+    command: ["npm", "run", "start"]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3001:3001"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata: {}
+  miniodata: {}

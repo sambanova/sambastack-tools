@@ -1,0 +1,49 @@
+{{- if .Values.migration.enabled }}
+# Alembic migration as a Helm hook (prodplan §6 — explicit gated migration for a
+# relational system-of-record, vs samba-chat's entrypoint self-migrate).
+# NOTE: on a *fresh* install with the in-cluster postgres subchart, this
+# pre-install hook races the DB coming up and may fail until postgres is
+# reachable — re-run `helm upgrade` (or `make migrate`) once the DB is ready.
+# For a managed/external DB the hook is authoritative. On upgrades it always
+# runs before the new app pods roll.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-migrate
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "sambaeval.selectorLabels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "sambaeval.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: migrate
+          image: {{ include "sambaeval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Image WORKDIR is /app/backend (alembic.ini lives there).
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "sambaeval.configMapName" . }}
+            - secretRef:
+                name: {{ .Values.secretName }}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+{{- end }}

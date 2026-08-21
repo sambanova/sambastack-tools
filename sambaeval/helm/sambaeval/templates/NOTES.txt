@@ -1,0 +1,29 @@
+SambaEval {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  - api       ({{ include "sambaeval.fullname" . }}-api, port {{ .Values.api.port }})
+  - worker    ({{ include "sambaeval.fullname" . }}-worker)
+  - frontend  ({{ include "sambaeval.fullname" . }}-frontend, port {{ .Values.frontend.port }})
+{{- if .Values.postgresql.enabled }}
+  - postgresql subchart (in-cluster)
+{{- end }}
+{{- if .Values.minio.enabled }}
+  - minio subchart (in-cluster, bucket {{ .Values.env.S3_BUCKET }})
+{{- end }}
+
+Prereqs (imperative, not templated):
+  - Secret "{{ .Values.secretName }}"   -> make create-secrets
+{{- if .Values.imagePullSecrets }}
+  - Pull secret(s): {{ range .Values.imagePullSecrets }}{{ .name }} {{ end }} -> make create-regcred
+{{- end }}
+
+{{ if .Values.ingress.enabled -}}
+URL: https://{{ .Values.ingress.host }}   (TLS secret: {{ .Values.ingress.tlsSecretName }})
+{{- else -}}
+Ingress disabled — reach the app with a port-forward:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sambaeval.fullname" . }}-frontend {{ .Values.frontend.port }}:{{ .Values.frontend.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "sambaeval.fullname" . }}-api {{ .Values.api.port }}:{{ .Values.api.port }}
+{{- end }}
+
+Migrations: {{ if .Values.migration.enabled }}run via the pre-install/pre-upgrade Alembic hook Job.{{ else }}disabled (migration.enabled=false); run `make migrate` out-of-band.{{ end }}
+Sandbox / code-exec: {{ if .Values.sandbox.enabled }}ENABLED.{{ else }}disabled (PoV — no gVisor on the RKE2 vcluster).{{ end }}

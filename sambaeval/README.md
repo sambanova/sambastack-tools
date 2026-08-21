@@ -9,7 +9,12 @@
 
 Local LLM evaluation workbench. Configure providers, build experiments with one or more models, score them against a dataset, and explore the results — including token usage, TTFT, and tokens-per-second per row.
 
-**SambaEval is driven from the command line.** Run evals headlessly with `sambaeval run experiment.json` — or import the Python library — with no browser and no Node involved. A web UI is available for interactive editing and result browsing, but it is **entirely optional**; the CLI and UI operate on the same files under `data/`.
+SambaEval runs two ways from one evaluation engine:
+
+- **File mode (default, zero infra):** drive evals from the CLI (`sambaeval run experiment.json`) or a simple local web UI; all state is plain files under `data/` — no database, no services.
+- **Database mode (multi-user web app):** Postgres + object storage (MinIO/S3) + a decoupled worker + Google sign-in, giving each user a private-by-default space that can be shared by link or made public. Run the whole stack locally with Docker Compose, or deploy it with the Helm chart. This is the hosted/shared configuration.
+
+The backend is selected by `SAMBAEVAL_STORAGE_BACKEND` (`files` default, or `db`). The CLI and Python library are always available; the web UI is optional in file mode and central in database mode.
 
 ## Contents
 
@@ -17,6 +22,9 @@ Local LLM evaluation workbench. Configure providers, build experiments with one 
 - [Quick start](#quick-start)
   - [CLI (no UI)](#cli-no-ui)
   - [Optional: the web UI](#optional-the-web-ui)
+- [Running the web app (database-backed)](#running-the-web-app-database-backed)
+  - [Local (Docker Compose)](#local-docker-compose)
+  - [Seeding the database](#seeding-the-database)
 - [Command-line interface](#command-line-interface)
 - [File layout](#file-layout)
   - [Example experiments at a glance](#example-experiments-at-a-glance)
@@ -41,11 +49,14 @@ Local LLM evaluation workbench. Configure providers, build experiments with one 
 
 ## Stack
 
-The evaluation engine is a **Python package** (`sambaeval`) — dataset loading, the concurrent run engine, scoring, and output generation (model calls, tool-use loops, sandboxed code execution). You use it directly as a **CLI** or **library**, or run it as an **HTTP API** that the optional web UI talks to. State — provider configs, experiments, datasets, results — is plain files under `data/`; there is no database.
+The evaluation engine is a **Python package** (`sambaeval`) — dataset loading, the concurrent run engine, scoring, and output generation (model calls, tool-use loops, sandboxed code execution). You use it directly as a **CLI** or **library**, or run it behind an **HTTP API** that the web UI talks to. It has two storage backends, chosen by `SAMBAEVAL_STORAGE_BACKEND`:
 
-- **Engine / CLI / library / API:** Python 3.11+ — the `sambaeval` package (`sambaeval run` CLI; `sambaeval-server` FastAPI app). See [backend/README.md](backend/README.md).
-- **Web UI (optional):** Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS v4 — talks to the API over HTTP (`NEXT_PUBLIC_API_BASE_URL`, default `http://localhost:8000`).
-- Local file storage under `data/`.
+- **`files`** (default) — single-user; all state (provider configs, experiments, datasets, results) is plain files under `data/`. No database, no services.
+- **`db`** — multi-user; results + run metadata in **Postgres**, dataset blobs in **MinIO/S3**, per-user provider keys encrypted at rest, runs executed by a **decoupled worker**, users authenticated via **Google** (or a local dev user). This is what the Docker Compose stack and the Helm chart deploy.
+
+- **Engine / CLI / library / API:** Python 3.11+ — the `sambaeval` package (`sambaeval run` CLI; `sambaeval-server` FastAPI app; `sambaeval-worker` run executor). See [backend/README.md](backend/README.md).
+- **Web UI:** Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS v4 — talks to the API over HTTP (`NEXT_PUBLIC_API_BASE_URL`, default `http://localhost:8000`).
+- **Database mode adds** Postgres, MinIO, the worker, Alembic migrations, and auth — all wired by `deploy/local/docker-compose.yml` (local) and `helm/sambaeval` (prod). Design + deployment details: [private/prodplan.md](private/prodplan.md).
 
 ## Quick start
 
@@ -71,6 +82,8 @@ That runs an example end-to-end and writes results under `data/results/`. (`.ven
 
 ### Optional: the web UI
 
+This runs the UI in **file mode** (single-user, no database) — for the multi-user, database-backed app (Postgres + worker + auth) see [Running the web app (database-backed)](#running-the-web-app-database-backed).
+
 For interactive editing and result browsing, run the backend API and the frontend as two processes, in two terminals.
 
 Terminal 1 — backend API (serves <http://localhost:8000>):
@@ -87,7 +100,59 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3001>. (SambaEval defaults to 3001 so it can run side-by-side with SambaWiz on 3000.) The UI talks to the backend at `http://localhost:8000`; set `NEXT_PUBLIC_API_BASE_URL` to point elsewhere. On first load, the Providers page auto-creates `data/providers.json` with a placeholder SambaNova entry you then edit.
+Open <http://localhost:3001>. (SambaEval defaults to 3001 so it can run side-by-side with SambaWiz on 3000.) The UI talks to the backend at `http://localhost:8000`; set `NEXT_PUBLIC_API_BASE_URL` to point elsewhere. Set your inference keys on the **Providers** page — see [Configuring providers](#configuring-providers) for where they're stored (`data/providers.json` in file mode, or per-user in the database in db mode).
+
+## Running the web app (database-backed)
+
+The multi-user web app (`SAMBAEVAL_STORAGE_BACKEND=db`) stores state in Postgres + MinIO, executes runs on a decoupled worker, and authenticates users. Run the whole stack locally with Docker Compose, or deploy it with the Helm chart (`helm/sambaeval`; see [private/prodplan.md](private/prodplan.md)).
+
+### Local (Docker Compose)
+
+```bash
+make dev-stack     # build + start postgres, minio, api, worker, frontend
+make dev-seed      # load the public example content (see Seeding below)
+# open http://localhost:3001   — the local dev auth signs you in automatically
+```
+
+`make dev-stack` creates `deploy/local/.env` from `deploy/local/.env.example` and brings up all five services; the api runs `alembic upgrade head` on boot. `AUTH_BACKEND=dev` (the local default) auto-signs-in a fixed dev user, so no Google client is needed locally. Stop with `make dev-stop`; wipe the volumes with `make dev-nuke`. (MinIO is published on host ports `9100/9101` and Postgres on `5433` to avoid clashing with other local stacks.)
+
+> **Code-execution runs (SciCode) need a native worker.** The compose `worker` container has no container runtime — Compose cannot run podman-in-docker — so a SciCode run claimed by it aborts with "no `podman` executable". Stop that container and run the worker on the host instead, where Podman lives:
+>
+> ```bash
+> docker compose -f deploy/local/docker-compose.yml stop worker
+> cd backend && \
+>   DATABASE_URL='postgresql+psycopg://sambaeval:sambaeval@localhost:5433/sambaeval' \
+>   S3_ENDPOINT_URL='http://localhost:9100' \
+>   .venv/bin/sambaeval-worker
+> ```
+>
+> The host-facing ports replace the compose-internal `postgres:5432` / `minio:9000` from `.env`. Everything else (api, frontend, Postgres, MinIO) stays in Compose.
+
+### Seeding the database
+
+A fresh database starts empty except for the **system user** and the **generator catalog**, which are seeded automatically on api startup. The public example content — experiments, scorers, datasets, and the precomputed example results under `data/` — is loaded by a one-time, **idempotent backfill**, all owned by the system user and marked public (re-running is safe: experiments/scorers/datasets upsert, existing runs are skipped).
+
+Because the prod images do **not** bake in the `data/` tree, the seed content is shipped through the object store: upload it once, then a backfill pulls it and loads Postgres + MinIO.
+
+**Local** — `make dev-seed` runs both steps for you:
+
+```bash
+make dev-seed
+#  = make seed-upload           # push data/ -> MinIO under the `seed/` prefix
+#    then, in the api container: sambaeval-backfill --seed-prefix seed
+```
+
+**Production** — the same two steps:
+
+```bash
+# 1) Once, from a checkout that has the example data/, pointed at the prod object store:
+sambaeval-seed push --data-dir data --prefix seed
+# 2) Enable the Helm seed Job (a post-install hook that runs after the DB migration):
+helm upgrade --install sambaeval helm/sambaeval \
+  -f helm/sambaeval/values-prod.yaml --set seed.enabled=true
+```
+
+The seed bundle contains only what the backfill consumes (`experiments/*.json`, `scorers/*.json`, top-level `datasets/*.{jsonl,csv}`, and the `results/` tree). Large fixtures (`chinook.db`, `*.h5`, `scicode/`, `spider1/`) are **excluded** — they come through the admin API when the code-execution sandbox is enabled.
 
 ## Command-line interface
 
@@ -110,7 +175,7 @@ SambaEval is also an importable library: `from sambaeval import run_experiment`.
 
 ## File layout
 
-All evaluation state — provider configs, experiment definitions, datasets, and results — is stored as plain files under `data/` so they're easy to inspect, diff, and version-control. The app reads and writes these files directly; there is no database.
+In **file mode** (the default), all evaluation state — provider configs, experiment definitions, datasets, and results — is stored as plain files under `data/`, so it's easy to inspect, diff, and version-control; the app reads and writes these files directly. In **database mode**, this same `data/` tree becomes the **seed source** — loaded once via the backfill (see [Seeding the database](#seeding-the-database)) — and the live state then lives in Postgres + MinIO instead.
 
 ```
 data/
@@ -150,7 +215,11 @@ The web UI is a convenience layer over the same `data/` files and backend the CL
 
 ![The Providers page: a table of OpenAI-compatible endpoints, each with a name, API URL, and API key, plus an "Add Provider" button.](images/providers.png)
 
-A provider is a reusable definition of an OpenAI-compatible inference endpoint — a name, an `api_url`, and an `api_key` — that experiments reference by name for both their models and their LLM judge. They live in `data/providers.json`, which the app autogenerates on first read with a placeholder SambaNova entry that you then replace with your real key.
+A provider is a reusable definition of an OpenAI-compatible inference endpoint — a name, an `api_url`, and an `api_key` — that experiments reference by name for both their models and their LLM judge. **Where you set your keys depends on which storage backend you run** (`SAMBAEVAL_STORAGE_BACKEND`):
+
+**Web app (database backend — the multi-user/deployment default).** Set your keys in the UI: open the app, sign in, and go to the **Providers** page (left nav) → *Add Provider* → fill in the name, API URL, and API key → **Save**. Keys are **per-user (bring-your-own) and stored encrypted in the database** — one user's keys are never visible to another, and nothing is written to disk in cleartext. There is **no `data/providers.json`** in this mode. (Under the hood the page calls `PUT /api/providers`; the app encrypts each key at rest with its `CREDS_KEY`.) This is the path for the deployment and the local docker-compose stack.
+
+**CLI / single-user file mode (`SAMBAEVAL_STORAGE_BACKEND=files`).** Providers live in `data/providers.json` (gitignored — it holds secrets and must never be committed). The web UI auto-creates it on first read with a placeholder SambaNova entry; the CLI does not, so copy `data/providers.json.example` to `data/providers.json` and edit it:
 
 ```jsonc
 [
@@ -162,7 +231,7 @@ A provider is a reusable definition of an OpenAI-compatible inference endpoint �
 ]
 ```
 
-Replace `api_key` with a real key (or add more providers) via the Providers page in the UI; saves write back to the same file. Providers must speak the OpenAI-compatible `/chat/completions` API — works with OpenAI, SambaNova Cloud, vLLM, Ollama (via its OpenAI shim), and most modern inference gateways.
+Either way, the provider's `name` is what experiments reference (`models[].provider_name`, the LLM judge's `provider_name`), and the endpoint must speak the OpenAI-compatible `/chat/completions` API — works with OpenAI, SambaNova Cloud, vLLM, Ollama (via its OpenAI shim), and most modern inference gateways.
 
 ## Experiment schema
 
@@ -377,12 +446,27 @@ The reference outputs live in `test_data.h5` (~1 GB), which is **not committed**
 1. Download `test_data.h5` from the SciCode numeric test data:
    <https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR>
 2. Save it anywhere on your machine (e.g. `~/scicode/test_data.h5`).
-3. Open [scripts/generators/scicode_generator.py](scripts/generators/scicode_generator.py) and set the module-level global to that path:
-   ```python
-   test_data_h5_path = "/absolute/path/to/test_data.h5"
+3. Make it reachable, either by pointing at your local copy:
+   ```bash
+   export SCICODE_H5_PATH=/absolute/path/to/test_data.h5
+   ```
+   or — better for anything with a worker (the DB-backed app, or a cluster) — by publishing it **once** to the object store, after which any worker fetches it automatically:
+   ```bash
+   sambaeval-seed push-fixture /absolute/path/to/test_data.h5 --name scicode/test_data.h5
    ```
 
-Until that path points at a real file, every SciCode row scores `FAIL` with a message telling you to set it.
+   (Editing `test_data_h5_path` in [scripts/generators/scicode_generator.py](scripts/generators/scicode_generator.py) still works, but needs a source change to reach a worker process.)
+
+A run resolves the file in that order — explicit path, then the object store — and caches the download under `FIXTURE_CACHE_DIR` (default `~/.cache/sambaeval/fixtures`), so only the first run pays for it. If it's available nowhere, the run is **aborted before it starts** and the run's status line shows that reason, rather than quietly scoring every row 0.
+
+The same command is how the fixture gets into a deployed cluster — MinIO has no ingress, so tunnel to it with the kubeconfig you already have:
+
+```bash
+kubectl -n "$NS" port-forward svc/sambaeval-minio 9100:9000   # leave running
+S3_ENDPOINT_URL=http://localhost:9100 \
+  S3_ACCESS_KEY=... S3_SECRET_KEY=... \
+  sambaeval-seed push-fixture ./test_data.h5 --name scicode/test_data.h5
+```
 
 ### Regenerating / resizing the dataset
 

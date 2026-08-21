@@ -17,8 +17,13 @@ under "Files" marked gitignored must be supplied locally to re-run the conversio
 | `background_comment_template.txt` | ❌ gitignored | SciCode's self-generated-background prompt template, for reference. Not used by the converter or generator. |
 
 `test_data.h5` (the ~1 GB numeric reference data the tests compare against) is
-downloaded separately and pointed at via `test_data_h5_path` in
-`scripts/generators/scicode_generator.py` — see the main README.
+downloaded separately, then resolved in this order: the `SCICODE_H5_PATH` env
+var (or `test_data_h5_path` in `scripts/generators/scicode_generator.py`), then
+the object store at `fixtures/scicode/test_data.h5` — publish it once with
+`sambaeval-seed push-fixture <file> --name scicode/test_data.h5` and every
+worker fetches and caches it automatically. A run whose reference data is
+available nowhere is **aborted up front** with that reason rather than scoring
+every step 0 — see the main README.
 
 ## Where to get the source files
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -67,6 +68,15 @@ def _podman(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["podman", *args], capture_output=True, text=True, timeout=timeout
     )
+
+
+def _podman_binary():
+    """Path to the ``podman`` executable, or None when it isn't installed.
+
+    Its own seam (like ``_podman``) so tests can model a host without Podman
+    without monkeypatching the shared ``shutil`` module.
+    """
+    return shutil.which("podman")
 
 
 def _connects() -> bool:
@@ -145,6 +155,19 @@ def ensure_podman_ready() -> None:
     with _lock:
         if _ready:  # another thread started it while we waited on the lock
             return
+        # No `podman` binary at all is a different failure from "VM is down",
+        # and the usual cause is running the worker inside a container that has
+        # no container runtime (compose can't do podman-in-docker). Say so,
+        # rather than advising the user to start a daemon that isn't installed.
+        if _podman_binary() is None:
+            raise SandboxUnavailable(
+                "no `podman` executable on PATH, so the code-execution sandbox "
+                "cannot start. If this worker is running inside a container "
+                "(e.g. the docker-compose stack), run `sambaeval-worker` as a "
+                "native host process instead — compose cannot run "
+                "podman-in-docker. Otherwise install Podman, or set "
+                "SANDBOX_BACKEND=subprocess to execute code without isolation."
+            )
         if _connects():  # already running, or native-Linux daemon
             _warn_if_undersized()
             _ready = True
@@ -154,13 +177,13 @@ def ensure_podman_ready() -> None:
         if state is None:
             raise SandboxUnavailable(
                 "Podman is not reachable and there is no machine to start. "
-                "Start the Podman daemon, or set SCICODE_SANDBOX=subprocess."
+                "Start the Podman daemon, or set SANDBOX_BACKEND=subprocess."
             )
         if not AUTO_START:
             raise SandboxUnavailable(
                 f"Podman machine {MACHINE!r} is not running and auto-start is "
                 "disabled. Run `podman machine start`, or set "
-                "SCICODE_SANDBOX=subprocess."
+                "SANDBOX_BACKEND=subprocess."
             )
         if state == "stopped":
             _rightsize_stopped_machine()

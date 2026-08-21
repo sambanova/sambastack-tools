@@ -4,7 +4,7 @@ Concurrency model: a ``ThreadPoolExecutor`` runs the I/O-bound per-task work
 (generate → score). **The parent thread owns all result writes, progress
 callbacks, and cancellation** — worker callables are pure and return a
 ``ResultRow`` (or ``None`` if cancelled). This keeps shared state trivial and
-supports incremental CSV upserts, resume carry-over, and abort.
+supports incremental result upserts, resume carry-over, and abort.
 """
 
 from __future__ import annotations
@@ -135,8 +135,10 @@ def run_experiment(
     else:
         # A subset selection makes the new run a partial grid; flag it partial so
         # resuming it later preserves that shape instead of re-expanding.
+        # ``run_id`` is normally None here (fresh run); when a worker pre-created
+        # a queued run row it passes that label so create_run adopts it in place.
         meta = storage.create_run(
-            experiment, total_tasks, partial=model_filter is not None
+            experiment, total_tasks, partial=model_filter is not None, run_id=run_id
         )
         run_id = meta.run_id
 
@@ -248,11 +250,14 @@ def run_experiment(
             concurrency = prepare_sandbox(concurrency)
         except Exception as err:  # noqa: BLE001 — abort the run, surface why
             unregister_run(experiment.id, run_id)
-            storage.complete_run(experiment.id, run_id, "aborted")
-            raise RuntimeError(
-                f"Cannot prepare the execution sandbox for this experiment: "
-                f"{err}"
-            ) from err
+            reason = (
+                f"Cannot prepare the execution sandbox for this experiment: {err}"
+            )
+            # Persist the reason on the run so the UI can show it; otherwise the
+            # run finalizes as a bare "aborted" and the cause is lost with the
+            # worker's stdout.
+            storage.complete_run(experiment.id, run_id, "aborted", reason)
+            raise RuntimeError(reason) from err
 
     # Prune orphans and lay down carried rows so a mid-run crash is consistent.
     storage.save_run_results(experiment.id, run_id, universe)

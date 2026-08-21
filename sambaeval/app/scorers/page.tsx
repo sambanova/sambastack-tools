@@ -1,5 +1,5 @@
 "use client";
-import { apiUrl } from "@/app/lib/api";
+import { apiFetch } from "@/app/lib/api";
 
 import { useEffect, useState } from "react";
 import { DEFAULT_JUDGE_PROMPT } from "../lib/types";
@@ -21,8 +21,8 @@ export default function ScorersPage() {
   useEffect(() => {
     (async () => {
       const [sRes, pRes] = await Promise.all([
-        fetch(apiUrl("/api/scorers")).then((r) => r.json()),
-        fetch(apiUrl("/api/providers")).then((r) => r.json()),
+        apiFetch("/api/scorers").then((r) => r.json()),
+        apiFetch("/api/providers").then((r) => r.json()),
       ]);
       const list: LlmJudgeScorerDef[] = sRes.scorers ?? [];
       setScorers(list);
@@ -116,7 +116,7 @@ export default function ScorersPage() {
       }
       return next;
     });
-    const res = await fetch(apiUrl("/api/scorers"), {
+    const res = await apiFetch("/api/scorers", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ scorers: payload }),

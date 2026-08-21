@@ -11,6 +11,12 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
     "httpx>=0.27",
+    # Database + object-store + crypto (prodplan §2/§3): DB-backed storage.
+    "sqlalchemy>=2",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "boto3>=1.34",
+    "cryptography>=42",
     # Output-generator deps (previously scripts/requirements.txt). Generators
     # now run in-process, so they share this environment.
     "openai>=1.0.0",
@@ -26,8 +32,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Phase 1 (FastAPI backend). Installed when we get there.
-server = ["fastapi>=0.110", "uvicorn>=0.29"]
+# FastAPI backend (api + worker). Auth + sessions + multipart uploads.
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "authlib>=1.3",
+    "itsdangerous>=2.1",
+    "python-multipart>=0.0.9",
+]
 # Test suite (pytest). Installed in CI and for local `pytest backend/tests`.
 # Pulls in the server extra too: the API-level tests (test_error_log,
 # test_orphan_cancel, test_retry_config) drive the FastAPI app via TestClient.
@@ -36,6 +48,9 @@ test = ["pytest>=8", "sambaeval[server]"]
 [project.scripts]
 sambaeval = "sambaeval.cli:main"
 sambaeval-server = "sambaeval.api:serve"
+sambaeval-worker = "sambaeval.worker:main"
+sambaeval-backfill = "sambaeval.backfill:main"
+sambaeval-seed = "sambaeval.seed_bundle:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

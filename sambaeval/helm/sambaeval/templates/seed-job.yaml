@@ -1,0 +1,48 @@
+{{- if .Values.seed.enabled }}
+# One-shot seed Job (prodplan §5). Pulls the example bundle from the object store
+# and backfills Postgres + MinIO. Runs as a post-install hook with weight 0 so it
+# executes AFTER the migration hook (weight -5) has created the schema.
+# Prerequisite: the bundle must already be in the object store —
+#   sambaeval-seed push --prefix {{ .Values.seed.prefix }}
+# run once by an operator (or `make seed-upload` locally).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-seed
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    helm.sh/hook: {{ .Values.seed.hook | quote }}
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.seed.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "sambaeval.selectorLabels" (dict "root" . "component" "seed") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "sambaeval.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: seed
+          image: {{ include "sambaeval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Pull the bundle from the object store, then backfill from it.
+          command: ["sambaeval-backfill", "--seed-prefix", {{ .Values.seed.prefix | quote }}]
+          envFrom:
+            - configMapRef:
+                name: {{ include "sambaeval.configMapName" . }}
+            - secretRef:
+                name: {{ .Values.secretName }}
+          resources:
+            {{- toYaml .Values.seed.resources | nindent 12 }}
+{{- end }}

@@ -1,0 +1,10 @@
+# Used only when building with `backend/` itself as the context. The primary
+# build uses the product root as context (see backend/Dockerfile header), where
+# the root .dockerignore applies instead.
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+alembic/versions/__pycache__
+uv.lock
+*.egg-info

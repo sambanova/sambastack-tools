@@ -1,0 +1,21 @@
+apiVersion: v2
+name: sambaeval
+description: SambaEval — internal LLM eval webapp (api + worker + frontend, with in-cluster postgres + minio for the PoV).
+type: application
+# Chart version is the packaging version; appVersion tracks the app's VERSION file.
+version: 0.1.0
+appVersion: "1.2.0"
+
+# Community subcharts for the stateful deps, gated by `*.enabled` (prodplan §6).
+# Resolve with `helm dependency build helm/sambaeval` before templating/deploying.
+# 💰 PoV: both run in-cluster (cheapest). Better later: disable postgresql and
+# point db.* at a managed DB.
+dependencies:
+  - name: postgresql
+    version: "18.8.9"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+  - name: minio
+    version: "17.0.21"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: minio.enabled

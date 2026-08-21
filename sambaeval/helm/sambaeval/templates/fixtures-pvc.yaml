@@ -1,0 +1,24 @@
+{{- /*
+Shared cache for large benchmark fixtures (prodplan §7a). Only rendered for
+fixtures.volume=pvc, which requires a ReadWriteMany storage class so every
+worker replica reads ONE copy. With the default emptyDir each pod keeps its own
+copy instead and no PVC is needed.
+*/ -}}
+{{- if and .Values.fixtures.enabled (eq .Values.fixtures.volume "pvc") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-fixtures
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fixtures
+spec:
+  accessModes:
+    - {{ .Values.fixtures.accessMode }}
+  resources:
+    requests:
+      storage: {{ .Values.fixtures.size }}
+  {{- if .Values.fixtures.storageClass }}
+  storageClassName: {{ .Values.fixtures.storageClass }}
+  {{- end }}
+{{- end }}

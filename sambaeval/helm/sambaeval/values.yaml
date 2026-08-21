@@ -1,0 +1,226 @@
+# SambaEval umbrella chart — DEFAULT values.
+# Layer an environment overlay on top (values-prod.yaml / values-local.yaml).
+# See private/prodplan.md §6.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Makefile injects the real registry/repo/tag with --set at deploy time.
+  backend:
+    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/sambaeval/backend
+  frontend:
+    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/sambaeval/frontend
+  tag: ""                    # defaults to Chart.appVersion when empty
+  pullPolicy: IfNotPresent
+
+# Artifact Registry pull secret (created by `make create-regcred`).
+imagePullSecrets:
+  - name: regcred
+
+serviceAccount:
+  name: ""                   # defaults to the fullname
+  automountServiceAccountToken: false
+
+# The single imperatively-created Secret consumed via envFrom (make create-secrets).
+# Holds DATABASE_URL, CREDS_KEY, SESSION_SECRET, S3_ACCESS_KEY/S3_SECRET_KEY,
+# GOOGLE_CLIENT_SECRET, and the postgres/minio passwords.
+secretName: sambaeval-credentials-env
+
+# Non-secret env -> ConfigMap (mounted into api + worker via envFrom).
+env:
+  SAMBAEVAL_ENV: prod
+  SAMBAEVAL_STORAGE_BACKEND: db
+  AUTH_BACKEND: google
+  ALLOWED_DOMAINS: sambanovasystems.com,sambanova.ai
+  DEV_USER_EMAIL: dev@sambanova.ai
+  DEV_USER_NAME: Dev User
+  ADMIN_EMAILS: ""
+  GOOGLE_CLIENT_ID: ""
+  OAUTH_REDIRECT_URL: https://sambaeval.cloud.snova.ai/api/auth/callback
+  FRONTEND_ORIGIN: https://sambaeval.cloud.snova.ai
+  # In-cluster MinIO service (bitnami subchart => <release>-minio).
+  S3_ENDPOINT_URL: http://sambaeval-minio:9000
+  S3_BUCKET: sambaeval
+  S3_REGION: us-east-1
+  MAX_CONCURRENT_RUNS_PER_USER: "4"
+  MAX_UPLOAD_BYTES: "52428800"
+  SANDBOX_ENABLED: "0"
+  SANDBOX_BACKEND: k8s_job
+
+api:
+  replicas: 1
+  port: 8000
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "1Gi" }
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 75
+  # RollingUpdate (stateless).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits:   { cpu: "1",    memory: "2Gi" }
+  # One worker pod = one in-flight run, so maxReplicas is the concurrency ceiling.
+  # PoV sizing: floor 1 / ceiling 8 (prodplan §6 worker sizing).
+  hpa:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 75
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+
+frontend:
+  replicas: 1
+  port: 3001
+  # Empty => same-origin `/api` behind the ingress. Set to an absolute URL for
+  # split-origin deployments.
+  apiBaseUrl: ""
+  resources:
+    requests: { cpu: "50m",  memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+# Alembic migration Job (Helm pre-install/pre-upgrade hook).
+migration:
+  enabled: true
+  backoffLimit: 2
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+# One-shot seed Job (prodplan §5): pulls the example bundle from the object store
+# — uploaded once by an operator with `sambaeval-seed push --prefix <prefix>` —
+# then runs `sambaeval-backfill --seed-prefix <prefix>` to backfill Postgres +
+# MinIO with the public example experiments/scorers/datasets/results.
+# Disabled by default; enable for the initial install. Backfill is idempotent
+# (experiments/scorers/datasets upsert; existing runs are skipped), so re-running
+# is safe. Runs as a post-install hook AFTER the migration (hook-weight 0 > -5).
+seed:
+  enabled: false
+  prefix: seed
+  # "post-install" seeds once on first install. Use "post-install,post-upgrade"
+  # to re-seed on every upgrade too (idempotent, but re-pulls the bundle).
+  hook: post-install
+  backoffLimit: 2
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+ingress:
+  enabled: true
+  className: nginx
+  host: sambaeval.cloud.snova.ai
+  tlsSecretName: cloud-snova-ai-tls
+  # SSE / streaming (prodplan §6).
+  annotations:
+    # Long runs stream progress over SSE for as long as the run lasts — a
+    # SciCode run takes ~30 min, so the old 600s cut the stream mid-run (the
+    # run survives, since the worker is decoupled, but the UI stops updating).
+    # 3600 matches the aiskagents ingress already running on this tenant.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # nginx defaults to 1 MB, which would 413 dataset uploads at the ingress
+    # before they ever reach the app. Keep this >= env.MAX_UPLOAD_BYTES (50 MB).
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+# Large read-only benchmark fixtures (SciCode's test_data.h5 ~1 GB, chinook.db)
+# — prodplan §7a. Source of truth is s3://<bucket>/fixtures/, published once with
+# `sambaeval-seed push-fixture`. The worker materialises them onto this volume
+# via sambaeval.fixtures.ensure_fixture, because generators need a real file
+# path (SciCode bind-mounts the .h5 read-only into every sandbox container).
+fixtures:
+  enabled: true
+  cacheDir: /var/cache/sambaeval/fixtures
+  # emptyDir => one copy per worker pod, fetched on first use. Works on ANY
+  # storage class, costs ~1 GB of node ephemeral storage per replica.
+  # pvc      => one copy shared cluster-wide, but needs a ReadWriteMany storage
+  #             class; the RKE2 vcluster tenant may only offer RWO, so this is
+  #             opt-in rather than the default. Confirm with the platform team.
+  volume: emptyDir            # emptyDir | pvc
+  size: 5Gi
+  storageClass: ""            # "" => cluster default
+  accessMode: ReadWriteMany
+  # Pre-download at pod start instead of lazily on the first run that needs it.
+  # OFF by default: with sandbox.enabled=false no worker ever reads a fixture,
+  # so a prewarm would pull ~1 GB into every worker pod for nothing.
+  prewarm: false
+  prewarmNames: []            # e.g. ["scicode/test_data.h5"]
+
+# Code-exec sandbox — OFF for the PoV (no gVisor on the RKE2 vcluster; §7).
+# When enabled, the worker gets RBAC to create sandbox Jobs.
+sandbox:
+  enabled: false
+
+# Nightly pg_dump -> MinIO (PoV data safety; prodplan §6).
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  # bitnami postgres image reused for pg_dump + an mc sidecar step.
+  pgImage: docker.io/bitnami/postgresql:16
+  mcImage: docker.io/minio/mc:latest
+  s3Prefix: backups
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "256Mi" }
+
+networkPolicy:
+  enabled: true
+  # Label selector matching the ingress-nginx controller namespace. VERIFY THIS
+  # PER CLUSTER before enabling: if it matches no namespace the policy denies
+  # the ingress traffic it was meant to allow, and the app comes up healthy but
+  # unreachable. On the cloud-agents-dev-1 vcluster there is no `ingress-nginx`
+  # namespace at all (the class comes from the `rke2-ingress-nginx` release in
+  # kube-system, and the controller runs on the host cluster) — hence
+  # networkPolicy.enabled=false in values-prod.yaml.
+  ingressNamespaceSelector:
+    kubernetes.io/metadata.name: ingress-nginx
+
+# --------------------------------------------------------------------------- #
+# Subcharts (bitnami). Service names assume release name `sambaeval`.
+# --------------------------------------------------------------------------- #
+postgresql:
+  enabled: true
+  auth:
+    username: sambaeval
+    database: sambaeval
+    # Reuse the single app Secret (keys created by make create-secrets).
+    existingSecret: sambaeval-credentials-env
+    secretKeys:
+      adminPasswordKey: POSTGRES_PASSWORD
+      userPasswordKey: POSTGRES_PASSWORD
+  image:
+    tag: "16"                # honor the Postgres 16 contract
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests: { cpu: "250m", memory: "256Mi" }
+      limits:   { cpu: "1",    memory: "1Gi" }
+
+minio:
+  enabled: true
+  mode: standalone
+  auth:
+    existingSecret: sambaeval-credentials-env
+    rootUserSecretKey: MINIO_ROOT_USER
+    rootPasswordSecretKey: MINIO_ROOT_PASSWORD
+  defaultBuckets: sambaeval
+  persistence:
+    enabled: true
+    size: 20Gi
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "1Gi" }

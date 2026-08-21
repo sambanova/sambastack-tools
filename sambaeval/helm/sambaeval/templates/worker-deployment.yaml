@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-worker
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.worker.hpa.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  strategy:
+    {{- toYaml .Values.worker.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "sambaeval.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sambaeval.selectorLabels" (dict "root" . "component" "worker") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "sambaeval.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        {{- if .Values.fixtures.enabled }}
+        # The fixtures volume is written by the non-root worker; without an
+        # fsGroup a PVC mounts root-owned and the download fails with EACCES.
+        fsGroup: 1000
+        {{- end }}
+      {{- if and .Values.fixtures.enabled .Values.fixtures.prewarm .Values.fixtures.prewarmNames }}
+      # Pull the named fixtures before the worker starts polling, so the first
+      # run that needs one doesn't pay the download. Same code path the worker
+      # would take lazily, so this is purely a warm-up.
+      initContainers:
+        - name: fixtures-prewarm
+          image: {{ include "sambaeval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -c
+            - |
+              from sambaeval import fixtures
+              for name in {{ .Values.fixtures.prewarmNames | toJson }}:
+                  print("prewarming", name, "->", fixtures.ensure_fixture(name))
+          envFrom:
+            - configMapRef:
+                name: {{ include "sambaeval.configMapName" . }}
+            - secretRef:
+                name: {{ .Values.secretName }}
+          env:
+            - name: FIXTURE_CACHE_DIR
+              value: {{ .Values.fixtures.cacheDir | quote }}
+          volumeMounts:
+            - name: fixtures
+              mountPath: {{ .Values.fixtures.cacheDir }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "sambaeval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sambaeval-worker"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "sambaeval.configMapName" . }}
+            - secretRef:
+                name: {{ .Values.secretName }}
+          {{- if .Values.fixtures.enabled }}
+          # Explicit env beats envFrom, so the cache dir has one source of
+          # truth (.Values.fixtures.cacheDir) and can't drift from the mount.
+          env:
+            - name: FIXTURE_CACHE_DIR
+              value: {{ .Values.fixtures.cacheDir | quote }}
+          volumeMounts:
+            - name: fixtures
+              mountPath: {{ .Values.fixtures.cacheDir }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      {{- if .Values.fixtures.enabled }}
+      volumes:
+        - name: fixtures
+          {{- if eq .Values.fixtures.volume "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ include "sambaeval.fullname" . }}-fixtures
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.fixtures.size }}
+          {{- end }}
+      {{- end }}

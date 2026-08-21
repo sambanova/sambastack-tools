@@ -1,0 +1,67 @@
+# SambaEval — LOCAL overlay (Mode B: parity check on a local K8s cluster).
+# Docker Desktop K8s / kind / minikube with locally built images (prodplan §8a).
+#
+#   docker build -f backend/Dockerfile -t sambaeval-backend:local .
+#   docker build -t sambaeval-frontend:local .
+#   helm dependency build helm/sambaeval
+#   helm upgrade --install sambaeval helm/sambaeval \
+#     --values helm/sambaeval/values.yaml \
+#     --values helm/sambaeval/values-local.yaml
+#   kubectl port-forward svc/sambaeval-frontend 3001:3001
+#   kubectl port-forward svc/sambaeval-api 8000:8000
+
+image:
+  backend:
+    repository: sambaeval-backend
+  frontend:
+    repository: sambaeval-frontend
+  tag: local
+  pullPolicy: Never          # use locally built images, no Artifact Registry
+
+# No regcred locally.
+imagePullSecrets: []
+
+env:
+  SAMBAEVAL_ENV: local
+  AUTH_BACKEND: dev
+  DEV_USER_EMAIL: dev@sambanova.ai
+  DEV_USER_NAME: Dev User
+  ADMIN_EMAILS: dev@sambanova.ai
+  FRONTEND_ORIGIN: http://localhost:3001
+  OAUTH_REDIRECT_URL: http://localhost:8000/api/auth/callback
+  S3_ENDPOINT_URL: http://sambaeval-minio:9000
+  S3_BUCKET: sambaeval
+  SANDBOX_ENABLED: "0"
+
+frontend:
+  # Port-forwarded api on the host.
+  apiBaseUrl: http://localhost:8000
+
+# Reach the app via kubectl port-forward instead of an ingress.
+ingress:
+  enabled: false
+
+# Code-exec deferred (matches the RKE2 tenant; no gVisor).
+sandbox:
+  enabled: false
+
+# Backups off locally.
+backup:
+  enabled: false
+
+# In-cluster subcharts (same topology as prod).
+postgresql:
+  enabled: true
+  primary:
+    persistence:
+      enabled: false         # ephemeral for local parity runs
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+
+minio:
+  enabled: true
+  mode: standalone
+  persistence:
+    enabled: false
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }

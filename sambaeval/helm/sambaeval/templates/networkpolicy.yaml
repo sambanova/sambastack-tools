@@ -1,0 +1,98 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny + explicit allows (prodplan §6). Selectors use the chart's
+# component labels; postgres/minio subchart pods are matched by their bitnami
+# app.kubernetes.io/name labels.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-default-deny
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+---
+# DNS egress for all app pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-allow-dns
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Egress"]
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# ingress-nginx -> frontend + api.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-allow-web
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["api", "frontend"]
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressNamespaceSelector | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.api.port }} }
+        - { protocol: TCP, port: {{ .Values.frontend.port }} }
+---
+# api egress -> postgres + minio (+ frontend needs none server-side).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-allow-api-egress
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: api
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: minio
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# worker egress -> postgres + minio + provider APIs (external). Providers require
+# open egress; the (deferred) sandbox Jobs get NO egress instead.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sambaeval.fullname" . }}-allow-worker-egress
+  labels:
+    {{- include "sambaeval.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: worker
+  policyTypes: ["Egress"]
+  egress:
+    - {}   # allow all egress (in-cluster db/minio + external provider HTTP)
+{{- end }}

@@ -42,6 +42,30 @@ export interface LlmJudgeScorerDef {
   additional_kwargs?: Record<string, unknown>;
 }
 
+// Visibility of a shareable resource (experiment/dataset/scorer/run). "private"
+// = owner only, "link" = any logged-in user holding the share link, "public" =
+// all logged-in users.
+export type Visibility = "private" | "link" | "public";
+
+// The authenticated user, as returned by GET /api/auth/me.
+export interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  is_admin: boolean;
+  domain: string;
+}
+
+// A generator from the admin-enabled catalog (GET /api/generators). `key` is
+// the stable identifier stored on the experiment; `requires_sandbox` flags
+// generators that run in the isolated sandbox.
+export interface Generator {
+  key: string;
+  display_name: string;
+  description: string;
+  requires_sandbox: boolean;
+}
+
 export interface Experiment {
   id: string;
   name: string;
@@ -51,6 +75,13 @@ export interface Experiment {
   scorer?: Scorer;
   output_generator?: string;
   concurrency?: number;
+  // Sharing/ownership metadata attached by the multi-tenant backend. `owner`
+  // is "me" | "other" | "system"; `is_owner` gates the sharing controls;
+  // `share_token` is present only when the viewer is the owner or an admin.
+  visibility?: Visibility;
+  owner?: "me" | "other" | "system";
+  is_owner?: boolean;
+  share_token?: string;
   // Run only the first N examples of the dataset. Omitted → run the whole
   // dataset. Set by the "Run on first N examples" field in the UI when the
   // user lowers it below the dataset's size.
@@ -149,6 +180,10 @@ export interface RunMeta {
   // (a "partial" run). Like a merged run, it resumes/retries by rebuilding from
   // its own rows rather than re-expanding to every model in the experiment.
   partial?: boolean;
+  // Why the run aborted as a whole (e.g. the code-execution sandbox could not
+  // be prepared, so no task ever ran). Per-task failures are reported through
+  // the run's errors endpoint instead.
+  error?: string | null;
   token_usage?: RunTokenUsage[];
   // Stable identifier for the dataset this run used (filename, or a content
   // hash for inline datasets). Used to restrict "Merge Results" to runs over

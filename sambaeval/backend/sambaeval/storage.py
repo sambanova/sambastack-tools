@@ -548,10 +548,16 @@ def merge_run_results(
 
 
 def create_run(
-    experiment: Experiment, total_tasks: int, *, partial: bool = False
+    experiment: Experiment,
+    total_tasks: int,
+    *,
+    partial: bool = False,
+    run_id: Optional[str] = None,
 ) -> RunMeta:
     ensure_dirs()
-    run_id = new_run_id()
+    # ``run_id`` lets a caller (the decoupled worker) pre-assign the run label;
+    # None keeps the historical behavior of minting a fresh timestamp id.
+    run_id = run_id or new_run_id()
     d = paths.run_dir(experiment.id, run_id)
     d.mkdir(parents=True, exist_ok=True)
     paths.run_experiment_snapshot_path(experiment.id, run_id).write_text(
@@ -604,12 +610,21 @@ def mark_run_resumed(
         return updated
 
 
-def complete_run(experiment_id: str, run_id: str, status: str) -> None:
+def complete_run(
+    experiment_id: str, run_id: str, status: str, error: Optional[str] = None
+) -> None:
     with with_run_lock(experiment_id, run_id):
         meta = _read_run_meta_unlocked(experiment_id, run_id)
         if meta is None:
             return
-        updated = meta.model_copy(update={"status": status, "finished_at": iso_now()})
+        # Always assign `error`: the latest completion wins, so a successful
+        # resume clears the reason a previous attempt aborted with.
+        update = {
+            "status": status,
+            "finished_at": iso_now(),
+            "error": error[:4000] if error else None,
+        }
+        updated = meta.model_copy(update=update)
         _write_run_meta_unlocked(experiment_id, updated)
 
 
@@ -1013,3 +1028,67 @@ def delete_dataset(name: str) -> None:
     path = paths.find_dataset_file(name)
     if path is not None:
         path.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# Storage-backend dispatch
+# --------------------------------------------------------------------------- #
+# The functions above are the original file-backed implementation, kept as the
+# fallback (and used directly when SAMBAEVAL_STORAGE_BACKEND=files — e.g. the
+# legacy unit tests / offline CLI). When the DB backend is selected (the default
+# for the web app), the data-access functions are rebound to their Postgres/S3
+# implementations in ``storage_db``. Pure helpers (serialize_rows, parse_rows,
+# _error_from_output, iso_now, new_run_id) stay defined here and are imported by
+# storage_db, so they must NOT be rebound.
+from .config import settings as _settings  # noqa: E402
+
+if _settings.use_db:
+    from . import storage_db as _db  # noqa: E402
+
+    # Providers
+    providers_file_exists = _db.providers_file_exists
+    list_providers = _db.list_providers
+    list_providers_or_create = _db.list_providers_or_create
+    save_providers = _db.save_providers
+    read_pricing_defaults = _db.read_pricing_defaults
+    # Scorers
+    get_scorer = _db.get_scorer
+    list_scorers = _db.list_scorers
+    save_scorer = _db.save_scorer
+    delete_scorer = _db.delete_scorer
+    # Datasets
+    list_datasets = _db.list_datasets
+    read_dataset = _db.read_dataset
+    write_dataset = _db.write_dataset
+    delete_dataset = _db.delete_dataset
+    # Experiments
+    list_experiments = _db.list_experiments
+    get_experiment = _db.get_experiment
+    save_experiment = _db.save_experiment
+    delete_experiment = _db.delete_experiment
+    next_experiment_id = _db.next_experiment_id
+    # Runs
+    create_run = _db.create_run
+    mark_run_resumed = _db.mark_run_resumed
+    complete_run = _db.complete_run
+    save_run_results = _db.save_run_results
+    upsert_run_result_row = _db.upsert_run_result_row
+    read_run_results = _db.read_run_results
+    read_run_results_csv = _db.read_run_results_csv
+    read_run_meta = _db.read_run_meta
+    list_runs = _db.list_runs
+    find_resumable_run = _db.find_resumable_run
+    find_latest_run = _db.find_latest_run
+    find_retryable_run = _db.find_retryable_run
+    read_run_experiment_snapshot = _db.read_run_experiment_snapshot
+    run_dataset_key = _db.run_dataset_key
+    dataset_key = _db.dataset_key
+    read_latest_results = _db.read_latest_results
+    delete_run = _db.delete_run
+    merge_run_results = _db.merge_run_results
+    # Errors
+    record_run_error = _db.record_run_error
+    read_run_errors = _db.read_run_errors
+    get_run_errors = _db.get_run_errors
+    # Dirs
+    ensure_dirs = _db.ensure_dirs

@@ -1,5 +1,5 @@
 "use client";
-import { apiUrl } from "@/app/lib/api";
+import { apiFetch } from "@/app/lib/api";
 
 import { useEffect, useState } from "react";
 import type { Provider } from "../lib/types";
@@ -11,7 +11,7 @@ export default function ProvidersPage() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    fetch(apiUrl("/api/providers"))
+    apiFetch("/api/providers")
       .then((r) => r.json())
       .then((d) => {
         setProviders(d.providers ?? []);
@@ -39,7 +39,7 @@ export default function ProvidersPage() {
   const save = async () => {
     setSaving(true);
     setSaved(false);
-    await fetch(apiUrl("/api/providers"), {
+    await apiFetch("/api/providers", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ providers }),

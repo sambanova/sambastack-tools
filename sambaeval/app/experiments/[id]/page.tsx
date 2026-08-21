@@ -1,5 +1,5 @@
 "use client";
-import { apiUrl } from "@/app/lib/api";
+import { apiFetch, apiUrl } from "@/app/lib/api";
 
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -9,6 +9,7 @@ import ModelNameCombobox from "@/app/components/ModelNameCombobox";
 import ErrorsTable from "@/app/components/ErrorsTable";
 import type {
   Experiment,
+  Generator,
   LlmJudgeScorerDef,
   ModelConfig,
   PriceMap,
@@ -16,6 +17,7 @@ import type {
   ResultRow,
   RunErrors,
   RunMeta,
+  Visibility,
 } from "@/app/lib/types";
 import { computeCost, priceKey } from "@/app/lib/types";
 import {
@@ -24,6 +26,7 @@ import {
   rowsToRecord,
 } from "@/app/lib/kwargs";
 import InfoTooltip from "@/app/components/InfoTooltip";
+import { useAuth } from "@/app/components/AuthGate";
 
 const OUTPUT_GENERATOR_TOOLTIP =
   "Uses scripts/generators/default_generator.py if unspecified. If you would like to define custom behaviors like using the LLM output to invoke a tool, run a SQL query, or a whole agentic workflow to generate the final output, create a new script in scripts/generators/ that subclasses OutputGenerator from base.py and overrides the generate_output method (see sql_query_execution.py for an example). Set the path to your script in this field.";
@@ -167,10 +170,20 @@ export default function ExperimentPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const { user } = useAuth();
   const [exp, setExp] = useState<Experiment | null>(null);
   const [allProviders, setAllProviders] = useState<Provider[]>([]);
   const [scorers, setScorers] = useState<LlmJudgeScorerDef[]>([]);
+  // Admin-enabled generator catalog for the picker (GET /api/generators).
+  const [generators, setGenerators] = useState<Generator[]>([]);
   const [datasets, setDatasets] = useState<string[]>([]);
+  // Sharing UI state: `visSaving` guards the visibility POST; `shareBusy`
+  // guards the share-link POST; `shareCopied` flashes a confirmation after the
+  // URL lands on the clipboard.
+  const [visSaving, setVisSaving] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   const [datasetCount, setDatasetCount] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -279,45 +292,69 @@ export default function ExperimentPage({
   const runAbortRef = useRef<AbortController | null>(null);
 
   // Lazily fetch (and cache) the model list for a provider the first time it's
-  // referenced by a model row or selected from the provider dropdown.
-  const ensureModelsForProvider = useCallback((providerName: string) => {
-    if (!providerName || requestedProviders.current.has(providerName)) return;
-    requestedProviders.current.add(providerName);
-    setModelsLoading((cur) => ({ ...cur, [providerName]: true }));
-    fetch(apiUrl(`/api/providers/models?provider=${encodeURIComponent(providerName)}`))
-      .then((r) => r.json())
-      .then((d) => {
-        setModelsByProvider((cur) => ({
-          ...cur,
-          [providerName]: Array.isArray(d.models) ? d.models : [],
-        }));
-        if (d.pricing && typeof d.pricing === "object") {
-          setPricingByProvider((cur) => ({ ...cur, [providerName]: d.pricing }));
-        }
-        setModelsErrorByProvider((cur) => {
-          const next = { ...cur };
-          if (d.error) next[providerName] = String(d.error);
-          else delete next[providerName];
-          return next;
+  // referenced by a model row or selected from the provider dropdown. Pass
+  // `force` to re-fetch even if this provider was already requested (used
+  // when the provider dropdown changes, so the list is always current).
+  const fetchModelsForProvider = useCallback(
+    (providerName: string, force: boolean = false) => {
+      if (!providerName) return;
+      if (!force && requestedProviders.current.has(providerName)) return;
+      requestedProviders.current.add(providerName);
+      setModelsLoading((cur) => ({ ...cur, [providerName]: true }));
+      apiFetch(
+        `/api/providers/models?provider=${encodeURIComponent(providerName)}`,
+      )
+        .then((r) => r.json())
+        .then((d) => {
+          setModelsByProvider((cur) => ({
+            ...cur,
+            [providerName]: Array.isArray(d.models) ? d.models : [],
+          }));
+          if (d.pricing && typeof d.pricing === "object") {
+            setPricingByProvider((cur) => ({
+              ...cur,
+              [providerName]: d.pricing,
+            }));
+          }
+          setModelsErrorByProvider((cur) => {
+            const next = { ...cur };
+            if (d.error) next[providerName] = String(d.error);
+            else delete next[providerName];
+            return next;
+          });
+        })
+        .catch((err) => {
+          setModelsByProvider((cur) => ({ ...cur, [providerName]: [] }));
+          setModelsErrorByProvider((cur) => ({
+            ...cur,
+            [providerName]: err?.message
+              ? `Could not reach the model list: ${err.message}`
+              : "Could not reach the model list.",
+          }));
+        })
+        .finally(() => {
+          setModelsLoading((cur) => ({ ...cur, [providerName]: false }));
         });
-      })
-      .catch((err) => {
-        setModelsByProvider((cur) => ({ ...cur, [providerName]: [] }));
-        setModelsErrorByProvider((cur) => ({
-          ...cur,
-          [providerName]: err?.message
-            ? `Could not reach the model list: ${err.message}`
-            : "Could not reach the model list.",
-        }));
-      })
-      .finally(() => {
-        setModelsLoading((cur) => ({ ...cur, [providerName]: false }));
-      });
-  }, []);
+    },
+    [],
+  );
+
+  const ensureModelsForProvider = useCallback(
+    (providerName: string) => fetchModelsForProvider(providerName, false),
+    [fetchModelsForProvider],
+  );
+
+  // Always re-fetch, even if this provider's list was already loaded — used
+  // when the provider dropdown changes, so the list reflects any models
+  // added/removed on the provider side since the page loaded.
+  const refreshModelsForProvider = useCallback(
+    (providerName: string) => fetchModelsForProvider(providerName, true),
+    [fetchModelsForProvider],
+  );
 
   const fetchRuns = useCallback(async (): Promise<RunMeta[]> => {
     try {
-      const r = await fetch(apiUrl(`/api/experiments/${id}/runs`)).then((r) =>
+      const r = await apiFetch(`/api/experiments/${id}/runs`).then((r) =>
         r.json(),
       );
       const list: RunMeta[] = r.runs ?? [];
@@ -330,13 +367,16 @@ export default function ExperimentPage({
 
   useEffect(() => {
     (async () => {
-      const [eRes, pRes, sRes, dRes, rRes, prRes] = await Promise.all([
-        fetch(apiUrl(`/api/experiments/${id}`)).then((r) => r.json()),
-        fetch(apiUrl("/api/providers")).then((r) => r.json()),
-        fetch(apiUrl("/api/scorers")).then((r) => r.json()),
-        fetch(apiUrl("/api/datasets")).then((r) => r.json()),
-        fetch(apiUrl(`/api/experiments/${id}/results`)).then((r) => r.json()),
-        fetch(apiUrl("/api/pricing-defaults")).then((r) => r.json()),
+      const [eRes, pRes, sRes, dRes, rRes, prRes, gRes] = await Promise.all([
+        apiFetch(`/api/experiments/${id}`).then((r) => r.json()),
+        apiFetch("/api/providers").then((r) => r.json()),
+        apiFetch("/api/scorers").then((r) => r.json()),
+        apiFetch("/api/datasets").then((r) => r.json()),
+        apiFetch(`/api/experiments/${id}/results`).then((r) => r.json()),
+        apiFetch("/api/pricing-defaults").then((r) => r.json()),
+        apiFetch("/api/generators")
+          .then((r) => r.json())
+          .catch(() => ({ generators: [] })),
       ]);
       if (eRes.experiment) {
         const e = eRes.experiment as Experiment;
@@ -356,6 +396,7 @@ export default function ExperimentPage({
       setAllProviders(pRes.providers ?? []);
       setScorers(sRes.scorers ?? []);
       setDatasets(dRes.datasets ?? []);
+      setGenerators(gRes.generators ?? []);
       if (prRes.pricing && typeof prRes.pricing === "object") {
         setFileDefaults(prRes.pricing);
       }
@@ -394,10 +435,8 @@ export default function ExperimentPage({
       if (run) {
         setViewingRunId(run.run_id);
         try {
-          const r = await fetch(
-            apiUrl(
+          const r = await apiFetch(
               `/api/experiments/${id}/results?run_id=${encodeURIComponent(run.run_id)}`,
-            ),
           ).then((res) => res.json());
           setResults(r.results ?? null);
         } catch {
@@ -448,10 +487,8 @@ export default function ExperimentPage({
         return;
       }
       try {
-        const r = await fetch(
-          apiUrl(
+        const r = await apiFetch(
             `/api/experiments/${id}/errors?run_id=${encodeURIComponent(viewingRunId)}`,
-          ),
         ).then((res) => res.json());
         if (!cancelled) setErrors(r.errors ?? {});
       } catch {
@@ -474,8 +511,7 @@ export default function ExperimentPage({
         return;
       }
       try {
-        const d = await fetch(
-          apiUrl(`/api/datasets?name=${encodeURIComponent(selectedDataset)}&count=1`),
+        const d = await apiFetch(`/api/datasets?name=${encodeURIComponent(selectedDataset)}&count=1`,
         ).then((r) => r.json());
         if (!cancelled) {
           setDatasetCount(typeof d.count === "number" ? d.count : null);
@@ -556,6 +592,59 @@ export default function ExperimentPage({
 
   const update = (patch: Partial<Experiment>) =>
     setExp((prev) => (prev ? { ...prev, ...patch } : prev));
+
+  // Owner (or admin) may change who can see this experiment.
+  const changeVisibility = async (visibility: Visibility) => {
+    setVisSaving(true);
+    setShareError(null);
+    try {
+      const res = await apiFetch(`/api/experiments/${id}/visibility`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ visibility }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setShareError(d.error ?? `Failed to update visibility (${res.status})`);
+        return;
+      }
+      update({ visibility });
+    } finally {
+      setVisSaving(false);
+    }
+  };
+
+  // Generate (or reuse) a share token and copy the link to the clipboard.
+  // The backend also flips a private experiment to "link" as a side effect.
+  const copyShareLink = async () => {
+    setShareBusy(true);
+    setShareError(null);
+    setShareCopied(false);
+    try {
+      const res = await apiFetch(`/api/experiments/${id}/share`, {
+        method: "POST",
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.url) {
+        setShareError(d.error ?? `Failed to create share link (${res.status})`);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(d.url);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 2000);
+      } catch {
+        // Clipboard denied (e.g. insecure context) — surface the URL instead.
+        setShareError(d.url);
+      }
+      update({
+        share_token: d.share_token,
+        visibility: exp?.visibility === "private" ? "link" : exp?.visibility,
+      });
+    } finally {
+      setShareBusy(false);
+    }
+  };
 
   // Persist example_count only when it's a real override (a positive integer
   // below the dataset size). Empty / full-size / invalid → undefined = run all.
@@ -683,7 +772,7 @@ export default function ExperimentPage({
         return next;
       }),
     };
-    const res = await fetch(apiUrl(`/api/experiments/${id}`), {
+    const res = await apiFetch(`/api/experiments/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -776,7 +865,7 @@ export default function ExperimentPage({
     const abort = new AbortController();
     runAbortRef.current = abort;
     try {
-      const res = await fetch(apiUrl(`/api/experiments/${id}/run?${qs}`), {
+      const res = await apiFetch(`/api/experiments/${id}/run?${qs}`, {
         method: "POST",
         signal: abort.signal,
       });
@@ -843,20 +932,25 @@ export default function ExperimentPage({
     if (models && models.length > 0) qs.set("models", models.join(","));
     const abort = new AbortController();
     runAbortRef.current = abort;
-    const probe = await fetch(apiUrl(`/api/experiments/${id}/run?${qs}`), {
+    const probe = await apiFetch(`/api/experiments/${id}/run?${qs}`, {
       method: "POST",
       signal: abort.signal,
     });
+    // 409 on this endpoint means a resumable run exists. `probe.json()` has
+    // already read the body to completion, so there is nothing left to drain —
+    // calling probe.body.cancel() here would reject (the stream is locked by
+    // the read) and surface as an unhandled rejection.
     if (probe.status === 409) {
       const body = await probe.json();
-      // Drain the (empty) body so the connection closes cleanly.
-      try {
-        probe.body?.cancel?.();
-      } catch {
-        // ignore
+      if (body?.resumable) {
+        runAbortRef.current = null;
+        setPendingResume(body.resumable as RunMeta);
+        return;
       }
+      // Some other conflict (e.g. the run is already active) — report it
+      // rather than opening the resume prompt with nothing to resume.
       runAbortRef.current = null;
-      setPendingResume(body.resumable as RunMeta);
+      setRunError(body?.error || `Run failed (${probe.status})`);
       return;
     }
     if (!probe.ok || !probe.body) {
@@ -1033,8 +1127,7 @@ export default function ExperimentPage({
     setCancelling(true);
     try {
       // Tell the server to abort the run (best-effort: it may already be dead).
-      await fetch(
-        apiUrl(`/api/experiments/${id}/run/cancel?run_id=${encodeURIComponent(activeRunId)}`),
+      await apiFetch(`/api/experiments/${id}/run/cancel?run_id=${encodeURIComponent(activeRunId)}`,
         { method: "POST" },
       );
     } catch {
@@ -1056,8 +1149,7 @@ export default function ExperimentPage({
     // threads have drained.
     setPauseState("waiting");
     try {
-      await fetch(
-        apiUrl(`/api/experiments/${id}/run/pause?run_id=${encodeURIComponent(activeRunId)}`),
+      await apiFetch(`/api/experiments/${id}/run/pause?run_id=${encodeURIComponent(activeRunId)}`,
         { method: "POST" },
       );
     } catch {
@@ -1071,8 +1163,7 @@ export default function ExperimentPage({
     try {
       // Force the worker pool down so the pause doesn't block on in-flight
       // threads. Abandoned tasks write nothing and re-run on resume.
-      await fetch(
-        apiUrl(`/api/experiments/${id}/run/terminate?run_id=${encodeURIComponent(activeRunId)}`),
+      await apiFetch(`/api/experiments/${id}/run/terminate?run_id=${encodeURIComponent(activeRunId)}`,
         { method: "POST" },
       );
     } catch {
@@ -1086,8 +1177,7 @@ export default function ExperimentPage({
 
   const viewRun = async (runId: string) => {
     if (running) return;
-    const r = await fetch(
-      apiUrl(`/api/experiments/${id}/results?run_id=${encodeURIComponent(runId)}`),
+    const r = await apiFetch(`/api/experiments/${id}/results?run_id=${encodeURIComponent(runId)}`,
     ).then((r) => r.json());
     setResults(r.results ?? null);
     setViewingRunId(r.runId ?? runId);
@@ -1097,14 +1187,13 @@ export default function ExperimentPage({
     if (running) return;
     if (
       !window.confirm(
-        "Delete this run's results? This permanently removes its CSV file and cannot be undone.",
+        "Are you sure you want to delete this run's results? This action cannot be undone.",
       )
     ) {
       return;
     }
     setRunError(null);
-    const res = await fetch(
-      apiUrl(`/api/experiments/${id}/runs?run_id=${encodeURIComponent(runId)}`),
+    const res = await apiFetch(`/api/experiments/${id}/runs?run_id=${encodeURIComponent(runId)}`,
       { method: "DELETE" },
     );
     if (!res.ok) {
@@ -1144,7 +1233,7 @@ export default function ExperimentPage({
     setMergeError(null);
     setMergeConflicts(null);
     try {
-      const res = await fetch(apiUrl(`/api/experiments/${id}/runs/merge`), {
+      const res = await apiFetch(`/api/experiments/${id}/runs/merge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1568,6 +1657,25 @@ export default function ExperimentPage({
             Output generator
             <InfoTooltip text={OUTPUT_GENERATOR_TOOLTIP} />
           </label>
+          {generators.length > 0 && (
+            <select
+              value={
+                generators.some((g) => g.key === exp.output_generator)
+                  ? exp.output_generator
+                  : ""
+              }
+              onChange={(e) => update({ output_generator: e.target.value })}
+              className="mb-2"
+            >
+              <option value="">— default / custom (set path below) —</option>
+              {generators.map((g) => (
+                <option key={g.key} value={g.key}>
+                  {g.display_name}
+                  {g.requires_sandbox ? " (sandbox)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             value={exp.output_generator ?? ""}
             onChange={(e) => update({ output_generator: e.target.value })}
@@ -1589,21 +1697,51 @@ export default function ExperimentPage({
         </div>
       </section>
 
+      {(exp.is_owner || user.is_admin) && (
+        <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
+          <h2 className="font-medium mb-3">Sharing</h2>
+          <div className="flex flex-wrap items-center gap-4">
+            <div>
+              <label className="text-xs text-[var(--muted)] block mb-1">
+                Visibility
+              </label>
+              <select
+                value={exp.visibility ?? "private"}
+                onChange={(e) => changeVisibility(e.target.value as Visibility)}
+                disabled={visSaving}
+                style={{ width: "12rem" }}
+              >
+                <option value="private">Private (only me)</option>
+                <option value="link">Link (anyone with the link)</option>
+                <option value="public">Public (all logged-in users)</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-3 pt-5">
+              <button
+                onClick={copyShareLink}
+                disabled={shareBusy}
+                className="bg-[var(--panel-2)] border border-[var(--border)] hover:border-[var(--accent)] hover:text-[var(--accent)] px-3 py-2 rounded-md text-sm disabled:opacity-50"
+              >
+                {shareBusy ? "Generating…" : "Copy share link"}
+              </button>
+              {shareCopied && (
+                <span className="text-[var(--success)] text-sm">
+                  Link copied
+                </span>
+              )}
+            </div>
+          </div>
+          {shareError && (
+            <p className="text-xs text-[var(--danger)] mt-2 break-all">
+              {shareError}
+            </p>
+          )}
+        </section>
+      )}
+
       <section className="bg-[var(--panel)] border border-[var(--border)] rounded-lg p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-medium">Models</h2>
-          <button
-            onClick={addModel}
-            className="text-sm bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-3 py-1.5 rounded-md"
-            disabled={allProviders.length === 0}
-            title={
-              allProviders.length === 0
-                ? "Add a provider in the Providers page first"
-                : undefined
-            }
-          >
-            + Add Model
-          </button>
         </div>
         {allProviders.length === 0 && (
           <p className="text-[var(--muted)] text-sm mb-2">
@@ -1676,7 +1814,7 @@ export default function ExperimentPage({
                       // previous provider filters the <datalist> down to
                       // nothing, hiding the new provider's models.
                       updateModel(i, { provider_name: e.target.value, name: "" });
-                      ensureModelsForProvider(e.target.value);
+                      refreshModelsForProvider(e.target.value);
                     }}
                   >
                     <option value="">— select —</option>
@@ -1790,6 +1928,20 @@ export default function ExperimentPage({
               </div>
             </div>
           ))}
+        </div>
+        <div className="flex justify-end mt-3">
+          <button
+            onClick={addModel}
+            className="text-sm bg-[var(--panel-2)] border border-[var(--border)] hover:bg-[var(--panel)] px-3 py-1.5 rounded-md"
+            disabled={allProviders.length === 0}
+            title={
+              allProviders.length === 0
+                ? "Add a provider in the Providers page first"
+                : undefined
+            }
+          >
+            + Add Model
+          </button>
         </div>
       </section>
 
@@ -2313,6 +2465,7 @@ export default function ExperimentPage({
                             ? "text-[var(--warning)]"
                             : "text-[var(--accent)]";
                     return (
+                      <>
                       <tr className="border-b border-[var(--border)]">
                         <td className="px-3 py-2">
                           {formatTimestamp(r.started_at)}
@@ -2346,6 +2499,20 @@ export default function ExperimentPage({
                           </button>
                         </td>
                       </tr>
+                      {/* A run that failed as a whole (e.g. the code-exec
+                          sandbox could not be prepared) never produces per-task
+                          error rows, so its reason is shown here. */}
+                      {r.error && (
+                        <tr>
+                          <td
+                            colSpan={8}
+                            className="px-3 py-2 text-xs font-mono whitespace-pre-wrap text-[var(--danger)] border-b border-[var(--border)]"
+                          >
+                            {r.error}
+                          </td>
+                        </tr>
+                      )}
+                      </>
                     );
                   })()}
                 </tbody>
