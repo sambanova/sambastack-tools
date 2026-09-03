@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { BatchingConfig, ModelProfilesCache } from '../../types/bundle';
+import { ensureAppDataDir } from '../../utils/ensure-app-data-dir';
 
 /**
  * Mirrors `generate-checkpoint-mapping/route.ts`'s app-config.json ->
@@ -114,7 +115,7 @@ export async function POST() {
     }
 
     // Write the generated cache to app/data/model_profiles.json
-    const outputPath = path.join(process.cwd(), 'app/data/model_profiles.json');
+    const outputPath = path.join(ensureAppDataDir(), 'model_profiles.json');
     await fs.writeFile(outputPath, JSON.stringify(modelProfiles, null, 2));
 
     return NextResponse.json({

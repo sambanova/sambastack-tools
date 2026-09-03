@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { ensureAppDataDir } from './ensure-app-data-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -271,7 +272,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
     console.log(`[PEF Generator] ✓ Processed ${processedCount}/${items.length} PEFs`);
 
     // Write to file
-    const outputPath = path.join(process.cwd(), 'app', 'data', 'pef_configs.json');
+    const outputPath = path.join(ensureAppDataDir(), 'pef_configs.json');
     writeFileSync(outputPath, JSON.stringify(configs, null, 2), 'utf-8');
 
     const configCount = Object.keys(configs).length;

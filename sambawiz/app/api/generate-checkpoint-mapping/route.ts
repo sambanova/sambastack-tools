@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
 import type { CheckpointMappingV3 } from '../../types/bundle';
+import { ensureAppDataDir } from '../../utils/ensure-app-data-dir';
 
 interface KubeconfigEntry {
   file: string;
@@ -130,7 +131,7 @@ export async function POST() {
     }
 
     // Write the generated mapping to app/data/checkpoint_mapping.json
-    const outputPath = path.join(process.cwd(), 'app/data/checkpoint_mapping.json');
+    const outputPath = path.join(ensureAppDataDir(), 'checkpoint_mapping.json');
     await fs.writeFile(outputPath, JSON.stringify(checkpointMapping, null, 2));
 
     // Re-run PEF config generation (still needed for the PEF SS/BS/version cache).
