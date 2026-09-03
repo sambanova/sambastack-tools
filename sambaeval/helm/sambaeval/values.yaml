@@ -7,10 +7,12 @@ fullnameOverride: ""
 
 image:
   # Makefile injects the real registry/repo/tag with --set at deploy time.
+  # Shared "oci-us-west2-starerkits" AR repo (sn_iac CPHD-1195) — SambaEval
+  # doesn't get its own repo, hence the sambaeval- image-name prefix.
   backend:
-    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/sambaeval/backend
+    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/oci-us-west2-starerkits/sambaeval-backend
   frontend:
-    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/sambaeval/frontend
+    repository: us-west2-docker.pkg.dev/acp-starterkits-development-57/oci-us-west2-starerkits/sambaeval-frontend
   tag: ""                    # defaults to Chart.appVersion when empty
   pullPolicy: IfNotPresent
 

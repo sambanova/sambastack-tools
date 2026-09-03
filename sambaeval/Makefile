@@ -17,11 +17,13 @@ LOCAL_S3_ENV  := S3_ENDPOINT_URL=http://localhost:9100 S3_BUCKET=sambaeval S3_AC
 # Image tag defaults to the short git SHA (samba-chat convention).
 TAG ?= $(shell git rev-parse --short HEAD)
 
-# Artifact Registry (GCP). Adjust REPO to the provisioned AR repository.
+# Artifact Registry (GCP). REPO is the shared "oci-us-west2-starerkits" repo
+# (sn_iac CPHD-1195) — SambaEval does not get its own repo, so images are named
+# sambaeval-{backend,frontend} to avoid colliding with other apps sharing it.
 REGISTRY      ?= us-west2-docker.pkg.dev/acp-starterkits-development-57
-REPO          ?= sambaeval
-BACKEND_IMAGE ?= $(REGISTRY)/$(REPO)/backend
-FRONTEND_IMAGE?= $(REGISTRY)/$(REPO)/frontend
+REPO          ?= oci-us-west2-starerkits
+BACKEND_IMAGE ?= $(REGISTRY)/$(REPO)/sambaeval-backend
+FRONTEND_IMAGE?= $(REGISTRY)/$(REPO)/sambaeval-frontend
 PLATFORM      ?= linux/amd64
 
 # Helm / cluster
