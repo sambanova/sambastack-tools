@@ -36,6 +36,12 @@ The `sambastack-tools` repository contains open-source tools designed to acceler
 <td width="20%">Web Application</td>
 </tr>
 
+<tr>
+<td width="20%"><a href="airgap/README.md">Air-Gap Utilities</a></td>
+<td width="60%">Scripts for operating SambaStack in air-gapped environments. Stage Helm chart images into a private Harbor registry and download SambaStack ML bundle artifacts (PEFs and checkpoints) from GCS.</td>
+<td width="20%">CLI Scripts</td>
+</tr>
+
 </tbody>
 </table>
 
