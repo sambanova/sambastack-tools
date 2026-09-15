@@ -773,6 +773,36 @@ describe('ModelSelection (V3)', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('blocks Validate on a bundle name kubectl would reject, naming the offending character', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+      [embeddingHighThroughputProfile.metadata.name]: toProfileEntry(embeddingHighThroughputProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name, mockEmbeddingModel.spec.name]);
+    await waitFor(() => expect(screen.getByText('4. Save & Validate Selections')).toBeInTheDocument());
+
+    const nameField = screen.getByLabelText('Bundle Name');
+    await user.clear(nameField);
+    await user.type(nameField, 'example_bundle');
+
+    // The underscore is flagged in the field, and neither action can reach the
+    // API server with a name it will reject.
+    expect(await screen.findByText(/cannot contain "_"/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Validate' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await user.clear(nameField);
+    await user.type(nameField, 'example-bundle');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Validate' })).toBeEnabled());
+  });
+
   it('forces the bundle route (no quick buttons) for a single spec-decoding model', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockSpecDecodingTargetModel.spec.name]: toCheckpointEntry(mockSpecDecodingTargetModel),
