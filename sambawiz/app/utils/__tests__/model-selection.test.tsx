@@ -773,6 +773,65 @@ describe('ModelSelection (V3)', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('keeps step 4 and its buttons on screen while a multi-arch model is still waiting on its Architecture pick', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockMultiArchModel.spec.name]: toCheckpointEntry(mockMultiArchModel),
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [maverickV1Profile.metadata.name]: toProfileEntry(maverickV1Profile),
+      [maverickV2Profile.metadata.name]: toProfileEntry(maverickV2Profile),
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockMultiArchModel.spec.name, mockSpecDecodingDraftModel.spec.name]);
+
+    // The multi-arch model has no arch yet, so no bundle YAML can be generated.
+    // Step 4 still renders, says what is missing, and keeps its buttons.
+    expect(await screen.findByText('4. Save & Validate Selections')).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(`still needs architecture for ${mockMultiArchModel.spec.name}`))
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Validate' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create Deployment' })).toBeDisabled();
+
+    // Picking the arch resolves the bundle and clears the prompt.
+    const multiArchRow = await screen.findByTestId(`model-row-${mockMultiArchModel.spec.name}`);
+    await user.click(within(multiArchRow).getByLabelText('Architecture'));
+    await user.click(await screen.findByRole('option', { name: /llama-4-maverick \(stable\)/ }));
+
+    await waitFor(() => expect(getYamlText()).toContain('kind: ModelBundle'));
+    expect(screen.queryByText(/still needs architecture/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the single-model action bar on screen (Create Deployment disabled) until the model resolves', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockMultiArchModel.spec.name]: toCheckpointEntry(mockMultiArchModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [maverickV1Profile.metadata.name]: toProfileEntry(maverickV1Profile),
+      [maverickV2Profile.metadata.name]: toProfileEntry(maverickV2Profile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockMultiArchModel.spec.name]);
+
+    expect(await screen.findByRole('button', { name: 'Advanced Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create Deployment' })).toBeDisabled();
+    expect(screen.getByText(/Finish selecting the architecture above/)).toBeInTheDocument();
+
+    const row = await screen.findByTestId(`model-row-${mockMultiArchModel.spec.name}`);
+    await user.click(within(row).getByLabelText('Architecture'));
+    await user.click(await screen.findByRole('option', { name: /llama-4-maverick \(stable\)/ }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create Deployment' })).toBeEnabled());
+    expect(screen.queryByText(/Finish selecting the architecture above/)).not.toBeInTheDocument();
+  });
+
   it('forces the bundle route (no quick buttons) for a single spec-decoding model', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockSpecDecodingTargetModel.spec.name]: toCheckpointEntry(mockSpecDecodingTargetModel),

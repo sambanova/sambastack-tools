@@ -1106,6 +1106,10 @@ export default function ModelSelection() {
   // route (Steps 3 & 4). Steps 3 & 4 also show for multi-model or once the user
   // opts into Advanced Settings.
   const quickDeployAvailable = isSingleModel && !!singleModelSelection && !singleIsSpecDecoding;
+  // The bar itself stays on screen while the single model is still unresolved
+  // (e.g. a multi-arch model waiting on its Architecture dropdown), with
+  // "Create Deployment" disabled -- the buttons used to disappear entirely.
+  const quickDeployBarVisible = isSingleModel && !singleIsSpecDecoding;
   const showAdvancedSteps = advancedMode || !isSingleModel || singleIsSpecDecoding;
 
   // Quick "Deploy Model": hand the model ref + profile name to the Model
@@ -1121,6 +1125,36 @@ export default function ModelSelection() {
     router.push(
       `/model-deployment?modelPath=${encodeURIComponent(modelPath)}&profileName=${encodeURIComponent(profileName)}`
     );
+  };
+
+  // Selected models (top-level and draft rows alike) still missing an
+  // architecture or a profile, in selection order. `modelSelections` is
+  // all-or-nothing, so this is what the user has to finish before a bundle can
+  // be generated -- named here so step 4 can say so instead of vanishing.
+  const incompleteSelections = useMemo(() => {
+    return selection.selectedModels
+      .map((displayName) => {
+        const avail = availableByDisplayName[displayName];
+        const state = selection.modelStates[displayName];
+        if (!avail || !state) return null;
+        const arch = avail.archs.length === 1 ? avail.archs[0].arch : state.arch;
+        if (!arch) return { displayName, missing: 'architecture' };
+        const archEntry = avail.archs.find((a) => a.arch === arch);
+        const profile = archEntry?.matchingProfiles.find((p) => p.metadata.name === state.profileName);
+        if (!profile) return { displayName, missing: 'model profile' };
+        return null;
+      })
+      .filter((entry): entry is { displayName: string; missing: string } => entry !== null);
+  }, [selection, availableByDisplayName]);
+
+  // Row elements, so the "Finish selecting" prompt can scroll the user to the
+  // field that is actually missing rather than leaving them to hunt for it.
+  const modelRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const scrollToFirstIncomplete = () => {
+    const first = incompleteSelections[0];
+    if (!first) return;
+    modelRowRefs.current[first.displayName]?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   };
 
   // Models with a resolved profile, in selection order, for the override editor (Step 3).
@@ -1220,7 +1254,13 @@ export default function ModelSelection() {
               const showSpecDecoding = selectedProfile ? isSpecDecodingProfile(selectedProfile) : false;
 
               return (
-                <Box key={displayName} sx={{ mb: 3 }}>
+                <Box
+                  key={displayName}
+                  ref={(el: HTMLDivElement | null) => {
+                    modelRowRefs.current[displayName] = el;
+                  }}
+                  sx={{ mb: 3 }}
+                >
                   <ModelProfileRow
                     displayName={displayName}
                     avail={avail}
@@ -1264,7 +1304,12 @@ export default function ModelSelection() {
                     const draftState = selection.modelStates[draftDisplayName];
                     if (!draftAvail || !draftState) return null;
                     return (
-                      <Box sx={{ mt: 2 }}>
+                      <Box
+                        ref={(el: HTMLDivElement | null) => {
+                          modelRowRefs.current[draftDisplayName] = el;
+                        }}
+                        sx={{ mt: 2 }}
+                      >
                         <ModelProfileRow
                           displayName={draftDisplayName}
                           avail={draftAvail}
@@ -1285,25 +1330,41 @@ export default function ModelSelection() {
 
           {/* Single-model action bar: quick model+profile deploy, or drop into
               Advanced Settings (Steps 3 & 4, the bundle route). */}
-          {quickDeployAvailable && !advancedMode && (
-            <Box sx={{ mt: 1, display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
-              <Button
-                variant="outlined"
-                color="primary"
-                size="large"
-                onClick={() => setAdvancedMode(true)}
-              >
-                Advanced Settings
-              </Button>
-              <Button
-                variant="contained"
-                color="primary"
-                size="large"
-                startIcon={<RocketLaunchIcon />}
-                onClick={handleDeployModel}
-              >
-                Create Deployment
-              </Button>
+          {quickDeployBarVisible && !advancedMode && (
+            <Box sx={{ mt: 1 }}>
+              {!quickDeployAvailable && (
+                <Alert
+                  severity="info"
+                  sx={{ mb: 2 }}
+                  action={
+                    <Button color="inherit" size="small" onClick={scrollToFirstIncomplete}>
+                      Show me
+                    </Button>
+                  }
+                >
+                  {`Finish selecting the ${incompleteSelections[0]?.missing ?? 'model profile'} above to deploy this model.`}
+                </Alert>
+              )}
+              <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  size="large"
+                  onClick={() => setAdvancedMode(true)}
+                >
+                  Advanced Settings
+                </Button>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  size="large"
+                  startIcon={<RocketLaunchIcon />}
+                  onClick={handleDeployModel}
+                  disabled={!quickDeployAvailable}
+                >
+                  Create Deployment
+                </Button>
+              </Box>
             </Box>
           )}
         </Paper>
@@ -1378,7 +1439,7 @@ export default function ModelSelection() {
       )}
 
       {/* Step 4: ModelBundle YAML */}
-      {showAdvancedSteps && modelSelections && modelSelections.length > 0 && (
+      {showAdvancedSteps && selection.selectedModels.length > 0 && (
         <Paper elevation={0} sx={{ p: 3, minWidth: 0, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
             4. Save & Validate Selections
@@ -1401,6 +1462,22 @@ export default function ModelSelection() {
               </Typography>
             )}
           </Box>
+
+          {incompleteSelections.length > 0 && (
+            <Alert
+              severity="info"
+              sx={{ mb: 2 }}
+              action={
+                <Button color="inherit" size="small" onClick={scrollToFirstIncomplete}>
+                  Show me
+                </Button>
+              }
+            >
+              {`No bundle YAML yet: still needs ${incompleteSelections
+                .map((entry) => `${entry.missing} for ${entry.displayName}`)
+                .join(', ')}.`}
+            </Alert>
+          )}
 
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
