@@ -11,6 +11,11 @@ jest.mock('fs', () => ({
     readFile: jest.fn(),
     writeFile: jest.fn(),
   },
+  // `ensureAppDataDir` (called before the route writes its output) uses the
+  // synchronous API, so the mock has to cover it too — app/data already
+  // exists as far as these tests are concerned.
+  existsSync: jest.fn(() => true),
+  mkdirSync: jest.fn(),
 }));
 
 // Mock child_process
