@@ -1379,7 +1379,7 @@ export default function ModelSelection() {
 
       {/* Step 4: ModelBundle YAML */}
       {showAdvancedSteps && modelSelections && modelSelections.length > 0 && (
-        <Paper elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+        <Paper elevation={0} sx={{ p: 3, minWidth: 0, border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
           <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
             4. Save & Validate Selections
           </Typography>
@@ -1457,6 +1457,7 @@ export default function ModelSelection() {
                   </Typography>
                   <Box
                     component="pre"
+                    data-testid="apply-output"
                     sx={{
                       p: 1.5,
                       bgcolor: 'rgba(0, 0, 0, 0.05)',
@@ -1464,6 +1465,12 @@ export default function ModelSelection() {
                       fontSize: '0.75rem',
                       overflow: 'auto',
                       maxHeight: '150px',
+                      // kubectl prints its errors as one long line. Without
+                      // wrapping, the <pre> stretches the whole step past the
+                      // viewport and the right-aligned action buttons below it
+                      // scroll out of sight.
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
                     }}
                   >
                     {validationResult.applyOutput}
