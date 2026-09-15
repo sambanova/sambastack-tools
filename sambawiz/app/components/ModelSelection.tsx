@@ -66,6 +66,7 @@ import {
   type AvailableModelArch,
 } from '../utils/model-availability';
 import { parseModelRef, type ParsedModelBundleState } from '../utils/parse-bundle-yaml';
+import { validateResourceName, bundleNameLengthWarning } from '../utils/resource-names';
 import DocumentationPanel from './DocumentationPanel';
 import GaugeChart from 'react-gauge-chart';
 
@@ -1108,6 +1109,13 @@ export default function ModelSelection() {
   const quickDeployAvailable = isSingleModel && !!singleModelSelection && !singleIsSpecDecoding;
   const showAdvancedSteps = advancedMode || !isSingleModel || singleIsSpecDecoding;
 
+  // The API server rejects a `metadata.name` that is not a lowercase RFC 1123
+  // subdomain, but only once `kubectl apply` runs. Check the same rule here so
+  // an underscore (the common case) is caught in the field instead of coming
+  // back as an apply failure.
+  const bundleNameError = bundleName ? validateResourceName(bundleName) : null;
+  const bundleNameLengthNote = bundleNameLengthWarning(bundleName);
+
   // Quick "Deploy Model": hand the model ref + profile name to the Model
   // Deployment page, which generates the inline `spec.models` deployment.
   const handleDeployModel = () => {
@@ -1391,13 +1399,14 @@ export default function ModelSelection() {
               label="Bundle Name"
               value={bundleName}
               onChange={(e) => setBundleName(e.target.value)}
-              helperText="The bundle name will be used to save your selections in a YAML file"
+              error={!!bundleNameError}
+              helperText={bundleNameError ?? 'The bundle name will be used to save your selections in a YAML file'}
               variant="outlined"
               size="small"
             />
-            {bundleName && bundleName !== bundleName.toLowerCase() && (
-              <Typography variant="caption" sx={{ color: 'error.main', display: 'block', mt: 0.5 }}>
-                Warning: Bundle name should be in lowercase
+            {!bundleNameError && bundleNameLengthNote && (
+              <Typography variant="caption" sx={{ color: 'warning.main', display: 'block', mt: 0.5 }}>
+                Warning: {bundleNameLengthNote}
               </Typography>
             )}
           </Box>
@@ -1612,7 +1621,7 @@ export default function ModelSelection() {
               color="primary"
               size="large"
               onClick={handleValidate}
-              disabled={isValidating || !generatedYaml}
+              disabled={isValidating || !generatedYaml || !!bundleNameError}
               startIcon={isValidating ? <CircularProgress size={20} /> : null}
             >
               {isValidating ? 'Validating...' : 'Validate'}
@@ -1622,7 +1631,7 @@ export default function ModelSelection() {
               color="primary"
               size="large"
               onClick={handleSaveClick}
-              disabled={isSaving || !generatedYaml || !bundleName}
+              disabled={isSaving || !generatedYaml || !bundleName || !!bundleNameError}
               startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
             >
               {isSaving ? 'Saving...' : 'Save'}
