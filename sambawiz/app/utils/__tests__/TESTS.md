@@ -75,7 +75,7 @@ This test suite follows these principles:
 
 ### Model Selection Page (V3)
 
-**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 19
+**File:** [model-selection.test.tsx](model-selection.test.tsx) · **Component:** `ModelSelection` (formerly `BundleForm`) · **Tests:** 20
 
 Real UI-behavior tests for the V3 Model Selection flow (the old suite was a single API-integration
 test). Drives the full flow: pick models → pick one profile per model → override batching → wire spec
@@ -101,6 +101,7 @@ decoding → observe the generated `ModelBundle` YAML.
 | applies an app-config checkpoint_overrides version to both the deploy modelPath and the bundle YAML | A pinned `checkpoint_overrides` version flows into both the quick-deploy `modelPath` (`crname:2`) and the Advanced Settings bundle YAML (`model: …:2`), not the latest |
 | "Advanced Settings" reveals Steps 3 & 4 and hides the quick-deploy buttons (single model) | Clicking "Advanced Settings" shows Step 3 (Advanced Options) and Step 4 (Save & Validate), removes the quick action bar, and doesn't navigate |
 | keeps the bundle route (no quick buttons) when multiple models are selected | Selecting >1 model shows Steps 3 & 4 directly with no single-model quick action bar |
+| wraps the kubectl apply output so a failed validation cannot push the action buttons off-screen | A one-line `kubectl` rejection of an invalid `metadata.name` renders wrapped (`white-space: pre-wrap`), so the output block cannot stretch Step 4 past the viewport and carry its right-aligned Validate/Save buttons out of view |
 | forces the bundle route (no quick buttons) for a single spec-decoding model | A single spec-decoding model (needs a target+draft pair) is forced to Steps 3 & 4 with no quick action bar |
 
 **Note:** the draft-model `Select` uses a proper `InputLabel`+`labelId` (matching the arch `Select`) so

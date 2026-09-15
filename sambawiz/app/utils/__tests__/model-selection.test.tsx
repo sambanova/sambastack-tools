@@ -735,6 +735,44 @@ describe('ModelSelection (V3)', () => {
     expect(screen.queryByRole('button', { name: 'Advanced Settings' })).not.toBeInTheDocument();
   });
 
+  it('wraps the kubectl apply output so a failed validation cannot push the action buttons off-screen', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+      [embeddingHighThroughputProfile.metadata.name]: toProfileEntry(embeddingHighThroughputProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name, mockEmbeddingModel.spec.name]);
+    await waitFor(() => expect(screen.getByText('4. Save & Validate Selections')).toBeInTheDocument());
+
+    // kubectl rejects an invalid metadata.name on one very long line.
+    const applyError =
+      'The ModelBundle "example_bundle" is invalid: metadata.name: Invalid value: "example_bundle": ' +
+      'a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, \'-\' or ' +
+      '\'.\', and must start and end with an alphanumeric character';
+    (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      if (url === '/api/validate') {
+        return Promise.resolve({ ok: false, json: async () => ({ error: 'kubectl apply failed', applyOutput: applyError }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+
+    const output = await screen.findByTestId('apply-output');
+    expect(output).toHaveTextContent('must consist of lower case alphanumeric characters');
+    // The long line has to wrap: an unwrapped <pre> widens the step past the
+    // viewport, taking the right-aligned buttons with it.
+    expect(window.getComputedStyle(output).whiteSpace).toBe('pre-wrap');
+    expect(screen.getByRole('button', { name: 'Validate' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  });
+
   it('forces the bundle route (no quick buttons) for a single spec-decoding model', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockSpecDecodingTargetModel.spec.name]: toCheckpointEntry(mockSpecDecodingTargetModel),
