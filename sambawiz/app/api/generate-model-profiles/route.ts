@@ -4,6 +4,11 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type { BatchingConfig, ModelProfilesCache } from '../../types/bundle';
 import { ensureAppDataDir } from '../../utils/ensure-app-data-dir';
+import {
+  validateModelProfilesCache,
+  type BatchingSource,
+  type ModelProfilesCacheMeta,
+} from '../../utils/validate-model-profiles';
 
 /**
  * Mirrors `generate-checkpoint-mapping/route.ts`'s app-config.json ->
@@ -99,6 +104,7 @@ export async function POST() {
 
     const profilesData: KubectlOutput = JSON.parse(kubectlOutput);
     const modelProfiles: ModelProfilesCache = {};
+    const batchingSource: Record<string, BatchingSource> = {};
 
     for (const item of profilesData.items) {
       const profileName = item.metadata?.name;
@@ -112,15 +118,35 @@ export async function POST() {
         batchingConfig: item.spec.defaultBatchingConfig ?? item.status?.batchingConfig ?? {},
         pefs: item.spec.pefs ?? [],
       };
+      // The resolved batchingConfig alone cannot say whether it was declared, published
+      // by the operator, or absent. Record which one, so a later comparison can.
+      batchingSource[profileName] = item.spec.defaultBatchingConfig
+        ? 'spec.defaultBatchingConfig'
+        : item.status?.batchingConfig
+          ? 'status.batchingConfig'
+          : 'none';
     }
 
     // Write the generated cache to app/data/model_profiles.json
-    const outputPath = path.join(ensureAppDataDir(), 'model_profiles.json');
-    await fs.writeFile(outputPath, JSON.stringify(modelProfiles, null, 2));
+    const dataDir = ensureAppDataDir();
+    await fs.writeFile(path.join(dataDir, 'model_profiles.json'), JSON.stringify(modelProfiles, null, 2));
+
+    // The cache alone does not say which cluster it came from, so a bundle can be
+    // built against one cluster's profiles and applied to another.
+    const meta: ModelProfilesCacheMeta = {
+      kubeconfig: currentEnv ?? '',
+      namespace,
+      generatedAt: new Date().toISOString(),
+      batchingSource,
+    };
+    await fs.writeFile(path.join(dataDir, 'model_profiles.meta.json'), JSON.stringify(meta, null, 2));
+
+    const issues = validateModelProfilesCache(modelProfiles);
 
     return NextResponse.json({
       success: true,
       count: Object.keys(modelProfiles).length,
+      issues,
     });
   } catch (error) {
     console.error('Error generating model profiles:', error);

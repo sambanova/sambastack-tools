@@ -56,10 +56,12 @@ import {
   getEffectiveBatchingConfig,
   getDisplayName,
   isSpecDecodingProfile,
-  generateModelBundleYaml,
+  generateModelBundle,
+  type DroppedSelection,
   formatModelRefLatest,
   parseTierKey,
 } from '../utils/bundle-yaml-generator';
+import { describeDrift, type ProfileIssue } from '../utils/validate-model-profiles';
 import {
   getAvailableModels,
   type AvailableModel,
@@ -81,7 +83,8 @@ interface PerModelState {
   arch?: string;
   profileName?: string;
   expanded: boolean;
-  override: BatchingConfig;
+  /** Absent means the profile default applies. An empty object would drop the model. */
+  override?: BatchingConfig;
   /** Advanced Options "Swappable" toggle. Defaults to true (undefined is treated as true); only `false` is emitted to the YAML. */
   swappable?: boolean;
   /** 'skip' or the display name of the chosen draft model (only meaningful when the selected profile is spec-decoding). */
@@ -96,7 +99,7 @@ interface BuilderSelectionState {
 }
 
 function createEmptyState(): PerModelState {
-  return { expanded: true, override: {} };
+  return { expanded: true };
 }
 
 /** Resolves the (arch, matching profiles) auto-select/collapse state once an arch is known. */
@@ -112,7 +115,7 @@ function resolveAutoProfileState(avail: AvailableModel, arch: string): PerModelS
       override: getEffectiveBatchingConfig(profile),
     };
   }
-  return { arch, expanded: true, override: {} };
+  return { arch, expanded: true };
 }
 
 /** Initial state for a newly-selected model: single-arch models resolve immediately, multi-arch models wait on the arch dropdown. */
@@ -528,6 +531,10 @@ export default function ModelSelection() {
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [copiedToClipboard, setCopiedToClipboard] = useState<boolean>(false);
   const [overrideExpanded, setOverrideExpanded] = useState<boolean>(false);
+  // Models the generator removed from the bundle. Shown next to the YAML preview.
+  const [droppedSelections, setDroppedSelections] = useState<DroppedSelection[]>([]);
+  // Difference between the cached model profiles and the cluster, checked before applying.
+  const [profileDriftNote, setProfileDriftNote] = useState<string | null>(null);
   // Single-model flow: once a (non-spec-decoding) profile is picked we offer
   // "Deploy Model" (quick model+profile deploy) and "Advanced Settings". Clicking
   // "Advanced Settings" flips this and reveals Steps 3 & 4 (forcing the bundle
@@ -669,9 +676,13 @@ export default function ModelSelection() {
   }, [availableModels]);
 
   // Apply a pending "load existing bundle" event once the caches it depends on are ready.
+  // The load resolves each entry against both caches, so it waits for both. Running
+  // with an empty profile cache leaves every profile unresolved and silently strips
+  // the batching config the entry should have kept.
   useEffect(() => {
     if (!pendingLoad) return;
     if (Object.keys(checkpointMapping).length === 0) return;
+    if (Object.keys(modelProfiles).length === 0) return;
 
     const parsed = pendingLoad;
     isLoadingFromSavedState.current = true;
@@ -717,7 +728,7 @@ export default function ModelSelection() {
         arch: resolvedArch,
         profileName: entry.profile,
         expanded: false,
-        override: entry.batchingConfig ?? (profile ? getEffectiveBatchingConfig(profile) : {}),
+        override: entry.batchingConfig ?? (profile ? getEffectiveBatchingConfig(profile) : undefined),
         swappable: entry.modelSettings?.swappable,
         draftForDisplayName: draftCrnameSet.has(crname) ? byCrname[targetCrnameForDraft[crname]] : undefined,
       };
@@ -741,7 +752,7 @@ export default function ModelSelection() {
     }, 100);
     // availableByDisplayName / modelProfiles are read at apply-time only (not meant to re-trigger this effect on every cache tick)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingLoad, checkpointMapping]);
+  }, [pendingLoad, checkpointMapping, modelProfiles]);
 
   // ---------------------------------------------------------------------
   // Selection handlers
@@ -936,10 +947,13 @@ export default function ModelSelection() {
     }
 
     try {
-      setGeneratedYaml(generateModelBundleYaml(bundleName, modelSelections));
+      const { yaml, dropped } = generateModelBundle(bundleName, modelSelections);
+      setGeneratedYaml(yaml);
+      setDroppedSelections(dropped);
     } catch (error) {
       console.error('Failed to generate ModelBundle YAML:', error);
       setGeneratedYaml('');
+      setDroppedSelections([]);
     }
   }, [modelSelections, bundleName]);
 
@@ -960,6 +974,31 @@ export default function ModelSelection() {
 
     setIsValidating(true);
     setValidationResult(null);
+    setProfileDriftNote(null);
+
+    // The bundle resolves each model's batching config from the cached profiles, so
+    // compare the cache against the cluster before the bundle goes anywhere.
+    try {
+      const driftResponse = await fetch('/api/compare-model-profiles', { method: 'POST' });
+      const drift = await driftResponse.json();
+      if (drift.success) {
+        const notes: string[] = [];
+        if (drift.clusterChanged && drift.cachedFrom) {
+          notes.push(
+            `Cached model profiles came from ${drift.cachedFrom.kubeconfig}/${drift.cachedFrom.namespace}, not the environment you are applying to. Refresh the cluster data.`
+          );
+        }
+        if (drift.drift?.length) notes.push(describeDrift(drift.drift));
+        if (drift.issues?.length) {
+          notes.push(
+            `Profiles that cannot deploy a model: ${drift.issues.map((i: ProfileIssue) => i.profile).join(', ')}.`
+          );
+        }
+        setProfileDriftNote(notes.length > 0 ? notes.join(' ') : null);
+      }
+    } catch (error) {
+      console.error('Failed to compare model profiles:', error);
+    }
 
     try {
       await fetch('/api/model-selection-state', {
@@ -1355,7 +1394,7 @@ export default function ModelSelection() {
                   </Box>
                   <BatchingOverrideEditor
                     universe={getEffectiveBatchingConfig(profile)}
-                    override={state.override}
+                    override={state.override ?? {}}
                     onChange={(next) => handleOverrideChange(displayName, next)}
                   />
 
@@ -1411,10 +1450,31 @@ export default function ModelSelection() {
             )}
           </Box>
 
+          {profileDriftNote && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {profileDriftNote}
+            </Alert>
+          )}
+
+          {droppedSelections.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                {`${droppedSelections.length} selected model${droppedSelections.length === 1 ? '' : 's'} left this bundle`}
+              </Typography>
+              {droppedSelections.map((d) => (
+                <Typography key={`${d.model}:${d.profile}`} variant="body2">
+                  {d.reason === 'batching-config-cleared'
+                    ? `${d.model}: every batch size is unselected for profile ${d.profile}. Select at least one to deploy it.`
+                    : `${d.model}: profile ${d.profile} publishes no batch sizes, so the model cannot be deployed. Pick another profile, or check the profile on the cluster.`}
+                </Typography>
+              ))}
+            </Alert>
+          )}
+
           <Box>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                Generated YAML
+                {`Generated YAML (${modelSelections?.length ? modelSelections.length - droppedSelections.length : 0} of ${modelSelections?.length ?? 0} selected models)`}
               </Typography>
               <Tooltip title={copiedToClipboard ? 'Copied!' : 'Copy to clipboard'}>
                 <IconButton
