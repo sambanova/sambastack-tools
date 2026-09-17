@@ -92,6 +92,16 @@ interface PerModelState {
   draftForDisplayName?: string;
 }
 
+/** A builder session saved by a previous run, as the state route stores it. */
+interface SavedSession {
+  selectedModels?: string[];
+  modelStates?: Record<string, PerModelState>;
+  bundleName?: string;
+  generatedYaml?: string;
+  savedAt?: string;
+  cluster?: { kubeconfig: string; namespace: string };
+}
+
 interface BuilderSelectionState {
   selectedModels: string[];
   modelStates: Record<string, PerModelState>;
@@ -532,6 +542,8 @@ export default function ModelSelection() {
   const [overrideExpanded, setOverrideExpanded] = useState<boolean>(false);
   // Models the generator removed from the bundle. Shown next to the YAML preview.
   const [droppedSelections, setDroppedSelections] = useState<DroppedSelection[]>([]);
+  // A previous session found on disk, offered to the user rather than applied.
+  const [savedSession, setSavedSession] = useState<SavedSession | null>(null);
   // Single-model flow: once a (non-spec-decoding) profile is picked we offer
   // "Deploy Model" (quick model+profile deploy) and "Advanced Settings". Clicking
   // "Advanced Settings" flips this and reveals Steps 3 & 4 (forcing the bundle
@@ -605,32 +617,48 @@ export default function ModelSelection() {
     loadModelProfiles();
   }, []);
 
-  // Load previously-saved builder state on mount.
+  // Offer the previously-saved builder state on mount. Applying it without asking
+  // hides which bundle and which cluster the state came from, and a selection
+  // restored against a different cluster generates a different bundle.
   useEffect(() => {
     const loadSavedState = async () => {
       try {
         const response = await fetch('/api/model-selection-state');
         const data = await response.json();
-        if (data.success && data.state) {
-          isLoadingFromSavedState.current = true;
-          setSelection({
-            selectedModels: data.state.selectedModels || [],
-            modelStates: data.state.modelStates || {},
-          });
-          setBundleName(data.state.bundleName || 'bundle1');
-          setGeneratedYaml(data.state.generatedYaml || '');
-          setTimeout(() => {
-            isLoadingFromSavedState.current = false;
-          }, 100);
+        if (data.success && data.state && (data.state.selectedModels?.length || data.state.generatedYaml)) {
+          setSavedSession(data.state as SavedSession);
         }
       } catch (error) {
         console.error('Failed to load saved state:', error);
-        isLoadingFromSavedState.current = false;
       }
     };
 
     loadSavedState();
   }, []);
+
+  const handleRestoreSession = () => {
+    if (!savedSession) return;
+    isLoadingFromSavedState.current = true;
+    setSelection({
+      selectedModels: savedSession.selectedModels || [],
+      modelStates: savedSession.modelStates || {},
+    });
+    setBundleName(savedSession.bundleName || 'bundle1');
+    setGeneratedYaml(savedSession.generatedYaml || '');
+    setSavedSession(null);
+    setTimeout(() => {
+      isLoadingFromSavedState.current = false;
+    }, 100);
+  };
+
+  const handleDiscardSession = async () => {
+    setSavedSession(null);
+    try {
+      await fetch('/api/model-selection-state', { method: 'DELETE' });
+    } catch (error) {
+      console.error('Failed to clear saved state:', error);
+    }
+  };
 
   // Listen for "load existing bundle" events dispatched by model-selection/page.tsx.
   // The payload now matches ParsedModelBundleState (bundleName/modelConfigs/specDecodingPairs)
@@ -1162,6 +1190,41 @@ export default function ModelSelection() {
     <Box>
       {/* Documentation Panel */}
       <DocumentationPanel docFile="model-selection.md" />
+
+      {savedSession && (
+        <Alert
+          severity="info"
+          sx={{ mb: 3 }}
+          action={
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              <Button color="inherit" size="small" onClick={handleRestoreSession}>
+                Restore
+              </Button>
+              <Button color="inherit" size="small" onClick={handleDiscardSession}>
+                Start fresh
+              </Button>
+            </Box>
+          }
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {`A previous session is saved${savedSession.bundleName ? ` for bundle "${savedSession.bundleName}"` : ''}.`}
+          </Typography>
+          <Typography variant="body2">
+            {[
+              savedSession.selectedModels?.length
+                ? `${savedSession.selectedModels.length} model${savedSession.selectedModels.length === 1 ? '' : 's'}`
+                : null,
+              savedSession.cluster?.kubeconfig
+                ? `built against ${savedSession.cluster.kubeconfig}/${savedSession.cluster.namespace}`
+                : null,
+              savedSession.savedAt ? `saved ${new Date(savedSession.savedAt).toLocaleString()}` : null,
+            ]
+              .filter(Boolean)
+              .join(', ')}
+            . Restoring brings back the selections and the YAML as they were. Check the environment before you apply it.
+          </Typography>
+        </Alert>
+      )}
 
       {/* No-profile guard (Q4) */}
       {availability.excludedModelNames.length > 0 && (

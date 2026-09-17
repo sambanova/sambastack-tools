@@ -821,3 +821,84 @@ describe('ModelSelection (V3)', () => {
     expect(screen.queryByRole('button', { name: 'Advanced Settings' })).not.toBeInTheDocument();
   });
 });
+
+describe('ModelSelection saved-session restore', () => {
+  const savedSession = {
+    selectedModels: [mockSpecDecodingDraftModel.spec.name],
+    modelStates: {},
+    bundleName: 'bundle-from-last-time',
+    generatedYaml: 'kind: ModelBundle\n',
+    savedAt: '2026-09-15T10:00:00.000Z',
+    cluster: { kubeconfig: 'other-cluster', namespace: 'sambastack' },
+  };
+
+  function mockCachesWithSavedSession() {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    (global.fetch as jest.Mock).mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/checkpoint-mapping') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ success: true, data: checkpointMapping, checkpointOverrides: {} }),
+        });
+      }
+      if (url === '/api/model-profiles') {
+        return Promise.resolve({ ok: true, json: async () => ({ success: true, data: modelProfiles }) });
+      }
+      if (url === '/api/model-selection-state' && init?.method !== 'DELETE') {
+        return Promise.resolve({ ok: true, json: async () => ({ success: true, state: savedSession }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ success: true }) });
+    });
+  }
+
+  beforeEach(() => {
+    (global.fetch as jest.Mock).mockClear();
+    mockPush.mockClear();
+  });
+
+  it('offers the saved session instead of applying it', async () => {
+    mockCachesWithSavedSession();
+    await act(async () => {
+      renderWithProviders(<ModelSelection />);
+    });
+
+    expect(await screen.findByText(/A previous session is saved/)).toBeInTheDocument();
+    expect(screen.getByText(/other-cluster\/sambastack/)).toBeInTheDocument();
+    // Nothing was applied: with no model selected the builder never reaches the
+    // bundle-name step.
+    expect(screen.queryByLabelText('Bundle Name')).not.toBeInTheDocument();
+  });
+
+  it('applies the saved session when the user restores it', async () => {
+    mockCachesWithSavedSession();
+    await act(async () => {
+      renderWithProviders(<ModelSelection />);
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Restore' }));
+
+    // The restored selection reaches the builder, and the prompt goes away.
+    expect(await screen.findByText(mockSpecDecodingDraftModel.spec.name)).toBeInTheDocument();
+    expect(screen.queryByText(/A previous session is saved/)).not.toBeInTheDocument();
+  });
+
+  it('clears the saved session when the user starts fresh', async () => {
+    mockCachesWithSavedSession();
+    await act(async () => {
+      renderWithProviders(<ModelSelection />);
+    });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Start fresh' }));
+
+    await waitFor(() =>
+      expect(global.fetch).toHaveBeenCalledWith('/api/model-selection-state', { method: 'DELETE' })
+    );
+    expect(screen.queryByText(/A previous session is saved/)).not.toBeInTheDocument();
+  });
+});

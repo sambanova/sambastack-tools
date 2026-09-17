@@ -14,9 +14,37 @@ interface BundleBuilderState {
   bundleName: string;
   generatedYaml: string;
   draftModels: { [modelName: string]: string };
+  savedAt?: string;
+  cluster?: { kubeconfig: string; namespace: string };
 }
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'model-selection-state.json');
+
+interface KubeconfigEntry {
+  namespace: string;
+}
+
+interface AppConfig {
+  currentKubeconfig: string;
+  kubeconfigs: Record<string, KubeconfigEntry>;
+}
+
+/**
+ * The environment the state was saved against. A bundle built for one cluster
+ * names profiles another may not have, so a restore has to say where the state
+ * came from.
+ */
+function currentCluster(): { kubeconfig: string; namespace: string } {
+  try {
+    const config: AppConfig = JSON.parse(
+      readFileSync(path.join(process.cwd(), 'app-config.json'), 'utf-8')
+    );
+    const name = config.currentKubeconfig ?? '';
+    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || 'default' };
+  } catch {
+    return { kubeconfig: '', namespace: '' };
+  }
+}
 
 /**
  * GET - Load the saved bundle builder state
@@ -84,8 +112,10 @@ export async function POST(request: NextRequest) {
       // Directory might already exist
     }
 
-    // Write state to file
-    writeFileSync(STATE_FILE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+    // Stamp the save with its time and cluster, so a restore can tell the user
+    // what they are about to bring back.
+    const stamped = { ...state, savedAt: new Date().toISOString(), cluster: currentCluster() };
+    writeFileSync(STATE_FILE_PATH, JSON.stringify(stamped, null, 2), 'utf-8');
 
     return NextResponse.json({
       success: true,
