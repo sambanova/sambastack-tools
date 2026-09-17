@@ -1043,7 +1043,7 @@ export default function ModelSelection() {
       if (response.ok && data.success) {
         setSaveResult({
           success: true,
-          message: `Bundle saved successfully to saved_artifacts/${fileName}`,
+          message: `Bundle saved successfully to ${data.filePath ?? fileName}`,
         });
       } else if (response.status === 409 && data.fileExists) {
         setSaveDialogOpen(true);
@@ -1655,7 +1655,7 @@ export default function ModelSelection() {
         <DialogTitle>File Already Exists</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            A file named <strong>{bundleName}.yaml</strong> already exists in saved_artifacts. Do you want to overwrite
+            A file named <strong>{bundleName}.yaml</strong> already exists in the artifacts directory. Do you want to overwrite
             it?
           </DialogContentText>
         </DialogContent>
