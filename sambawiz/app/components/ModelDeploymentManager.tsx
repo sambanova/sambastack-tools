@@ -36,6 +36,7 @@ import {
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import DownloadIcon from '@mui/icons-material/Download';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import SaveIcon from '@mui/icons-material/Save';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -46,6 +47,7 @@ import Tooltip from '@mui/material/Tooltip';
 import yaml from 'js-yaml';
 import DocumentationPanel from './DocumentationPanel';
 import { arePodNamesShortened } from '../utils/pod-name-limits';
+import { downloadTextFile, toYamlFileName } from '../utils/download-file';
 
 /**
  * A deployed `ModelDeployment` CR summary, as returned by
@@ -989,6 +991,11 @@ export default function ModelDeploymentManager() {
     }
   };
 
+  const handleDownloadYaml = () => {
+    if (!deploymentYaml) return;
+    downloadTextFile(toYamlFileName(deploymentName, 'model-deployment'), deploymentYaml);
+  };
+
   // Handle deploy
   const handleDeploy = async () => {
     if (!deploymentYaml) return;
@@ -1301,17 +1308,28 @@ export default function ModelDeploymentManager() {
           <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
             Generated YAML
           </Typography>
-          <Button
-            startIcon={<ContentCopyIcon />}
-            onClick={handleCopyYaml}
-            size="small"
-            disabled={!deploymentYaml}
-            sx={{
-              color: copiedYaml ? 'success.main' : 'primary.main',
-            }}
-          >
-            {copiedYaml ? 'Copied!' : 'Copy'}
-          </Button>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Button
+              startIcon={<ContentCopyIcon />}
+              onClick={handleCopyYaml}
+              size="small"
+              disabled={!deploymentYaml}
+              sx={{
+                color: copiedYaml ? 'success.main' : 'primary.main',
+              }}
+            >
+              {copiedYaml ? 'Copied!' : 'Copy'}
+            </Button>
+            <Button
+              startIcon={<DownloadIcon />}
+              onClick={handleDownloadYaml}
+              size="small"
+              disabled={!deploymentYaml}
+              sx={{ color: 'primary.main' }}
+            >
+              Download
+            </Button>
+          </Box>
         </Box>
         <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
           Feel free to edit the YAML below as needed or use it as-is
