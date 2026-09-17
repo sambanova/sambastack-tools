@@ -61,6 +61,7 @@ import {
   formatModelRefLatest,
   parseTierKey,
 } from '../utils/bundle-yaml-generator';
+import { describeDrift, type ProfileIssue } from '../utils/validate-model-profiles';
 import {
   getAvailableModels,
   type AvailableModel,
@@ -532,6 +533,8 @@ export default function ModelSelection() {
   const [overrideExpanded, setOverrideExpanded] = useState<boolean>(false);
   // Models the generator removed from the bundle. Shown next to the YAML preview.
   const [droppedSelections, setDroppedSelections] = useState<DroppedSelection[]>([]);
+  // Difference between the cached model profiles and the cluster, checked before applying.
+  const [profileDriftNote, setProfileDriftNote] = useState<string | null>(null);
   // Single-model flow: once a (non-spec-decoding) profile is picked we offer
   // "Deploy Model" (quick model+profile deploy) and "Advanced Settings". Clicking
   // "Advanced Settings" flips this and reveals Steps 3 & 4 (forcing the bundle
@@ -971,6 +974,31 @@ export default function ModelSelection() {
 
     setIsValidating(true);
     setValidationResult(null);
+    setProfileDriftNote(null);
+
+    // The bundle resolves each model's batching config from the cached profiles, so
+    // compare the cache against the cluster before the bundle goes anywhere.
+    try {
+      const driftResponse = await fetch('/api/compare-model-profiles', { method: 'POST' });
+      const drift = await driftResponse.json();
+      if (drift.success) {
+        const notes: string[] = [];
+        if (drift.clusterChanged && drift.cachedFrom) {
+          notes.push(
+            `Cached model profiles came from ${drift.cachedFrom.kubeconfig}/${drift.cachedFrom.namespace}, not the environment you are applying to. Refresh the cluster data.`
+          );
+        }
+        if (drift.drift?.length) notes.push(describeDrift(drift.drift));
+        if (drift.issues?.length) {
+          notes.push(
+            `Profiles that cannot deploy a model: ${drift.issues.map((i: ProfileIssue) => i.profile).join(', ')}.`
+          );
+        }
+        setProfileDriftNote(notes.length > 0 ? notes.join(' ') : null);
+      }
+    } catch (error) {
+      console.error('Failed to compare model profiles:', error);
+    }
 
     try {
       await fetch('/api/model-selection-state', {
@@ -1421,6 +1449,12 @@ export default function ModelSelection() {
               </Typography>
             )}
           </Box>
+
+          {profileDriftNote && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              {profileDriftNote}
+            </Alert>
+          )}
 
           {droppedSelections.length > 0 && (
             <Alert severity="warning" sx={{ mb: 2 }}>
