@@ -38,6 +38,7 @@ import {
   Radio,
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import DownloadIcon from '@mui/icons-material/Download';
 import SaveIcon from '@mui/icons-material/Save';
 import RocketLaunchIcon from '@mui/icons-material/RocketLaunch';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -67,6 +68,7 @@ import {
 } from '../utils/model-availability';
 import { parseModelRef, type ParsedModelBundleState } from '../utils/parse-bundle-yaml';
 import { validateResourceName, bundleNameLengthWarning } from '../utils/resource-names';
+import { downloadTextFile, toYamlFileName } from '../utils/download-file';
 import DocumentationPanel from './DocumentationPanel';
 import GaugeChart from 'react-gauge-chart';
 
@@ -954,6 +956,11 @@ export default function ModelSelection() {
     }
   };
 
+  const handleDownloadYaml = () => {
+    if (!generatedYaml) return;
+    downloadTextFile(toYamlFileName(bundleName, 'bundle'), generatedYaml);
+  };
+
   // Handle validation
   const handleValidate = async () => {
     if (!generatedYaml) return;
@@ -1416,16 +1423,31 @@ export default function ModelSelection() {
               <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
                 Generated YAML
               </Typography>
-              <Tooltip title={copiedToClipboard ? 'Copied!' : 'Copy to clipboard'}>
-                <IconButton
-                  onClick={handleCopyToClipboard}
-                  size="small"
-                  disabled={!generatedYaml}
-                  sx={{ color: copiedToClipboard ? 'success.main' : 'primary.main' }}
-                >
-                  <ContentCopyIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
+              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                <Tooltip title={copiedToClipboard ? 'Copied!' : 'Copy to clipboard'}>
+                  <IconButton
+                    onClick={handleCopyToClipboard}
+                    size="small"
+                    disabled={!generatedYaml}
+                    sx={{ color: copiedToClipboard ? 'success.main' : 'primary.main' }}
+                  >
+                    <ContentCopyIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Download the YAML to your machine">
+                  <span>
+                    <IconButton
+                      onClick={handleDownloadYaml}
+                      size="small"
+                      disabled={!generatedYaml}
+                      aria-label="Download YAML"
+                      sx={{ color: 'primary.main' }}
+                    >
+                      <DownloadIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </Box>
             </Box>
             <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
               Please refer to our{' '}
