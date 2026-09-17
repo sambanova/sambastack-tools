@@ -45,6 +45,40 @@ export interface ModelBundleSelection {
 }
 
 /**
+ * A selection the generator removed from the bundle, and why. The user picked
+ * every one of these, so a caller must tell them what left and for what reason.
+ *
+ * `batching-config-cleared` means the user unchecked every batch size for the
+ * model. `profile-batching-unresolved` means the profile declared batching tiers
+ * but none of them offered a batch size, so nothing was deployable.
+ */
+export interface DroppedSelection {
+  model: string;
+  profile: string;
+  reason: 'batching-config-cleared' | 'profile-batching-unresolved';
+}
+
+export interface ModelBundleBuildResult {
+  bundle: ModelBundle;
+  dropped: DroppedSelection[];
+}
+
+export interface ModelBundleYamlResult {
+  yaml: string;
+  dropped: DroppedSelection[];
+}
+
+/**
+ * Treats an override with no tiers as no override at all, so the profile default
+ * applies. The builder seeds per-model state before a profile resolves, and an
+ * empty object there must not bypass the default and drop the model.
+ */
+function normalizeOverride(override: BatchingConfig | undefined): BatchingConfig | undefined {
+  if (!override || Object.keys(override).length === 0) return undefined;
+  return override;
+}
+
+/**
  * Parses a batching-config tier key (`8k`, `32k`, `448`, `10t`) into a
  * comparable number, so tiers can be ordered by sequence length (e.g. the
  * smallest tier can be found, or the UI can list them descending). Adapted
@@ -301,8 +335,12 @@ export function isSpecDecodingProfile(profile: ModelProfile): boolean {
  * want the plain JS object (e.g. parser round-trip tests) don't have to
  * re-parse YAML.
  */
-export function buildModelBundleObject(bundleName: string, selections: ModelBundleSelection[]): ModelBundle {
+export function buildModelBundle(
+  bundleName: string,
+  selections: ModelBundleSelection[]
+): ModelBundleBuildResult {
   const modelConfigs: ModelConfigEntry[] = [];
+  const dropped: DroppedSelection[] = [];
   // Track which models survived (by crname) so spec-decoding pairs referencing a
   // dropped model can be pruned.
   const keptCrnames = new Set<string>();
@@ -311,12 +349,18 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
   for (const selection of selections) {
     const isEmbedding = isEmbeddingModel(selection.model);
     const profileDefault = getEffectiveBatchingConfig(selection.profile);
-    const baseBatchingConfig = dropEmptyTiers(selection.batchingConfigOverride ?? profileDefault);
+    const override = normalizeOverride(selection.batchingConfigOverride);
+    const baseBatchingConfig = dropEmptyTiers(override ?? profileDefault);
 
-    // Drop the model from the bundle entirely when its batching config was fully
-    // cleared in Step 3 — i.e. it's empty now, but the profile had a non-empty
-    // default to clear (a profile with no batching config to begin with is kept).
+    // A model whose batching config resolves empty cannot be deployed, so it leaves
+    // the bundle. A profile with no batching config at all is kept, since the
+    // operator supplies one at deploy time.
     if (Object.keys(baseBatchingConfig).length === 0 && Object.keys(profileDefault).length > 0) {
+      dropped.push({
+        model: selection.model.metadata.name,
+        profile: selection.profile.metadata.name,
+        reason: override ? 'batching-config-cleared' : 'profile-batching-unresolved',
+      });
       continue;
     }
 
@@ -373,12 +417,23 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
     }));
 
   return {
-    metadata: { name: bundleName },
-    spec: {
-      modelConfigs,
-      ...(specDecodingPairs.length > 0 ? { specDecodingPairs } : {}),
+    bundle: {
+      metadata: { name: bundleName },
+      spec: {
+        modelConfigs,
+        ...(specDecodingPairs.length > 0 ? { specDecodingPairs } : {}),
+      },
     },
+    dropped,
   };
+}
+
+/**
+ * The bundle alone, for callers that already handle dropped selections or have
+ * none to handle. Prefer `buildModelBundle`, which reports what it removed.
+ */
+export function buildModelBundleObject(bundleName: string, selections: ModelBundleSelection[]): ModelBundle {
+  return buildModelBundle(bundleName, selections).bundle;
 }
 
 /**
@@ -387,8 +442,11 @@ export function buildModelBundleObject(bundleName: string, selections: ModelBund
  * `js-yaml`'s `dump()` (not hand-built template strings). No `secretNames`
  * is emitted (Q7) — profiles carry them.
  */
-export function generateModelBundleYaml(bundleName: string, selections: ModelBundleSelection[]): string {
-  const bundle = buildModelBundleObject(bundleName, selections);
+export function generateModelBundle(
+  bundleName: string,
+  selections: ModelBundleSelection[]
+): ModelBundleYamlResult {
+  const { bundle, dropped } = buildModelBundle(bundleName, selections);
 
   // Map each emitted modelConfigs entry (by its model ref) back to its profile's
   // effective default batching config, so tiers left at the default can be
@@ -419,5 +477,13 @@ export function generateModelBundleYaml(bundleName: string, selections: ModelBun
   // the specDecodingPairs list in block style. This shape is specific to the
   // ModelBundle document produced above (batch_sizes is the only level-6+
   // collection); revisit the level if the emitted structure gains depth.
-  return yaml.dump(document, { noRefs: true, lineWidth: -1, flowLevel: 6 });
+  return { yaml: yaml.dump(document, { noRefs: true, lineWidth: -1, flowLevel: 6 }), dropped };
+}
+
+/**
+ * The YAML alone. Prefer `generateModelBundle`, which also reports the
+ * selections it removed.
+ */
+export function generateModelBundleYaml(bundleName: string, selections: ModelBundleSelection[]): string {
+  return generateModelBundle(bundleName, selections).yaml;
 }
