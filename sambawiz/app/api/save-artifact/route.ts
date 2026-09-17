@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { writeFileSync, existsSync } from 'fs';
+import { ensureArtifactsDir, resolveArtifactPath } from '../../utils/artifacts-dir';
 
 export async function POST(request: NextRequest) {
   try {
@@ -13,14 +13,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const savedArtifactsDir = join(process.cwd(), 'saved_artifacts');
+    ensureArtifactsDir();
+    const filePath = resolveArtifactPath(fileName);
 
-    // Create saved_artifacts directory if it doesn't exist
-    if (!existsSync(savedArtifactsDir)) {
-      mkdirSync(savedArtifactsDir, { recursive: true });
+    if (!filePath) {
+      return NextResponse.json(
+        { success: false, error: 'fileName must name a file inside the artifacts directory' },
+        { status: 400 }
+      );
     }
-
-    const filePath = join(savedArtifactsDir, fileName);
 
     // Check if file already exists
     const fileExists = existsSync(filePath);
@@ -60,14 +61,15 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const savedArtifactsDir = join(process.cwd(), 'saved_artifacts');
+    ensureArtifactsDir();
+    const filePath = resolveArtifactPath(fileName);
 
-    // Create saved_artifacts directory if it doesn't exist
-    if (!existsSync(savedArtifactsDir)) {
-      mkdirSync(savedArtifactsDir, { recursive: true });
+    if (!filePath) {
+      return NextResponse.json(
+        { success: false, error: 'fileName must name a file inside the artifacts directory' },
+        { status: 400 }
+      );
     }
-
-    const filePath = join(savedArtifactsDir, fileName);
 
     // Overwrite the file
     writeFileSync(filePath, content, 'utf8');
