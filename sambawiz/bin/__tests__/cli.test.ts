@@ -131,7 +131,8 @@ describe('toModelProfileCR', () => {
     expect(profile.metadata.name).toBe('arch-a-profile');
     expect(profile.spec.model_arch).toBe('arch-a');
     expect(profile.spec.features).toEqual(['continuous_batching']);
-    expect(profile.spec.defaultBatchingConfig).toBe(modelProfiles['arch-a-profile'].batchingConfig);
+    expect(profile.spec.batchingConfigs).toBeUndefined();
+    expect(profile.status?.batchingConfig).toBe(modelProfiles['arch-a-profile'].batchingConfig);
     expect(profile.spec.pefs).toEqual(['arch-a-ss4096-bs1-cb:1']);
   });
 });

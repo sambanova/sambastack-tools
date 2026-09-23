@@ -36,7 +36,12 @@ function toProfileEntry(profile: ModelProfile): ModelProfilesCache[string] {
   return {
     model_arch: profile.spec.model_arch,
     features: profile.spec.features,
-    batchingConfig: profile.spec.defaultBatchingConfig ?? profile.status?.batchingConfig ?? {},
+    batchingConfig:
+      profile.spec.batchingConfigs?.recommended ??
+      profile.spec.batchingConfigs?.all ??
+      profile.status?.batchingConfig ??
+      {},
+    ...(profile.spec.batchingConfigs ? { batchingConfigs: profile.spec.batchingConfigs } : {}),
     pefs: profile.spec.pefs,
   };
 }
@@ -96,7 +101,7 @@ const embeddingHighInteractivityProfile: ModelProfile = {
   spec: {
     model_arch: 'gte-qwen2',
     features: [],
-    defaultBatchingConfig: { '4k': { batch_sizes: [1, 2] } },
+    batchingConfigs: { all: { '4k': { batch_sizes: [1, 2] } } },
     pefs: ['gte-qwen2-ss4096-bs2-1:1'],
   },
 };
@@ -105,7 +110,7 @@ const embeddingHighThroughputProfile: ModelProfile = {
   spec: {
     model_arch: 'gte-qwen2',
     features: ['continuous_batching'],
-    defaultBatchingConfig: { '4k': { batch_sizes: [1] } },
+    batchingConfigs: { all: { '4k': { batch_sizes: [1] } } },
     pefs: ['gte-qwen2-ss4096-bs1-cb-1:1'],
   },
 };
@@ -116,12 +121,14 @@ const embeddingMultiTierProfile: ModelProfile = {
   spec: {
     model_arch: 'gte-qwen2',
     features: [],
-    defaultBatchingConfig: {
-      '4k': { batch_sizes: [1, 4] },
-      '8k': { batch_sizes: [1, 4] },
-      '16k': { batch_sizes: [1] },
-      '32k': { batch_sizes: [1] },
-      '128k': { batch_sizes: [1] },
+    batchingConfigs: {
+      all: {
+        '4k': { batch_sizes: [1, 4] },
+        '8k': { batch_sizes: [1, 4] },
+        '16k': { batch_sizes: [1] },
+        '32k': { batch_sizes: [1] },
+        '128k': { batch_sizes: [1] },
+      },
     },
     pefs: ['gte-qwen2-multitier:1'],
   },
@@ -134,7 +141,7 @@ const embeddingPromptCachingProfile: ModelProfile = {
   spec: {
     model_arch: 'gte-qwen2',
     features: ['prompt_caching'],
-    defaultBatchingConfig: { '4k': { batch_sizes: [1] } },
+    batchingConfigs: { all: { '4k': { batch_sizes: [1] } } },
     pefs: ['gte-qwen2-pc:1'],
   },
 };
@@ -145,7 +152,7 @@ const maverickV1Profile: ModelProfile = {
   spec: {
     model_arch: 'llama-4-maverick',
     features: [],
-    defaultBatchingConfig: { '8k': { batch_sizes: [1] } },
+    batchingConfigs: { all: { '8k': { batch_sizes: [1] } } },
     pefs: ['llama-4-maverick-ss8192-bs1:1'],
   },
 };
@@ -154,7 +161,7 @@ const maverickV2Profile: ModelProfile = {
   spec: {
     model_arch: 'llama-4-maverick-v2',
     features: [],
-    defaultBatchingConfig: { '8k': { batch_sizes: [2] } },
+    batchingConfigs: { all: { '8k': { batch_sizes: [2] } } },
     pefs: ['llama-4-maverick-v2-ss8192-bs1:1'],
   },
 };
@@ -167,8 +174,24 @@ const hiddenBatchSizeProfile: ModelProfile = {
   spec: {
     model_arch: 'llama-3p2-1b',
     features: [],
-    defaultBatchingConfig: { '4k': { batch_sizes: [2, 4, 6, 8] } },
+    batchingConfigs: { all: { '4k': { batch_sizes: [2, 4, 6, 8] } } },
     pefs: ['llama-3p2-1b-bs6:1'],
+  },
+};
+
+// Recommended is a narrower subset of All — used to verify the Step-3 override
+// grid renders every "all" checkbox (enabled) but only pre-checks the
+// "recommended" subset, per the batchingConfigs schema migration.
+const recommendedSubsetProfile: ModelProfile = {
+  metadata: { name: 'llama-3p2-1b-recommended-subset' },
+  spec: {
+    model_arch: 'llama-3p2-1b',
+    features: [],
+    batchingConfigs: {
+      all: { '4k': { batch_sizes: [1, 2, 4] } },
+      recommended: { '4k': { batch_sizes: [1, 4] } },
+    },
+    pefs: ['llama-3p2-1b-recommended-subset:1'],
   },
 };
 
@@ -457,6 +480,33 @@ describe('ModelSelection (V3)', () => {
       };
       expect(doc.spec.modelConfigs[0].batchingConfig).toBeUndefined();
     });
+  });
+
+  it('shows a batch size present only in batchingConfigs.all as an unchecked (but present) checkbox, while batchingConfigs.recommended stays pre-checked', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [recommendedSubsetProfile.metadata.name]: toProfileEntry(recommendedSubsetProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingDraftModel.spec.name]);
+
+    await user.click(await screen.findByRole('button', { name: 'Advanced Settings' }));
+    await waitFor(() => expect(screen.getByText('3. Advanced Options')).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Expand advanced options' }));
+
+    // 1 and 4 are in both `all` and `recommended` -> checkboxes exist and start checked.
+    const cell1 = await screen.findByRole('checkbox', { name: 'Batch size 1 for 4k' });
+    const cell4 = screen.getByRole('checkbox', { name: 'Batch size 4 for 4k' });
+    expect(cell1).toBeChecked();
+    expect(cell4).toBeChecked();
+
+    // 2 is in `all` but not `recommended` -> the checkbox exists (enabled) but starts unchecked.
+    const cell2 = screen.getByRole('checkbox', { name: 'Batch size 2 for 4k' });
+    expect(cell2).not.toBeChecked();
   });
 
   it('gives every declared batch size its own checkbox (e.g. 6) so none can leak into the YAML unseen', async () => {

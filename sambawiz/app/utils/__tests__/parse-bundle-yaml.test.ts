@@ -4,6 +4,7 @@ import {
   mockSingleArchModel,
   mockMultiArchModel,
   mockHighInteractivityProfile,
+  mockRecommendedSubsetProfile,
   mockSpecDecodingTargetModel,
   mockSpecDecodingDraftModel,
   mockSpecDecodingTargetProfile,
@@ -115,6 +116,24 @@ spec:
         '128k': { batch_sizes: '*' },
       });
       expect(parsed.specDecodingPairs).toEqual([]);
+    });
+
+    it('round-trips a named batchingConfig reference (e.g. "all") as a plain string, not an inline map', () => {
+      const selections: ModelBundleSelection[] = [
+        {
+          model: mockMultiArchModel,
+          arch: 'llama-4-maverick',
+          profile: mockRecommendedSubsetProfile,
+          batchingConfigOverride: {
+            '8k': { batch_sizes: '*' },
+            '64k': { batch_sizes: '*' },
+          },
+        },
+      ];
+      const yamlStr = generateModelBundleYaml('named-ref-round-trip', selections);
+      const parsed = parseModelBundleYamlContent(yamlStr) as ParsedModelBundleState;
+
+      expect(parsed.modelConfigs[0].batchingConfig).toBe('all');
     });
 
     it('round-trips a multi-arch model ref', () => {

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
-import type { BatchingConfig, ModelProfilesCache } from '../../types/bundle';
+import type { BatchingConfig, ModelProfilesCache, NamedBatchingConfigs } from '../../types/bundle';
 import { ensureAppDataDir } from '../../utils/ensure-app-data-dir';
 
 /**
@@ -29,7 +29,7 @@ interface ModelProfileItem {
   spec: {
     model_arch: string;
     features?: string[];
-    defaultBatchingConfig?: BatchingConfig;
+    batchingConfigs?: NamedBatchingConfigs;
     pefs?: string[];
   };
   status?: {
@@ -106,10 +106,13 @@ export async function POST() {
 
       if (!profileName || !modelArch) continue;
 
+      const batchingConfigs = item.spec.batchingConfigs;
+
       modelProfiles[profileName] = {
         model_arch: modelArch,
         features: item.spec.features ?? [],
-        batchingConfig: item.spec.defaultBatchingConfig ?? item.status?.batchingConfig ?? {},
+        batchingConfig: batchingConfigs?.recommended ?? batchingConfigs?.all ?? item.status?.batchingConfig ?? {},
+        ...(batchingConfigs ? { batchingConfigs } : {}),
         pefs: item.spec.pefs ?? [],
       };
     }

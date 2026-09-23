@@ -41,8 +41,8 @@ describe('generate-model-profiles route', () => {
         spec: {
           model_arch: 'llama-arch-a',
           features: [],
-          defaultBatchingConfig: {
-            '8k': { batch_sizes: [1, 2, 4] },
+          batchingConfigs: {
+            all: { '8k': { batch_sizes: [1, 2, 4] } },
           },
           pefs: ['llama-pef:1'],
         },
@@ -55,7 +55,7 @@ describe('generate-model-profiles route', () => {
         spec: {
           model_arch: 'llama-arch-a',
           features: ['continuous_batching'],
-          // No defaultBatchingConfig - should fall back to status.batchingConfig
+          // No batchingConfigs - should fall back to status.batchingConfig
           pefs: ['llama-pef-ht:1'],
         },
         status: {
@@ -72,7 +72,7 @@ describe('generate-model-profiles route', () => {
     (execSync as jest.Mock).mockReturnValue(JSON.stringify(mockProfilesOutput));
   });
 
-  it('uses spec.defaultBatchingConfig when present', async () => {
+  it('uses spec.batchingConfigs.all when present (no recommended override)', async () => {
     await POST();
 
     const writeCall = (fsPromises.writeFile as jest.Mock).mock.calls[0];
@@ -83,7 +83,7 @@ describe('generate-model-profiles route', () => {
     });
   });
 
-  it('falls back to status.batchingConfig when defaultBatchingConfig is absent', async () => {
+  it('falls back to status.batchingConfig when batchingConfigs is absent', async () => {
     await POST();
 
     const writeCall = (fsPromises.writeFile as jest.Mock).mock.calls[0];
@@ -94,7 +94,7 @@ describe('generate-model-profiles route', () => {
     });
   });
 
-  it('defaults batchingConfig to {} when neither defaultBatchingConfig nor status.batchingConfig exist', async () => {
+  it('defaults batchingConfig to {} when neither batchingConfigs nor status.batchingConfig exist', async () => {
     (execSync as jest.Mock).mockReturnValue(JSON.stringify({
       items: [
         {
@@ -125,6 +125,7 @@ describe('generate-model-profiles route', () => {
       model_arch: 'llama-arch-a',
       features: [],
       batchingConfig: { '8k': { batch_sizes: [1, 2, 4] } },
+      batchingConfigs: { all: { '8k': { batch_sizes: [1, 2, 4] } } },
       pefs: ['llama-pef:1'],
     });
 

@@ -154,12 +154,33 @@ export function isEmbeddingModel(model: Model): boolean {
 }
 
 /**
- * A profile's effective batching config: its own declarative default, else
- * the operator-published resolved default, else empty (per `batching.py`'s
- * priority — the live-generated fallback isn't something SambaWiz computes).
+ * A profile's effective batching config — the one the operator uses when a
+ * bundle sets no override: `spec.batchingConfigs.recommended` if present,
+ * else `spec.batchingConfigs.all`, else the operator-published resolved
+ * default, else empty (per `batching.py`'s priority — the live-generated
+ * fallback isn't something SambaWiz computes). This is also what Step 3
+ * pre-checks in the batching override editor.
  */
 export function getEffectiveBatchingConfig(profile: ModelProfile): BatchingConfig {
-  return profile.spec.defaultBatchingConfig ?? profile.status?.batchingConfig ?? {};
+  return (
+    profile.spec.batchingConfigs?.recommended ??
+    profile.spec.batchingConfigs?.all ??
+    profile.status?.batchingConfig ??
+    {}
+  );
+}
+
+/**
+ * The full universe of batch sizes a profile supports at each tier —
+ * `spec.batchingConfigs.all` when the profile declares one. Used by the
+ * Step-3 override editor to decide which checkboxes exist at all (enabled),
+ * independent of `getEffectiveBatchingConfig`'s narrower `recommended` subset
+ * (which only decides which of those checkboxes start checked). Falls back to
+ * `getEffectiveBatchingConfig` when the profile has no `all` config to offer
+ * (e.g. only a resolved `status.batchingConfig`).
+ */
+export function getBatchingConfigUniverse(profile: ModelProfile): BatchingConfig {
+  return profile.spec.batchingConfigs?.all ?? getEffectiveBatchingConfig(profile);
 }
 
 /**
@@ -348,7 +369,9 @@ export function buildModelBundle(
 
   for (const selection of selections) {
     const isEmbedding = isEmbeddingModel(selection.model);
-    const profileDefault = getEffectiveBatchingConfig(selection.profile);
+    const profile = selection.profile;
+    const profileDefault = getEffectiveBatchingConfig(profile);
+    const universe = getBatchingConfigUniverse(profile);
     const override = normalizeOverride(selection.batchingConfigOverride);
     const baseBatchingConfig = dropEmptyTiers(override ?? profileDefault);
 
@@ -365,13 +388,20 @@ export function buildModelBundle(
     }
 
     const batchingConfig = deriveIsDefaultTier(baseBatchingConfig, isEmbedding);
+    // `batchingConfig` may still carry the caller's literal `'*'` sentinel per
+    // tier (preserved verbatim below for emission) — resolve it here, against
+    // the universe (`'*'` means "every batch size the profile provides for
+    // this tier", i.e. `all`, NOT whatever the narrower default happens to
+    // be), to get a value that's safe to compare against the profile's own
+    // declared configs.
+    const resolvedForComparison = resolveWildcardTiers(batchingConfig, universe);
 
     // Insertion order matters here: it drives the emitted YAML key order
     // (model, profile, modelSettings, batchingConfig), matching v3plan.md's
     // worked spec-decoding example.
     const entry: ModelConfigEntry = {
       model: formatModelRef(selection.model, selection.arch, selection.versionOverride),
-      profile: selection.profile.metadata.name,
+      profile: profile.metadata.name,
     };
 
     // modelSettings only appears when something diverges from the operator
@@ -389,16 +419,21 @@ export function buildModelBundle(
       entry.modelSettings = modelSettings;
     }
 
-    // Only emit batchingConfig when it diverges from what the operator would use
-    // by default (the profile's effective batching config); an identical config
-    // is redundant. A tier left at the `'*'` sentinel means "the profile default's
-    // batch sizes", so resolve those before comparing — otherwise a selection that
-    // equals the default but is expressed with `'*'` (e.g. every batch size left
-    // checked, or a reloaded bundle) looks different and gets emitted redundantly.
-    // When emitted, keep the original (`'*'`-preserving) config and order tiers by
-    // descending sequence length; the downstream collapse step shrinks it.
-    if (!batchingConfigsEqual(resolveWildcardTiers(batchingConfig, profileDefault), profileDefault)) {
-      entry.batchingConfig = orderBatchingConfigDescending(batchingConfig);
+    // Omit batchingConfig entirely when the resolved selection matches the
+    // operator's implicit default — redundant to spell out. Otherwise, when it
+    // matches one of the profile's OTHER declared `spec.batchingConfigs`
+    // entries exactly (e.g. the user explicitly widened to "all" while
+    // "recommended" is the default), reference it by name so the bundle states
+    // that intent instead of duplicating the tier map. Otherwise spell the
+    // selection out inline, ordered by descending sequence length.
+    if (!batchingConfigsEqual(resolvedForComparison, profileDefault)) {
+      // is_default-sensitive: naming a config (e.g. "all") makes the operator apply
+      // THAT config's own is_default placement, so a name is only safe to emit when
+      // it matches on is_default too — not just batch_sizes.
+      const namedMatch = Object.entries(profile.spec.batchingConfigs ?? {}).find(([, config]) =>
+        batchingConfigsEqual(resolvedForComparison, config)
+      );
+      entry.batchingConfig = namedMatch ? namedMatch[0] : orderBatchingConfigDescending(batchingConfig);
     }
 
     modelConfigs.push(entry);
@@ -449,19 +484,22 @@ export function generateModelBundle(
   const { bundle, dropped } = buildModelBundle(bundleName, selections);
 
   // Map each emitted modelConfigs entry (by its model ref) back to its profile's
-  // effective default batching config, so tiers left at the default can be
-  // collapsed to the `'*'` sentinel purely for a shorter YAML document. This is
-  // a serialization-only step: `buildModelBundleObject` keeps the explicit
-  // batch-size lists so callers wanting the plain object still see real arrays.
-  const profileDefaultsByRef = new Map<string, BatchingConfig>();
+  // full batch-size universe (`all`), so tiers matching it can be collapsed to
+  // the `'*'` sentinel purely for a shorter YAML document — `'*'` means "every
+  // batch size the profile provides for this tier", not the (possibly
+  // narrower) default. This is a serialization-only step: `buildModelBundleObject`
+  // keeps the explicit batch-size lists so callers wanting the plain object
+  // still see real arrays. Named-string batchingConfig entries pass through
+  // unchanged — there's nothing to collapse.
+  const universeByRef = new Map<string, BatchingConfig>();
   for (const selection of selections) {
     const ref = formatModelRef(selection.model, selection.arch, selection.versionOverride);
-    profileDefaultsByRef.set(ref, getEffectiveBatchingConfig(selection.profile));
+    universeByRef.set(ref, getBatchingConfigUniverse(selection.profile));
   }
 
   const modelConfigs = bundle.spec.modelConfigs.map((entry) =>
-    entry.batchingConfig
-      ? { ...entry, batchingConfig: collapseTiersToWildcard(entry.batchingConfig, profileDefaultsByRef.get(entry.model) ?? {}) }
+    entry.batchingConfig && typeof entry.batchingConfig !== 'string'
+      ? { ...entry, batchingConfig: collapseTiersToWildcard(entry.batchingConfig, universeByRef.get(entry.model) ?? {}) }
       : entry
   );
 

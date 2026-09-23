@@ -28,7 +28,11 @@ function toProfileEntry(profile: ModelProfile): ModelProfilesCache[string] {
   return {
     model_arch: profile.spec.model_arch,
     features: profile.spec.features,
-    batchingConfig: profile.spec.defaultBatchingConfig ?? profile.status?.batchingConfig ?? {},
+    batchingConfig:
+      profile.spec.batchingConfigs?.recommended ??
+      profile.spec.batchingConfigs?.all ??
+      profile.status?.batchingConfig ??
+      {},
     pefs: profile.spec.pefs,
   };
 }

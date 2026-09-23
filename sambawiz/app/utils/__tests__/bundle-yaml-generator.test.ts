@@ -1,9 +1,11 @@
 import yaml from 'js-yaml';
+import type { BatchingConfig } from '../../types/bundle';
 import {
   formatModelRef,
   formatModelRefLatest,
   isEmbeddingModel,
   getEffectiveBatchingConfig,
+  getBatchingConfigUniverse,
   deriveIsDefaultTier,
   batchingConfigsEqual,
   collapseTiersToWildcard,
@@ -24,6 +26,7 @@ import {
   mockSpecDecodingDraftModel,
   mockContinuousBatchingProfile,
   mockHighInteractivityProfile,
+  mockRecommendedSubsetProfile,
   mockSpecDecodingTargetProfile,
   mockSpecDecodingDraftProfile,
 } from './v3-mock-data';
@@ -108,12 +111,29 @@ describe('bundle-yaml-generator', () => {
   });
 
   describe('getEffectiveBatchingConfig', () => {
-    it('prefers spec.defaultBatchingConfig over status.batchingConfig', () => {
+    it('prefers batchingConfigs.all over status.batchingConfig when there is no recommended override', () => {
       const result = getEffectiveBatchingConfig(mockContinuousBatchingProfile);
-      expect(result).toEqual(mockContinuousBatchingProfile.spec.defaultBatchingConfig);
+      expect(result).toEqual(mockContinuousBatchingProfile.spec.batchingConfigs!.all);
     });
 
-    it('falls back to status.batchingConfig when spec has none', () => {
+    it('prefers batchingConfigs.recommended over batchingConfigs.all when both are present', () => {
+      const profile = {
+        metadata: { name: 'p' },
+        spec: {
+          model_arch: 'a',
+          features: [],
+          pefs: [],
+          batchingConfigs: {
+            all: { '8k': { batch_sizes: [1, 2, 4] }, '32k': { batch_sizes: [1] } },
+            recommended: { '8k': { batch_sizes: [2] } },
+          },
+        },
+        status: { batchingConfig: { '8k': { batch_sizes: [1] } } },
+      };
+      expect(getEffectiveBatchingConfig(profile)).toEqual({ '8k': { batch_sizes: [2] } });
+    });
+
+    it('falls back to status.batchingConfig when batchingConfigs is absent', () => {
       const profile = {
         metadata: { name: 'p' },
         spec: { model_arch: 'a', features: [], pefs: [] },
@@ -122,9 +142,49 @@ describe('bundle-yaml-generator', () => {
       expect(getEffectiveBatchingConfig(profile)).toEqual({ '8k': { batch_sizes: [1] } });
     });
 
-    it('falls back to {} when neither is present', () => {
+    it('falls back to {} when nothing is present', () => {
       const profile = { metadata: { name: 'p' }, spec: { model_arch: 'a', features: [], pefs: [] } };
       expect(getEffectiveBatchingConfig(profile)).toEqual({});
+    });
+  });
+
+  describe('getBatchingConfigUniverse', () => {
+    it('returns batchingConfigs.all even when recommended is a narrower subset', () => {
+      const profile = {
+        metadata: { name: 'p' },
+        spec: {
+          model_arch: 'a',
+          features: [],
+          pefs: [],
+          batchingConfigs: {
+            all: { '8k': { batch_sizes: [1, 2, 4] }, '32k': { batch_sizes: [1] } },
+            recommended: { '8k': { batch_sizes: [2] } },
+          },
+        },
+      };
+      expect(getBatchingConfigUniverse(profile)).toEqual(profile.spec.batchingConfigs.all);
+    });
+
+    it('falls back to getEffectiveBatchingConfig when the profile has no batchingConfigs.all (status.batchingConfig only)', () => {
+      const profile = {
+        metadata: { name: 'p' },
+        spec: { model_arch: 'a', features: [], pefs: [] },
+        status: { batchingConfig: { '8k': { batch_sizes: [1] } } },
+      };
+      expect(getBatchingConfigUniverse(profile)).toEqual({ '8k': { batch_sizes: [1] } });
+    });
+
+    it('falls back to batchingConfigs.recommended when the profile has recommended but no all', () => {
+      const profile = {
+        metadata: { name: 'p' },
+        spec: {
+          model_arch: 'a',
+          features: [],
+          pefs: [],
+          batchingConfigs: { recommended: { '8k': { batch_sizes: [2] } } },
+        },
+      };
+      expect(getBatchingConfigUniverse(profile)).toEqual({ '8k': { batch_sizes: [2] } });
     });
   });
 
@@ -320,7 +380,7 @@ describe('bundle-yaml-generator', () => {
         { model: mockEmbeddingModel, arch: 'gte-qwen2', profile: mockHighInteractivityProfile },
       ];
       const bundle = buildModelBundleObject('embed-bundle', selections);
-      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig!;
+      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig as BatchingConfig;
       expect(batchingConfig['8k'].is_default).toBe(true);
       expect(batchingConfig['32k'].is_default).toBeUndefined();
       expect(batchingConfig['64k'].is_default).toBeUndefined();
@@ -338,7 +398,7 @@ describe('bundle-yaml-generator', () => {
         },
       ];
       const bundle = buildModelBundleObject('non-embed-bundle', selections);
-      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig!;
+      const batchingConfig = bundle.spec.modelConfigs[0].batchingConfig as BatchingConfig;
       Object.values(batchingConfig).forEach((tier) => expect(tier.is_default).toBeUndefined());
     });
 
@@ -356,7 +416,7 @@ describe('bundle-yaml-generator', () => {
           model: mockMultiArchModel,
           arch: 'llama-4-maverick',
           profile: mockHighInteractivityProfile,
-          batchingConfigOverride: { ...mockHighInteractivityProfile.spec.defaultBatchingConfig },
+          batchingConfigOverride: { ...mockHighInteractivityProfile.spec.batchingConfigs!.all },
         },
       ];
       const bundle = buildModelBundleObject('default-bundle', selections);
@@ -384,6 +444,72 @@ describe('bundle-yaml-generator', () => {
       expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
     });
 
+    describe('batchingConfigs.all vs .recommended (named-config resolution)', () => {
+      it('references "all" by name — not omitted, not inlined — when the selection matches the wider `all` config', () => {
+        // Regression: `mockRecommendedSubsetProfile`'s `recommended` (the implicit
+        // default) is narrower than `all`. Selecting every checkbox ('*' per tier,
+        // which means "every batch size `all` provides") must NOT be mistaken for
+        // "left at the (narrower) default" and silently dropped.
+        const selections: ModelBundleSelection[] = [
+          {
+            model: mockMultiArchModel,
+            arch: 'llama-4-maverick',
+            profile: mockRecommendedSubsetProfile,
+            batchingConfigOverride: {
+              '8k': { batch_sizes: '*' },
+              '64k': { batch_sizes: '*' },
+            },
+          },
+        ];
+        const bundle = buildModelBundleObject('all-vs-recommended-bundle', selections);
+        expect(bundle.spec.modelConfigs[0].batchingConfig).toBe('all');
+      });
+
+      it('omits batchingConfig when left at the recommended default', () => {
+        const selections: ModelBundleSelection[] = [
+          { model: mockMultiArchModel, arch: 'llama-4-maverick', profile: mockRecommendedSubsetProfile },
+        ];
+        const bundle = buildModelBundleObject('recommended-default-bundle', selections);
+        expect(bundle.spec.modelConfigs[0].batchingConfig).toBeUndefined();
+      });
+
+      it('spells out an inline map when the selection matches neither `all` nor `recommended`', () => {
+        const selections: ModelBundleSelection[] = [
+          {
+            model: mockMultiArchModel,
+            arch: 'llama-4-maverick',
+            profile: mockRecommendedSubsetProfile,
+            batchingConfigOverride: {
+              '8k': { batch_sizes: [2] }, // neither all's [2,4,6,8] nor recommended's [2,4]
+              '64k': { batch_sizes: '*' }, // matches all's [2,4] here, but the overall selection still isn't a full match for either name
+            },
+          },
+        ];
+        const bundle = buildModelBundleObject('custom-bundle', selections);
+        expect(bundle.spec.modelConfigs[0].batchingConfig).toEqual({
+          '64k': { batch_sizes: '*' },
+          '8k': { batch_sizes: [2] },
+        });
+      });
+
+      it('serializes a named-config match as a plain string, not an inline map', () => {
+        const selections: ModelBundleSelection[] = [
+          {
+            model: mockMultiArchModel,
+            arch: 'llama-4-maverick',
+            profile: mockRecommendedSubsetProfile,
+            batchingConfigOverride: {
+              '8k': { batch_sizes: '*' },
+              '64k': { batch_sizes: '*' },
+            },
+          },
+        ];
+        const yamlStr = generateModelBundleYaml('named-ref-bundle', selections);
+        expect(yamlStr).toContain('batchingConfig: all');
+        expect(yamlStr).not.toMatch(/batchingConfig:\n\s+64k/);
+      });
+    });
+
     it("still emits batchingConfig when some tiers are '*' but another diverges from the default", () => {
       const selections: ModelBundleSelection[] = [
         {
@@ -399,11 +525,11 @@ describe('bundle-yaml-generator', () => {
         },
       ];
       const batchingConfig = buildModelBundleObject('wildcard-partial-bundle', selections).spec
-        .modelConfigs[0].batchingConfig;
+        .modelConfigs[0].batchingConfig as BatchingConfig;
       expect(batchingConfig).toBeDefined();
       // The divergent tier keeps its explicit list; matching tiers stay '*'.
-      expect(batchingConfig!['64k'].batch_sizes).toEqual([2]);
-      expect(batchingConfig!['8k'].batch_sizes).toBe('*');
+      expect(batchingConfig['64k'].batch_sizes).toEqual([2]);
+      expect(batchingConfig['8k'].batch_sizes).toBe('*');
     });
 
     it('drops a model entirely when all its batching tiers are cleared in Step 3', () => {
@@ -533,7 +659,8 @@ describe('bundle-yaml-generator', () => {
           batchingConfigOverride: override,
         },
       ];
-      const batchingConfig = buildModelBundleObject('drop-empty-bundle', selections).spec.modelConfigs[0].batchingConfig!;
+      const batchingConfig = buildModelBundleObject('drop-empty-bundle', selections).spec.modelConfigs[0]
+        .batchingConfig as BatchingConfig;
       expect(batchingConfig).not.toHaveProperty('8k');
       expect(batchingConfig['32k'].batch_sizes).toEqual([2, 4]);
       expect(batchingConfig['64k'].batch_sizes).toBe('*');
@@ -555,7 +682,8 @@ describe('bundle-yaml-generator', () => {
           batchingConfigOverride: override,
         },
       ];
-      const batchingConfig = buildModelBundleObject('drop-empty-embed', selections).spec.modelConfigs[0].batchingConfig!;
+      const batchingConfig = buildModelBundleObject('drop-empty-embed', selections).spec.modelConfigs[0]
+        .batchingConfig as BatchingConfig;
       expect(batchingConfig).not.toHaveProperty('8k');
       expect(batchingConfig['32k'].is_default).toBe(true);
       expect(batchingConfig['64k'].is_default).toBeUndefined();

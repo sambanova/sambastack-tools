@@ -29,7 +29,7 @@ function healthyProfile(name: string): ModelProfile {
     spec: {
       model_arch: name,
       features: [],
-      defaultBatchingConfig: { '8k': { batch_sizes: [2, 4] }, '32k': { batch_sizes: [2] } },
+      batchingConfigs: { all: { '8k': { batch_sizes: [2, 4] }, '32k': { batch_sizes: [2] } } },
       pefs: [`${name}-ss8192-bs4:1`],
     },
   } as ModelProfile;
@@ -52,7 +52,7 @@ const e5Profile: ModelProfile = {
   spec: {
     model_arch: 'e5-mistral',
     features: [],
-    defaultBatchingConfig: { '4k': { batch_sizes: [1, 4, 8, 16, 32] } },
+    batchingConfigs: { all: { '4k': { batch_sizes: [1, 4, 8, 16, 32] } } },
     pefs: ['e5-mistral-ss4096-bs32:1'],
   },
 } as ModelProfile;
@@ -62,7 +62,7 @@ const sdTargetProfile: ModelProfile = {
   spec: {
     model_arch: 'llama-3p3-70b',
     features: [],
-    defaultBatchingConfig: { '8k': { batch_sizes: [2, 4] }, '32k': { batch_sizes: [2] } },
+    batchingConfigs: { all: { '8k': { batch_sizes: [2, 4] }, '32k': { batch_sizes: [2] } } },
     pefs: ['llama-3p1-70b-ss4096-bs4-sd-1:1'],
   },
 } as ModelProfile;

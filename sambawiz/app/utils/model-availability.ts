@@ -65,6 +65,10 @@ function toModelLike(displayName: string, entry: CheckpointMappingV3[string]): M
  * Reconstructs a `ModelProfile`-shaped object from a `ModelProfilesCache`
  * entry (keyed by `metadata.name`), so `getDisplayName` / `isSpecDecodingProfile`
  * can be reused by callers of this module without duplicating their logic.
+ * `status.batchingConfig` is backfilled from the cache's pre-resolved
+ * `batchingConfig` so `getEffectiveBatchingConfig`/`getBatchingConfigUniverse`
+ * still resolve correctly for profiles the cache stored without a
+ * `batchingConfigs` map (e.g. an operator-generated fallback).
  */
 function toModelProfileLike(profileName: string, entry: ModelProfilesCache[string]): ModelProfile {
   return {
@@ -72,9 +76,10 @@ function toModelProfileLike(profileName: string, entry: ModelProfilesCache[strin
     spec: {
       model_arch: entry.model_arch,
       features: entry.features,
-      defaultBatchingConfig: entry.batchingConfig,
+      batchingConfigs: entry.batchingConfigs,
       pefs: entry.pefs,
     },
+    status: { batchingConfig: entry.batchingConfig },
   };
 }
 

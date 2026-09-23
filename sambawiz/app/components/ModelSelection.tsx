@@ -54,6 +54,7 @@ import type {
 import {
   type ModelBundleSelection,
   getEffectiveBatchingConfig,
+  getBatchingConfigUniverse,
   getDisplayName,
   isSpecDecodingProfile,
   generateModelBundle,
@@ -184,9 +185,10 @@ function buildProfileFromCache(profileName: string, modelProfiles: ModelProfiles
     spec: {
       model_arch: cached.model_arch,
       features: cached.features,
-      defaultBatchingConfig: cached.batchingConfig,
+      batchingConfigs: cached.batchingConfigs,
       pefs: cached.pefs,
     },
+    status: { batchingConfig: cached.batchingConfig },
   };
 }
 
@@ -311,11 +313,14 @@ const DEFAULT_BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
  * profile declares anywhere (the union across tiers, ascending), so every supported batch size —
  * including values like 6 or 128 — gets a checkbox. A cell is supported only
  * when that batch size is supported for the tier by the profile (`universe` — the profile's
- * effective config, which is the complete universe of supported tiers × batch sizes); unsupported
- * cells render blank (no disabled checkbox). "All" reflects/controls every supported cell in its
- * row: checking it selects all supported (stored as `'*'`), and it auto-checks when every
- * supported cell is checked. The current selection lives in `override` and flows to the
- * generator; `is_default` is never exposed (auto-derived by the generator).
+ * `batchingConfigs.all` config, the complete universe of supported tiers × batch sizes, sourced via
+ * `getBatchingConfigUniverse`); unsupported cells render blank (no disabled checkbox). "All"
+ * reflects/controls every supported cell in its row: checking it selects all supported (stored as
+ * `'*'`), and it auto-checks when every supported cell is checked. The current selection lives in
+ * `override` — initialized from `getEffectiveBatchingConfig` (the profile's `recommended` config
+ * when it has one, narrower than `universe`, so cells `all` supports but `recommended` doesn't
+ * start unchecked) — and flows to the generator; `is_default` is never exposed (auto-derived by
+ * the generator).
  */
 function BatchingOverrideEditor({
   universe,
@@ -749,11 +754,19 @@ export default function ModelSelection() {
         archEntry?.matchingProfiles.find((p) => p.metadata.name === entry.profile) ??
         buildProfileFromCache(entry.profile, modelProfiles);
 
+      // A loaded bundle's batchingConfig may be a named reference (e.g. "all")
+      // rather than an inline map — resolve it back against the profile's own
+      // spec.batchingConfigs so Step 3 can render/edit it as a checkbox grid.
+      const loadedBatchingConfig =
+        typeof entry.batchingConfig === 'string'
+          ? profile?.spec.batchingConfigs?.[entry.batchingConfig]
+          : entry.batchingConfig;
+
       newModelStates[displayName] = {
         arch: resolvedArch,
         profileName: entry.profile,
         expanded: false,
-        override: entry.batchingConfig ?? (profile ? getEffectiveBatchingConfig(profile) : undefined),
+        override: loadedBatchingConfig ?? (profile ? getEffectiveBatchingConfig(profile) : {}),
         swappable: entry.modelSettings?.swappable,
         draftForDisplayName: draftCrnameSet.has(crname) ? byCrname[targetCrnameForDraft[crname]] : undefined,
       };
@@ -1428,7 +1441,7 @@ export default function ModelSelection() {
                     </Tooltip>
                   </Box>
                   <BatchingOverrideEditor
-                    universe={getEffectiveBatchingConfig(profile)}
+                    universe={getBatchingConfigUniverse(profile)}
                     override={state.override ?? {}}
                     onChange={(next) => handleOverrideChange(displayName, next)}
                   />

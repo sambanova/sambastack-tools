@@ -195,9 +195,11 @@ export const mockContinuousBatchingProfile: ModelProfile = {
   spec: {
     model_arch: 'deepseek',
     features: ['continuous_batching'],
-    defaultBatchingConfig: {
-      '8k': { batch_sizes: [1] },
-      '32k': { batch_sizes: [1] },
+    batchingConfigs: {
+      all: {
+        '8k': { batch_sizes: [1] },
+        '32k': { batch_sizes: [1] },
+      },
     },
     pefs: ['deepseek-ss32768-bs1-cb2-64:1'],
     secretNames: ['sambanova-artifact-reader'],
@@ -221,13 +223,45 @@ export const mockHighInteractivityProfile: ModelProfile = {
   spec: {
     model_arch: 'gpt-oss-fp8',
     features: [],
-    defaultBatchingConfig: {
-      '8k': { batch_sizes: [2, 4, 6, 8] },
-      '32k': { batch_sizes: [2, 4, 6, 8] },
-      '64k': { batch_sizes: [2, 4] },
-      '128k': { batch_sizes: [2] },
+    batchingConfigs: {
+      all: {
+        '8k': { batch_sizes: [2, 4, 6, 8] },
+        '32k': { batch_sizes: [2, 4, 6, 8] },
+        '64k': { batch_sizes: [2, 4] },
+        '128k': { batch_sizes: [2] },
+      },
     },
     pefs: ['gpt-oss-fp8-ss131072-bs8-dyt-1:1'],
+    secretNames: ['sambanova-artifact-reader'],
+  },
+};
+
+/**
+ * `all` is wider than `recommended` at both tiers — the operator's implicit
+ * default is `recommended` (narrower), so a user selection matching `all`
+ * exactly is a real divergence, not "left at default". Used to test that such
+ * a selection is named explicitly (`batchingConfig: all`) rather than being
+ * silently dropped (the bug this fixture was added to catch) or spelled out
+ * as a redundant inline map.
+ */
+export const mockRecommendedSubsetProfile: ModelProfile = {
+  metadata: {
+    name: 'llama-4-maverick-recommended-subset',
+  },
+  spec: {
+    model_arch: 'llama-4-maverick',
+    features: [],
+    batchingConfigs: {
+      all: {
+        '8k': { batch_sizes: [2, 4, 6, 8] },
+        '64k': { batch_sizes: [2, 4] },
+      },
+      recommended: {
+        '8k': { batch_sizes: [2, 4] },
+        '64k': { batch_sizes: [2] },
+      },
+    },
+    pefs: ['llama-4-maverick-recommended-subset:1'],
     secretNames: ['sambanova-artifact-reader'],
   },
 };
@@ -243,9 +277,11 @@ export const mockSpecDecodingTargetProfile: ModelProfile = {
   spec: {
     model_arch: 'llama-3p3-70b',
     features: [],
-    defaultBatchingConfig: {
-      '4k': { batch_sizes: [1, 4] },
-      '16k': { batch_sizes: [1] },
+    batchingConfigs: {
+      all: {
+        '4k': { batch_sizes: [1, 4] },
+        '16k': { batch_sizes: [1] },
+      },
     },
     pefs: ['llama-3p1-70b-ss4096-bs4-sd-1:1'],
     secretNames: ['sambanova-artifact-reader'],
@@ -266,9 +302,11 @@ export const mockSpecDecodingDraftProfile: ModelProfile = {
   spec: {
     model_arch: 'llama-3p2-1b',
     features: [],
-    defaultBatchingConfig: {
-      '4k': { batch_sizes: [1, 4] },
-      '16k': { batch_sizes: [1] },
+    batchingConfigs: {
+      all: {
+        '4k': { batch_sizes: [1, 4] },
+        '16k': { batch_sizes: [1] },
+      },
     },
     pefs: ['llama-3p1-1b-ss4096-bs4-1:1'],
     secretNames: ['sambanova-artifact-reader'],

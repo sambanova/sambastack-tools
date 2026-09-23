@@ -144,9 +144,10 @@ export function toModelProfileCR(name: string, entry: ModelProfilesCache[string]
     spec: {
       model_arch: entry.model_arch,
       features: entry.features,
-      defaultBatchingConfig: entry.batchingConfig,
+      batchingConfigs: entry.batchingConfigs,
       pefs: entry.pefs,
     },
+    status: { batchingConfig: entry.batchingConfig },
   };
 }
 
@@ -359,10 +360,13 @@ async function generateModelProfiles(kubeconfigPath: string, namespace: string, 
     const modelArch = item.spec?.model_arch;
     if (!name || !modelArch) continue;
 
+    const batchingConfigs = item.spec?.batchingConfigs;
+
     cache[name] = {
       model_arch: modelArch,
       features: item.spec?.features ?? [],
-      batchingConfig: item.spec?.defaultBatchingConfig ?? item.status?.batchingConfig ?? {},
+      batchingConfig: batchingConfigs?.recommended ?? batchingConfigs?.all ?? item.status?.batchingConfig ?? {},
+      ...(batchingConfigs ? { batchingConfigs } : {}),
       pefs: item.spec?.pefs ?? [],
     };
   }

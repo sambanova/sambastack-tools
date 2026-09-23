@@ -76,9 +76,9 @@ export interface Model {
  * Tier keys look like `8k`, `32k`, `128k`, a bare int like `448` (sub-1k
  * PEFs), or `<n>t` (codes-length keys for vocoder PEFs, e.g. `10t`).
  *
- * Used both as `ModelProfile.spec.defaultBatchingConfig` /
- * `ModelProfile.status.batchingConfig` and as the per-bundle override
- * `ModelBundle.spec.modelConfigs[].batchingConfig`.
+ * Used as each named entry of `ModelProfile.spec.batchingConfigs` (see
+ * `NamedBatchingConfigs`), as `ModelProfile.status.batchingConfig`, and as the
+ * per-bundle override `ModelBundle.spec.modelConfigs[].batchingConfig`.
  */
 export interface BatchingConfig {
   [tier: string]: {
@@ -86,6 +86,18 @@ export interface BatchingConfig {
     /** Auto-derived: true only on the smallest tier, for embedding models. */
     is_default?: boolean;
   };
+}
+
+/**
+ * `ModelProfile.spec.batchingConfigs`, keyed by configuration name. `all`
+ * (every batch size the profile's PEFs support, at every tier) is always
+ * present on operator-provided profiles; `recommended` (a curated, narrower
+ * subset) is present only when it differs from `all`. Other names are
+ * accepted but not treated specially. Replaces the old, single
+ * `spec.defaultBatchingConfig` field, which no longer exists in the API.
+ */
+export interface NamedBatchingConfigs {
+  [configName: string]: BatchingConfig;
 }
 
 /**
@@ -100,7 +112,7 @@ export interface ModelProfile {
   spec: {
     model_arch: string; // join key to Model.spec.checkpoints.<arch>
     features: string[]; // e.g. ["continuous_batching"]; [] => "High Interactivity"
-    defaultBatchingConfig?: BatchingConfig;
+    batchingConfigs?: NamedBatchingConfigs; // keyed by config name, e.g. "all" / "recommended"
     pefs: string[]; // <pef-cr-name>:<version> refs; name containing "sd" => spec-decoding profile
     secretNames?: string[];
   };
@@ -130,7 +142,14 @@ export interface ModelConfigEntry {
   model: string; // <crname>[:<arch>][:<version>] — see ModelRefFormatFn
   profile?: string; // named ModelProfile reference (what the builder emits)
   profileDefinition?: unknown; // inline ModelProfileSpec (builder never emits this)
-  batchingConfig?: BatchingConfig; // omitted when it matches the profile default; else full, ordered by descending seq length
+  /**
+   * Omitted when the selection matches the profile's implicit default
+   * (`recommended` if present, else `all`). Else a string naming one of the
+   * profile's `spec.batchingConfigs` entries (e.g. `"all"`) when the
+   * selection matches that config exactly. Else the full config, ordered by
+   * descending sequence length.
+   */
+  batchingConfig?: BatchingConfig | string;
   modelSettings?: {
     properties?: Record<string, unknown>;
     swappable?: boolean;
@@ -241,14 +260,19 @@ export interface CheckpointMappingV3 {
 
 /**
  * New cache of `ModelProfile` CRs, keyed by `metadata.name`. `batchingConfig`
- * here is whichever of `spec.defaultBatchingConfig` / `status.batchingConfig`
- * was resolved when the cache was built.
+ * is the resolved effective default (`batchingConfigs.recommended` if
+ * present, else `.all`, else `status.batchingConfig`, else `{}`) — kept flat
+ * for callers that only need the single effective config. `batchingConfigs`
+ * carries the raw named map (when the profile declares one) for callers that
+ * need to distinguish `all` (the full checkbox universe) from `recommended`
+ * (the pre-checked subset), e.g. the Model Selection Step-3 override editor.
  */
 export interface ModelProfilesCache {
   [profileName: string]: {
     model_arch: string;
     features: string[];
     batchingConfig: BatchingConfig;
+    batchingConfigs?: NamedBatchingConfigs;
     pefs: string[];
   };
 }
