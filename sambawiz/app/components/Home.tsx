@@ -985,7 +985,7 @@ data:
             fontSize: { xs: '1.1rem', md: '1.5rem' },
           }}
         >
-          Your SambaStack Bundle Configuration Wizard
+          Your SambaStack Model Deployment Wizard
         </Typography>
         <Typography
           variant="body1"
