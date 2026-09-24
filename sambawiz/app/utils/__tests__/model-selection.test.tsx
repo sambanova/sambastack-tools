@@ -95,6 +95,16 @@ function getYamlText(): string {
   return field.value;
 }
 
+/** Clicks the "x" on a model's own chip in the Step-1 Models select (not via a draft dropdown). */
+async function removeModelChip(user: ReturnType<typeof userEvent.setup>, displayName: string) {
+  const icon = screen.getAllByTestId('CancelIcon').find((el) => {
+    const chip = el.closest<HTMLElement>('.MuiChip-root');
+    return chip ? within(chip).queryByText(displayName) !== null : false;
+  });
+  if (!icon) throw new Error(`No removable chip found for "${displayName}"`);
+  await user.click(icon);
+}
+
 // Two profiles matching the same arch, used to exercise multi-tile rows.
 const embeddingHighInteractivityProfile: ModelProfile = {
   metadata: { name: 'gte-qwen2-hi' },
@@ -663,6 +673,46 @@ describe('ModelSelection (V3)', () => {
     });
   });
 
+  it('drops the target\'s dangling draft link when the draft is removed via its own chip', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockSpecDecodingTargetModel.spec.name]: toCheckpointEntry(mockSpecDecodingTargetModel),
+      [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [mockSpecDecodingTargetProfile.metadata.name]: toProfileEntry(mockSpecDecodingTargetProfile),
+      [mockSpecDecodingDraftProfile.metadata.name]: toProfileEntry(mockSpecDecodingDraftProfile),
+    };
+
+    await renderModelSelection(checkpointMapping, modelProfiles);
+    const user = userEvent.setup();
+    await selectModels(user, [mockSpecDecodingTargetModel.spec.name]);
+
+    const draftSelect = await screen.findByLabelText(`Draft model for ${mockSpecDecodingTargetModel.spec.name}`);
+    await user.click(draftSelect);
+    await user.click(await screen.findByRole('option', { name: mockSpecDecodingDraftModel.spec.name }));
+    await screen.findByTestId(`model-row-${mockSpecDecodingDraftModel.spec.name}`);
+
+    // Remove the draft directly from its own Step-1 chip — not via the target's
+    // "Draft model for X" dropdown (which would properly clear the link).
+    await removeModelChip(user, mockSpecDecodingDraftModel.spec.name);
+
+    await waitFor(() => {
+      const doc = yaml.load(getYamlText()) as {
+        spec: {
+          modelConfigs: Array<{ model: string }>;
+          specDecodingPairs?: Array<{ target: string; draft: string }>;
+        };
+      };
+      // The draft is gone — the target must not reference it as a pair, and the
+      // "Draft model for X" dropdown must not still claim it's selected.
+      expect(doc.spec.modelConfigs.some((c) => c.model.startsWith(mockSpecDecodingDraftModel.metadata.name))).toBe(false);
+      expect(doc.spec.specDecodingPairs ?? []).toEqual([]);
+    });
+    expect(
+      screen.getByLabelText(`Draft model for ${mockSpecDecodingTargetModel.spec.name}`)
+    ).toHaveTextContent('skip');
+  });
+
   it('generates a single ModelBundle document once a profile is resolved', async () => {
     const checkpointMapping: CheckpointMappingV3 = {
       [mockSpecDecodingDraftModel.spec.name]: toCheckpointEntry(mockSpecDecodingDraftModel),
@@ -950,5 +1000,36 @@ describe('ModelSelection saved-session restore', () => {
       expect(global.fetch).toHaveBeenCalledWith('/api/model-selection-state', { method: 'DELETE' })
     );
     expect(screen.queryByText(/A previous session is saved/)).not.toBeInTheDocument();
+  });
+});
+
+describe('ModelSelection load-existing-bundle', () => {
+  it('generates the YAML as soon as a bundle loads, with no further interaction', async () => {
+    const checkpointMapping: CheckpointMappingV3 = {
+      [mockEmbeddingModel.spec.name]: toCheckpointEntry(mockEmbeddingModel),
+    };
+    const modelProfiles: ModelProfilesCache = {
+      [embeddingHighInteractivityProfile.metadata.name]: toProfileEntry(embeddingHighInteractivityProfile),
+    };
+    await renderModelSelection(checkpointMapping, modelProfiles);
+
+    // Mirrors the event model-selection/page.tsx's "Load" dialog dispatches once
+    // /api/load-bundle or /api/load-deployed-bundle resolves a bundle.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('loadBundleState', {
+          detail: {
+            bundleName: 'loaded-bundle',
+            modelConfigs: [
+              { model: mockEmbeddingModel.metadata.name, profile: embeddingHighInteractivityProfile.metadata.name },
+            ],
+            specDecodingPairs: [],
+          },
+        })
+      );
+    });
+
+    expect(await screen.findByDisplayValue(/kind: ModelBundle/)).toBeInTheDocument();
+    expect(getYamlText()).toContain(`profile: ${embeddingHighInteractivityProfile.metadata.name}`);
   });
 });

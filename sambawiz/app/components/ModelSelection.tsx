@@ -715,7 +715,6 @@ export default function ModelSelection() {
     if (Object.keys(modelProfiles).length === 0) return;
 
     const parsed = pendingLoad;
-    isLoadingFromSavedState.current = true;
 
     const byCrname: Record<string, string> = {};
     Object.entries(checkpointMapping).forEach(([displayName, entry]) => {
@@ -784,10 +783,6 @@ export default function ModelSelection() {
     setBundleName(parsed.bundleName);
     setValidationResult(null);
     setPendingLoad(null);
-
-    setTimeout(() => {
-      isLoadingFromSavedState.current = false;
-    }, 100);
     // availableByDisplayName / modelProfiles are read at apply-time only (not meant to re-trigger this effect on every cache tick)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingLoad, checkpointMapping, modelProfiles]);
@@ -808,9 +803,17 @@ export default function ModelSelection() {
       removed.forEach((name) => {
         delete nextModelStates[name];
         Object.keys(nextModelStates).forEach((key) => {
-          if (nextModelStates[key].draftForDisplayName === name) {
+          const state = nextModelStates[key];
+          if (!state) return;
+          if (state.draftForDisplayName === name) {
+            // `name` was this model's spec-decoding target — the draft leaves with it.
             delete nextModelStates[key];
             nextSelectedModels = nextSelectedModels.filter((m) => m !== key);
+          } else if (state.draftChoice === name) {
+            // `name` was this model's chosen draft, removed on its own (e.g. via its
+            // own chip) — drop the now-dangling link rather than leaving this model
+            // pointed at a draft that's no longer selected.
+            nextModelStates[key] = { ...state, draftChoice: undefined };
           }
         });
       });
