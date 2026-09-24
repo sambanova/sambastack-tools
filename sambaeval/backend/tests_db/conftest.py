@@ -35,6 +35,23 @@ try:
     with get_engine().connect() as conn:
         conn.execute(text("SELECT 1"))
     bootstrap.bootstrap()
+
+    # Only catalog generators may run in db mode; register the offline echo
+    # fixture the tests use (idempotent).
+    from sambaeval.db import session_scope
+    from sambaeval.models_db import Generator
+
+    with session_scope() as _s:
+        if _s.get(Generator, "echo_test") is None:
+            _s.add(
+                Generator(
+                    key="echo_test",
+                    display_name="Echo (tests)",
+                    script_path="backend/tests/fixtures/echo_generator.py",
+                    requires_sandbox=False,
+                    enabled=True,
+                )
+            )
     _INFRA_OK = True
 except Exception as err:  # noqa: BLE001
     _INFRA_OK = False

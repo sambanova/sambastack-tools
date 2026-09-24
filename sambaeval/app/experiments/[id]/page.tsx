@@ -1657,17 +1657,21 @@ export default function ExperimentPage({
             Output generator
             <InfoTooltip text={OUTPUT_GENERATOR_TOOLTIP} />
           </label>
-          {generators.length > 0 && (
+          {/* With a catalog (multi-user server) only catalog generators run —
+              the server refuses anything else — so there is no free-text path.
+              Experiments saved with a catalog script path still match. */}
+          {generators.length > 0 ? (
             <select
               value={
-                generators.some((g) => g.key === exp.output_generator)
-                  ? exp.output_generator
-                  : ""
+                generators.find(
+                  (g) =>
+                    g.key === exp.output_generator ||
+                    g.script_path === exp.output_generator,
+                )?.key ?? ""
               }
               onChange={(e) => update({ output_generator: e.target.value })}
-              className="mb-2"
             >
-              <option value="">— default / custom (set path below) —</option>
+              <option value="">— default —</option>
               {generators.map((g) => (
                 <option key={g.key} value={g.key}>
                   {g.display_name}
@@ -1675,13 +1679,14 @@ export default function ExperimentPage({
                 </option>
               ))}
             </select>
+          ) : (
+            <input
+              value={exp.output_generator ?? ""}
+              onChange={(e) => update({ output_generator: e.target.value })}
+              placeholder="(blank → scripts/generators/default_generator.py)"
+              spellCheck={false}
+            />
           )}
-          <input
-            value={exp.output_generator ?? ""}
-            onChange={(e) => update({ output_generator: e.target.value })}
-            placeholder="(blank → scripts/generators/default_generator.py)"
-            spellCheck={false}
-          />
         </div>
         <div className="mt-3">
           <label className="flex items-center gap-2 text-sm cursor-pointer select-none w-fit">

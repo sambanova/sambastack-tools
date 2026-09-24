@@ -41,3 +41,11 @@ CLAUDE.md
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Agent tooling docs and scratch files
+AGENTS.md
+CONTEXT.md
+CONTEXT-MAP.md
+docs/agents/
+docs/adr/
+.scratch/

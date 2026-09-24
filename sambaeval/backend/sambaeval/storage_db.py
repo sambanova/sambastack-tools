@@ -34,6 +34,7 @@ from .models import LlmJudgeScorerDef, Provider as ProviderModel, ResultRow, Run
 from .models_db import (
     Dataset,
     Experiment,
+    Generator,
     Provider,
     Result,
     Run,
@@ -1099,6 +1100,32 @@ def experiment_owner_id(experiment_id: str) -> Optional[uuid.UUID]:
     with session_scope() as session:
         row = session.get(Experiment, experiment_id)
         return row.owner_id if row else None
+
+
+def find_generator(ref: str) -> Optional[dict]:
+    """The catalog entry whose key — or, for experiments saved before keys, whose
+    exact script_path — equals ``ref``; None if there is none. No path
+    normalisation: a spelling variant of a catalog path is not that entry."""
+    with session_scope() as session:
+        g = session.get(Generator, ref) or session.execute(
+            select(Generator).where(Generator.script_path == ref)
+        ).scalars().first()
+        if g is None:
+            return None
+        return {
+            "key": g.key,
+            "display_name": g.display_name,
+            "script_path": g.script_path,
+            "requires_sandbox": g.requires_sandbox,
+            "enabled": g.enabled,
+        }
+
+
+def experiment_acl(experiment_id: str) -> Optional[tuple[uuid.UUID, str]]:
+    """(owner_id, visibility) for access checks, or None if no such experiment."""
+    with session_scope() as session:
+        row = session.get(Experiment, experiment_id)
+        return (row.owner_id, row.visibility) if row else None
 
 
 def get_experiment_by_share_token(token: str) -> Optional[ExperimentModel]:

@@ -63,6 +63,7 @@ export interface Generator {
   key: string;
   display_name: string;
   description: string;
+  script_path: string;
   requires_sandbox: boolean;
 }
 
