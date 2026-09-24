@@ -1284,19 +1284,6 @@ data:
           )}
         </Button>
       </Paper>
-
-      {/* Footer Info */}
-      <Box
-        sx={{
-          mt: 6,
-          textAlign: 'center',
-          color: 'text.secondary',
-        }}
-      >
-        <Typography variant="body2" sx={{ fontSize: '0.875rem' }}>
-          Ready to build? Use the navigation menu to access the bundle builder and deployment tools.
-        </Typography>
-      </Box>
       </Box>
     </>
   );
