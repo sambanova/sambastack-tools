@@ -18,6 +18,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+from .config import settings
 from .models import DatasetRow, ModelConfig, Provider
 
 # The generator scripts live at <product>/scripts/generators, fixed relative to
@@ -38,7 +39,45 @@ def _ensure_generators_on_path() -> None:
         sys.path.insert(0, p)
 
 
+class GeneratorNotAllowed(ValueError):
+    """The experiment names a generator outside the enabled catalog."""
+
+
+def catalog_generator(output_generator: Optional[str]) -> Optional[dict]:
+    """The enabled catalog entry an experiment's ``output_generator`` refers to
+    (by key, or by exact catalog script_path), or None for the built-in default.
+
+    Multi-user (db) mode only. Raises ``GeneratorNotAllowed`` for anything
+    else: the catalog is the list of generators a deployment offers.
+    """
+    ref = (output_generator or "").strip()
+    if not ref:
+        return None
+    from . import storage_db  # local: db deps are optional for the CLI
+
+    entry = storage_db.find_generator(ref)
+    if entry is None or not entry["enabled"]:
+        raise GeneratorNotAllowed(
+            f"Unknown or disabled output generator {ref!r}; pick one from the "
+            "generator catalog."
+        )
+    return entry
+
+
 def resolve_generator_path(output_generator: Optional[str]) -> Path:
+    if settings.use_db:
+        entry = catalog_generator(output_generator)
+        if entry is None:
+            return DEFAULT_GENERATOR
+        # Catalog paths are relative to the product root.
+        p = (_ROOT / entry["script_path"]).resolve()
+        if not p.is_relative_to(_ROOT.resolve()):
+            raise GeneratorNotAllowed(
+                f"Catalog generator {entry['key']!r} points outside the product root."
+            )
+        return p
+    # Single-user file backend (CLI / local UI): the operator owns the machine,
+    # so any local script path is allowed.
     if not output_generator or not output_generator.strip():
         return DEFAULT_GENERATOR
     p = Path(output_generator)

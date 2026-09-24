@@ -18,7 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .. import context, paths, run_registry, storage
+from .. import authz, context, paths, run_registry, storage
 from ..config import settings
 
 try:  # DB backend helpers (queue/control) — only importable when deps present.
@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover
     storage_db = None  # type: ignore
 from ..datasets import load_dataset
 from ..executor import ExecutorProgress, run_experiment
+from ..generators import GeneratorNotAllowed, catalog_generator
 from ..models import Experiment, LlmJudgeScorerDef, Provider
 from ..run_registry import RunControl
 from . import admin as admin_routes
@@ -102,6 +103,41 @@ def _current_user(request: Request):
     return getattr(request.state, "user", None)
 
 
+def _experiment_guard(
+    exp_id: str, request: Request, *, edit: bool
+) -> Optional[JSONResponse]:
+    """Access check for routes addressing one experiment; None means allowed.
+
+    View follows the authz visibility rule (a valid ``?token=`` share link
+    included) -> 404 otherwise, so a private experiment doesn't reveal that it
+    exists. ``edit`` additionally requires ownership (or admin) -> 403 for an
+    experiment the caller can see but not change. A missing experiment passes:
+    the route itself decides (create, or its own 404). The single-user file
+    backend has no owners, so it always passes.
+    """
+    if not (settings.use_db and storage_db is not None):
+        return None
+    acl = storage_db.experiment_acl(exp_id)
+    if acl is None:
+        return None
+    owner_id, visibility = acl
+    user = _current_user(request)
+    if user is None:
+        return JSONResponse({"error": "unauthenticated"}, status_code=401)
+    token = request.query_params.get("token")
+    shared = storage_db.get_experiment_by_share_token(token) if token else None
+    if not authz.can_view(
+        viewer=user,
+        owner_id=owner_id,
+        visibility=visibility,
+        share_token_ok=shared is not None and shared.id == exp_id,
+    ):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if edit and not authz.can_edit(viewer=user, owner_id=owner_id):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return None
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
@@ -127,6 +163,8 @@ def list_generators(request: Request) -> dict:
                     "key": g.key,
                     "display_name": g.display_name,
                     "description": g.description,
+                    # Lets the picker match experiments saved with a path.
+                    "script_path": g.script_path,
                     "requires_sandbox": g.requires_sandbox,
                 }
                 for g in rows
@@ -145,25 +183,27 @@ def _sandbox_block_reason(experiment: Experiment) -> Optional[str]:
     """
     if settings.sandbox_enabled or not settings.use_db:
         return None
-    script_path = (experiment.output_generator or "").strip()
-    if not script_path:
+    # Resolved through the catalog, the same lookup the worker uses. Callers
+    # validate first, so an unknown generator never reaches this point.
+    g = catalog_generator(experiment.output_generator)
+    if g is None or not g["requires_sandbox"]:
         return None
-    from sqlalchemy import select as _select
-
-    from ..db import session_scope
-    from ..models_db import Generator
-
-    with session_scope() as session:
-        g = session.execute(
-            _select(Generator).where(Generator.script_path == script_path)
-        ).scalars().first()
-        if g is None or not g.requires_sandbox:
-            return None
-        name = g.display_name or g.key
+    name = g["display_name"] or g["key"]
     return (
         f"'{name}' executes model-generated code, but code execution is "
         "disabled in this deployment (SANDBOX_ENABLED=0)."
     )
+
+
+def _generator_error(experiment: Experiment) -> Optional[JSONResponse]:
+    """400 unless the experiment's generator is allowed here (db mode only)."""
+    if not settings.use_db:
+        return None
+    try:
+        catalog_generator(experiment.output_generator)
+    except GeneratorNotAllowed as err:
+        return JSONResponse({"error": str(err)}, status_code=400)
+    return None
 
 
 def _exp_json(e: Experiment) -> dict:
@@ -213,10 +253,17 @@ def list_experiments(request: Request) -> dict:
 
 
 @app.post("/api/experiments")
-async def create_experiment(request: Request) -> dict:
+async def create_experiment(request: Request):
     body = await request.json()
     exp_id = body["id"] if isinstance(body.get("id"), str) and body["id"] else storage.next_experiment_id()
+    # Saving is an upsert; a caller-chosen id that belongs to another user is
+    # reported as taken instead.
+    if _experiment_guard(exp_id, request, edit=True) is not None:
+        return JSONResponse({"error": "Experiment id already in use"}, status_code=409)
     experiment = _build_experiment(body, exp_id, with_example_count=False)
+    invalid = _generator_error(experiment)
+    if invalid is not None:
+        return invalid
     storage.save_experiment(experiment)
     return {"experiment": _exp_json(experiment)}
 
@@ -270,15 +317,24 @@ def share_experiment(exp_id: str, request: Request):
 
 
 @app.put("/api/experiments/{exp_id}")
-async def update_experiment(exp_id: str, request: Request) -> dict:
+async def update_experiment(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     body = await request.json()
     experiment = _build_experiment(body, exp_id, with_example_count=True)
+    invalid = _generator_error(experiment)
+    if invalid is not None:
+        return invalid
     storage.save_experiment(experiment)
     return {"experiment": _exp_json(experiment)}
 
 
 @app.delete("/api/experiments/{exp_id}")
-def delete_experiment(exp_id: str) -> dict:
+def delete_experiment(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     storage.delete_experiment(exp_id)
     return {"ok": True}
 
@@ -299,6 +355,9 @@ def _q_get(q: "queue.Queue"):
 
 @app.post("/api/experiments/{exp_id}/run")
 async def run(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     qp = request.query_params
     try:
         concurrency = int(qp.get("concurrency") or "4")
@@ -407,6 +466,9 @@ async def run(exp_id: str, request: Request):
             )
         mode = "new"
 
+    invalid = _generator_error(experiment)
+    if invalid is not None:
+        return invalid
     blocked = _sandbox_block_reason(experiment)
     if blocked is not None:
         # 403, not 409: this is a policy refusal, not a conflict with existing
@@ -566,6 +628,9 @@ def _is_active(exp_id: str, run_id: str) -> bool:
 
 @app.post("/api/experiments/{exp_id}/run/cancel")
 def cancel(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
@@ -596,6 +661,9 @@ def cancel(exp_id: str, request: Request):
 def pause(exp_id: str, request: Request):
     """Gracefully pause a run: stop dispatching new tasks and let the in-flight
     ones finish. The run is marked ``paused`` and can be resumed later."""
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
@@ -610,6 +678,9 @@ def pause(exp_id: str, request: Request):
 def terminate(exp_id: str, request: Request):
     """Force the worker pool down so a pause doesn't block on in-flight tasks.
     The abandoned tasks write no results and re-run when the run is resumed."""
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     run_id = _resolve_active_run_id(exp_id, request)
     if run_id is None:
         return JSONResponse({"error": "no_active_run"}, status_code=404)
@@ -648,7 +719,10 @@ def _run_token_usage(exp_id: str, run_id: str) -> list[dict]:
 
 
 @app.get("/api/experiments/{exp_id}/runs")
-def list_runs(exp_id: str) -> dict:
+def list_runs(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=False)
+    if denied is not None:
+        return denied
     out = []
     for m in storage.list_runs(exp_id):
         entry = m.model_dump()
@@ -662,6 +736,9 @@ def list_runs(exp_id: str) -> dict:
 
 @app.delete("/api/experiments/{exp_id}/runs")
 def delete_run(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     run_id = request.query_params.get("run_id")
     if not run_id:
         return JSONResponse({"error": "Missing 'run_id' query parameter"}, status_code=400)
@@ -684,6 +761,9 @@ async def merge_runs(exp_id: str, request: Request):
     ``{"status": "conflict", "conflicts": [{"from", "into"}, ...]}`` when
     overwrite is off and the runs share a (provider, model, example_id) tuple.
     """
+    denied = _experiment_guard(exp_id, request, edit=True)
+    if denied is not None:
+        return denied
     body = await request.json()
     from_run_id = body.get("from_run_id")
     into_run_id = body.get("into_run_id")
@@ -708,6 +788,9 @@ async def merge_runs(exp_id: str, request: Request):
 
 @app.get("/api/experiments/{exp_id}/results")
 def results(exp_id: str, request: Request):
+    denied = _experiment_guard(exp_id, request, edit=False)
+    if denied is not None:
+        return denied
     qp = request.query_params
     fmt = qp.get("format")
     run_id = qp.get("run_id")
@@ -743,11 +826,14 @@ def results(exp_id: str, request: Request):
 
 
 @app.get("/api/experiments/{exp_id}/errors")
-def run_errors(exp_id: str, request: Request) -> dict:
+def run_errors(exp_id: str, request: Request):
     """The errors.json log for one run (defaults to the latest run).
 
     Shape: ``{ "<example_id>": { "<provider>/<model>": {"phase", "message"} } }``.
     Empty when the run recorded no errors (or has no log file)."""
+    denied = _experiment_guard(exp_id, request, edit=False)
+    if denied is not None:
+        return denied
     run_id = request.query_params.get("run_id")
     if not run_id:
         latest = storage.find_latest_run(exp_id)
