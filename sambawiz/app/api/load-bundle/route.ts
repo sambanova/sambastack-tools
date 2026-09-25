@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
-import path from 'path';
+import { resolveArtifactPath } from '@/app/utils/artifacts-dir';
 import { parseModelBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
 
 export async function GET(request: NextRequest) {
@@ -15,7 +15,14 @@ export async function GET(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const filePath = path.join(process.cwd(), 'saved_artifacts', fileName);
+    const filePath = resolveArtifactPath(fileName);
+
+    if (!filePath) {
+      return NextResponse.json({
+        success: false,
+        error: 'fileName must name a file inside the artifacts directory'
+      }, { status: 400 });
+    }
 
     if (!fs.existsSync(filePath)) {
       return NextResponse.json({

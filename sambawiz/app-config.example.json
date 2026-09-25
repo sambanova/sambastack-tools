@@ -1,4 +1,6 @@
 {
+  "_artifactsDir": "Optional. Directory for saved bundle and deployment YAML, used for saving, listing and loading. Relative paths resolve against the SambaWiz directory. Defaults to saved_artifacts.",
+  "artifactsDir": "saved_artifacts",
   "currentKubeconfig": "your-environment-name",
   "kubeconfigs": {
     "your-environment-name": {

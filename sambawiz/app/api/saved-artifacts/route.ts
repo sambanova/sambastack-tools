@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { resolveArtifactsDir } from '../../utils/artifacts-dir';
 
 export async function GET() {
   try {
-    const savedArtifactsDir = path.join(process.cwd(), 'saved_artifacts');
+    const savedArtifactsDir = resolveArtifactsDir();
 
     // Check if directory exists
     if (!fs.existsSync(savedArtifactsDir)) {
