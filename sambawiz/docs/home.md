@@ -9,7 +9,8 @@ The Home page is the landing page of SambaWiz where you configure your SambaStac
 1. **Environment Selection**: Choose from pre-configured Kubernetes environments stored in `app-config.json`
 2. **Namespace Configuration**: Specify the namespace where your bundles and deployments will be created
 3. **API Configuration**: Set up API domain, UI domain, and API key for accessing deployed models
-4. **Prerequisites Check**: Automatically validates that required tools (kubectl, helm) are installed
+4. **Air-gapped Storage (optional)**: For clusters without an artifact registry, turn on **Air-gapped environment** and enter the local/NFS checkpoint mount. It is added as `spec.storage` to every model deployment generated for this environment
+5. **Prerequisites Check**: Automatically validates that required tools (kubectl, helm) are installed
 
 ## kubectl/helm Commands Used
 
@@ -41,4 +42,4 @@ All configuration changes are saved to `app-config.json` in the root directory w
   - `apiKey`: API key for model inference
   - `apiDomain`: API endpoint domain
   - `uiDomain`: UI dashboard domain
-- `checkpointsDir`: GCS bucket path for model checkpoints
+  - `storage` *(air-gapped only)*: `hostPath` mount(s) added as `spec.storage` to generated deployments. Each mount has a volume `name` (default `nfs`), a `mountPath` inside the pod (default `/nfsdata`, must match the `local://` prefix in `models.yaml`) and the `path` on the node that holds the checkpoints. Turning the switch off removes it.

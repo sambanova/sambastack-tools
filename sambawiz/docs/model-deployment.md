@@ -15,6 +15,7 @@ The Model Deployment page manages the deployment lifecycle of validated bundles.
 ### Section 2: Deploy a Bundle
 - Select from validated bundles
 - Auto-generate deployment YAML
+- On air-gapped environments (storage configured on the Home page), the YAML includes a `spec.storage` block that mounts the checkpoints from local/NFS storage. The **Mount air-gapped checkpoint storage** checkbox adds or removes it, and a warning appears if it is missing
 - Apply the deployment to your cluster
 - Monitor deployment progress automatically
 
