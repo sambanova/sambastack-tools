@@ -824,4 +824,135 @@ describe('Model Deployment Manager', () => {
 
     jest.useFakeTimers();
   });
+
+  describe('air-gapped storage (spec.storage, CUSTEI-1560)', () => {
+    const storage = {
+      hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }],
+    };
+
+    // Route fetches by URL; `/api/environments` returns the current env's storage (if any).
+    const mockFetchWithStorage = (envStorage: typeof storage | undefined) => {
+      (global.fetch as jest.Mock).mockImplementation((url: string) => {
+        if (url === '/api/environments') {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              success: true,
+              defaultEnvironment: 'agstack2',
+              kubeconfigs: {
+                agstack2: { file: 'kubeconfigs/agstack2.yaml', namespace: 'default', ...(envStorage ? { storage: envStorage } : {}) },
+              },
+            }),
+          });
+        }
+        if (url === '/api/model-bundles') {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              success: true,
+              bundles: [
+                {
+                  name: 'gpt-oss-120b',
+                  namespace: 'default',
+                  creationTimestamp: '2024-01-01T00:00:00Z',
+                  isValid: true,
+                  validationReason: 'ValidationSucceeded',
+                  validationMessage: '',
+                  modelConfigs: [{ model: 'gpt-oss-120b:1', profile: 'gpt-oss-120b-p' }],
+                },
+              ],
+            }),
+          });
+        }
+        if (url === '/api/model-deployment-state') {
+          return Promise.resolve({ ok: true, json: async () => ({ success: false }) });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [] }) });
+      });
+    };
+
+    it('emits spec.storage for a model deployment when the environment is air-gapped, and lets the user toggle it', async () => {
+      jest.useRealTimers();
+      mockNav.params = { modelPath: 'gpt-oss-120b:gpt-oss:1', profileName: 'gpt-oss-120b-p' };
+      mockFetchWithStorage(storage);
+
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+      // The very first YAML already carries the block (generation waits for the env config).
+      expect(yamlField.value).toMatch(
+        /storage:\n\s+hostPath:\n\s+- name: nfs\n\s+mountPath: \/nfsdata\n\s+path: \/data\/sambastack-ml-data/
+      );
+      // secretNames stays alongside storage.
+      expect(yamlField.value).toContain('sambanova-artifact-reader');
+
+      await user.click(await screen.findByRole('button', { name: 'Got it' }));
+
+      const checkbox = await screen.findByRole('checkbox', { name: 'Mount air-gapped checkpoint storage' });
+      expect(checkbox).toBeChecked();
+
+      // Unchecking removes the block and warns.
+      await user.click(checkbox);
+      await waitFor(() => expect(yamlField.value).not.toContain('storage:'));
+      expect(checkbox).not.toBeChecked();
+      expect(screen.getByText(/configured as air-gapped, but the YAML below has no/)).toBeInTheDocument();
+
+      // Re-checking adds it back and clears the warning.
+      await user.click(checkbox);
+      await waitFor(() => expect(yamlField.value).toContain('mountPath: /nfsdata'));
+      expect(screen.queryByText(/configured as air-gapped, but the YAML below has no/)).not.toBeInTheDocument();
+
+      // Renaming the deployment regenerates the YAML but keeps the storage block.
+      const nameField = screen.getByLabelText('Deployment Name');
+      await user.clear(nameField);
+      await user.type(nameField, 'md-renamed');
+      await waitFor(() => expect(yamlField.value).toContain('name: md-renamed'));
+      expect(yamlField.value).toContain('path: /data/sambastack-ml-data');
+
+      jest.useFakeTimers();
+    });
+
+    it('emits spec.storage for a bundle deployment when the environment is air-gapped', async () => {
+      jest.useRealTimers();
+      mockFetchWithStorage(storage);
+
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      await user.click(await screen.findByRole('combobox', { name: 'Model Bundle' }));
+      await user.click(await screen.findByRole('option', { name: 'gpt-oss-120b' }));
+
+      const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+      expect(yamlField.value).toContain('bundle: gpt-oss-120b');
+      expect(yamlField.value).toContain('storage:');
+      expect(yamlField.value).toContain('path: /data/sambastack-ml-data');
+
+      jest.useFakeTimers();
+    });
+
+    it('emits no spec.storage and no checkbox for an online environment', async () => {
+      jest.useRealTimers();
+      mockNav.params = { modelPath: 'gpt-oss-120b:gpt-oss:1', profileName: 'gpt-oss-120b-p' };
+      mockFetchWithStorage(undefined);
+
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+      expect(yamlField.value).not.toContain('storage:');
+
+      await user.click(await screen.findByRole('button', { name: 'Got it' }));
+      expect(screen.queryByRole('checkbox', { name: 'Mount air-gapped checkpoint storage' })).not.toBeInTheDocument();
+      expect(screen.queryByText(/configured as air-gapped/)).not.toBeInTheDocument();
+
+      jest.useFakeTimers();
+    });
+  });
 });

@@ -15,6 +15,22 @@
       "uiDomain": "https://ui-another-environment.example.com/",
       "apiDomain": "https://api-another-environment.example.com/",
       "apiKey": "another-api-key-here"
+    },
+    "airgapped-environment": {
+      "file": "kubeconfigs/airgapped-kubeconfig_example.yaml",
+      "namespace": "default",
+      "uiDomain": "https://ui-airgapped-environment.example.com/",
+      "apiDomain": "https://api-airgapped-environment.example.com/",
+      "apiKey": "airgapped-api-key-here",
+      "storage": {
+        "hostPath": [
+          {
+            "name": "nfs",
+            "mountPath": "/nfsdata",
+            "path": "/data/sambastack-ml-data"
+          }
+        ]
+      }
     }
   },
   "checkpoint_overrides": {

@@ -98,13 +98,36 @@ Example `app-config.json`:
   - `uiDomain` *(optional)*: SambaStack UI domain, used to help generate an API key.
   - `apiDomain` *(optional)*: OpenAI-compatible API domain — **required for Playground** chat/embeddings.
   - `apiKey` *(optional)*: API key for inference — **required for Playground**.
+  - `storage` *(optional, air-gapped clusters only)*: Local/NFS checkpoint mount added as `spec.storage` to every `ModelDeployment` SambaWiz generates for this environment. See [Air-gapped clusters](#air-gapped-clusters).
 - `checkpoint_overrides` *(optional)*: Map of model name → checkpoint version, to pin a specific checkpoint version when a model exposes more than one.
 
 **Notes:**
 - `app-config.json` is **gitignored** to keep credentials out of version control. Use `app-config.example.json` (safe to commit) as a template.
 - You can configure multiple environments and switch between them from the Home page.
 - Configuration can also be edited through the Home page UI.
-- Unlike SambaWiz 1.x, there is **no `checkpointsDir` setting** — checkpoints are resolved from each model's `Model` custom resource in the cluster, not from a storage path you configure.
+- Unlike SambaWiz 1.x, there is **no `checkpointsDir` setting** — checkpoints are resolved from each model's `Model` custom resource in the cluster. The only exception is the optional per-environment `storage` mount for air-gapped clusters (below).
+
+#### Air-gapped clusters
+
+An air-gapped cluster has no artifact registry to pull checkpoints from, so the inference pods must mount them from a local/NFS path on the nodes. Without that mount, `kubectl apply` succeeds but the pods never become ready. Configure the mount once per environment, either on the Home page (**Air-gapped environment** switch) or in `app-config.json`:
+
+```json
+"your-airgapped-environment": {
+  "file": "kubeconfigs/your-airgapped-environment.yaml",
+  "namespace": "default",
+  "storage": {
+    "hostPath": [
+      { "name": "nfs", "mountPath": "/nfsdata", "path": "/data/sambastack-ml-data" }
+    ]
+  }
+}
+```
+
+- `name`: Volume name (lowercase letters, digits and `-`). Defaults to `nfs` in the UI.
+- `mountPath`: Where the checkpoints are mounted inside the pod. Must match the `local://` prefix used in your `models.yaml`. Defaults to `/nfsdata` in the UI.
+- `path`: Directory on the cluster nodes that holds the checkpoints. Cluster-specific, so there is no default.
+
+When `storage` is set, both the web UI and the CLI add it to every generated `ModelDeployment` as `spec.storage`. Environments without `storage` (online installs) generate exactly the same YAML as before.
 
 ### 3. Configure Kubernetes Access
 

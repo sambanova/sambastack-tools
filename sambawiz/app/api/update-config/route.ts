@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { validateDeploymentStorage, type DeploymentStorage } from '../../utils/deployment-storage';
 
 interface KubeconfigEntry {
   file: string;
@@ -8,6 +9,7 @@ interface KubeconfigEntry {
   apiKey?: string;
   apiDomain?: string;
   uiDomain?: string;
+  storage?: DeploymentStorage;
 }
 
 interface AppConfig {
@@ -21,6 +23,12 @@ interface UpdateConfigRequest {
   apiKey?: string;
   apiDomain?: string;
   uiDomain?: string;
+  /**
+   * Air-gapped checkpoint storage (`spec.storage` for generated deployments).
+   * `undefined` leaves the saved value untouched, `null` removes it, and an
+   * object is validated and saved.
+   */
+  storage?: DeploymentStorage | null;
 }
 
 export async function POST(request: Request) {
@@ -33,6 +41,21 @@ export async function POST(request: Request) {
         success: false,
         error: 'Missing required fields: environment and namespace'
       }, { status: 400 });
+    }
+
+    // Validate storage up front so a bad value never triggers the PEF refresh.
+    let storage: DeploymentStorage | null | undefined = undefined;
+    if (body.storage === null) {
+      storage = null;
+    } else if (body.storage !== undefined) {
+      const storageResult = validateDeploymentStorage(body.storage);
+      if (!storageResult.valid) {
+        return NextResponse.json({
+          success: false,
+          error: `Invalid air-gapped storage: ${storageResult.error}`
+        }, { status: 400 });
+      }
+      storage = storageResult.storage;
     }
 
     // Read existing config
@@ -116,6 +139,13 @@ export async function POST(request: Request) {
     // Update UI domain if provided
     if (uiDomain !== undefined) {
       config.kubeconfigs[environment].uiDomain = uiDomain;
+    }
+
+    // Update (or remove) air-gapped storage if provided
+    if (storage === null) {
+      delete config.kubeconfigs[environment].storage;
+    } else if (storage !== undefined) {
+      config.kubeconfigs[environment].storage = storage;
     }
 
     // Write updated config

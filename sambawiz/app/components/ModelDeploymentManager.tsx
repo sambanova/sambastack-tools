@@ -46,6 +46,12 @@ import Tooltip from '@mui/material/Tooltip';
 import yaml from 'js-yaml';
 import DocumentationPanel from './DocumentationPanel';
 import { arePodNamesShortened } from '../utils/pod-name-limits';
+import {
+  applyDeploymentStorage,
+  getDeploymentStorage,
+  readEnvironmentStorage,
+  type DeploymentStorage,
+} from '../utils/deployment-storage';
 
 /**
  * A deployed `ModelDeployment` CR summary, as returned by
@@ -234,6 +240,13 @@ export default function ModelDeploymentManager() {
   // "Ignore EOS" checkbox: always available (not gated by profile features).
   // Resets on each new selection and injects `ENABLE_IGNORE_EOS` when checked.
   const [ignoreEos, setIgnoreEos] = useState<boolean>(false);
+  // Air-gapped checkpoint storage configured for the current environment in
+  // app-config.json (`kubeconfigs.<env>.storage`), or null for online installs.
+  // When set, it is emitted as `spec.storage` in every generated deployment.
+  // YAML generation for URL-driven selections waits for `envStorageLoaded` so
+  // the first YAML shown already carries the block.
+  const [envStorage, setEnvStorage] = useState<DeploymentStorage | null>(null);
+  const [envStorageLoaded, setEnvStorageLoaded] = useState<boolean>(false);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -364,6 +377,7 @@ export default function ModelDeploymentManager() {
     fetchBundleDeployments();
     fetchBundles();
     fetchModelProfileFeatures();
+    fetchEnvironmentStorage();
     // Skip loading saved state if a bundle (or a model+profile) is specified in
     // the URL query params — those drive the form instead of the saved state.
     if (!searchParams.get('bundle') && !hasModelParams) {
@@ -397,7 +411,7 @@ export default function ModelDeploymentManager() {
   // Handle query parameter for pre-selecting a bundle
   useEffect(() => {
     const bundleParam = searchParams.get('bundle');
-    if (bundleParam && validBundles.length > 0) {
+    if (bundleParam && validBundles.length > 0 && envStorageLoaded) {
       // Check if the bundle from the query parameter exists in valid bundles
       const bundleExists = validBundles.some((bundle) => bundle.name === bundleParam);
       if (bundleExists) {
@@ -421,7 +435,7 @@ export default function ModelDeploymentManager() {
         setIgnoreEos(false);
 
         // Generate YAML
-        const yaml = generateDeploymentYaml(bundleParam, suggestedName);
+        const yaml = generateDeploymentYaml(bundleParam, suggestedName, false, false, envStorage);
         setDeploymentYaml(yaml);
 
         // Clear deployment result to start fresh
@@ -429,13 +443,13 @@ export default function ModelDeploymentManager() {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, validBundles]);
+  }, [searchParams, validBundles, envStorageLoaded]);
 
   // Handle query params for deploying an individual model + profile. When both
   // `modelPath` and `profileName` are present, generate a `spec.models` inline
   // deployment (no ModelBundle CR) and default the source selector to "model".
   useEffect(() => {
-    if (modelPath && profileName) {
+    if (modelPath && profileName && envStorageLoaded) {
       // Reset section 3 (hide it by clearing monitoredDeployment)
       setMonitoredDeployment('');
 
@@ -452,7 +466,7 @@ export default function ModelDeploymentManager() {
 
       // Generate YAML
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+        generateModelDeploymentYaml(modelPath, profileName, suggestedName, false, false, envStorage)
       );
 
       // Clear deployment result to start fresh
@@ -463,7 +477,7 @@ export default function ModelDeploymentManager() {
       setShowModelDeployNotice(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelPath, profileName]);
+  }, [modelPath, profileName, envStorageLoaded]);
 
   // Returns next poll delay based on how long the last fetch took:
   // elapsed < 6s → 6s, elapsed < 12s → 12s, else 24s
@@ -681,6 +695,23 @@ export default function ModelDeploymentManager() {
     }
   };
 
+  // Fetch the current environment's air-gapped storage from app-config.json.
+  // A failed fetch or a missing/invalid block just means "no storage" — the
+  // YAML then stays exactly as on an online install.
+  const fetchEnvironmentStorage = async () => {
+    try {
+      const response = await fetch('/api/environments');
+      const data = await response.json();
+      if (data.success && data.defaultEnvironment && data.kubeconfigs) {
+        setEnvStorage(readEnvironmentStorage(data.kubeconfigs[data.defaultEnvironment]));
+      }
+    } catch (err) {
+      console.error('Failed to fetch environment storage:', err);
+    } finally {
+      setEnvStorageLoaded(true);
+    }
+  };
+
   // A ModelProfile supports prompt caching when its `features` includes
   // `prompt_caching` (see the ModelProfile example in the deployment docs).
   const profileHasPromptCaching = (profile?: string): boolean =>
@@ -795,6 +826,19 @@ export default function ModelDeploymentManager() {
     setDeploymentYaml((current) => applyIgnoreEos(current, checked));
   };
 
+  // Whether the YAML in the editor currently carries `spec.storage`. The
+  // air-gapped storage checkbox reads this directly (rather than keeping its own
+  // state) so it stays correct after manual edits and restored sessions.
+  const yamlHasStorage = useMemo(
+    () => getDeploymentStorage(deploymentYaml) !== null,
+    [deploymentYaml]
+  );
+
+  // Toggle air-gapped storage: add or remove `spec.storage` in the current YAML.
+  const handleToggleStorage = (checked: boolean) => {
+    setDeploymentYaml((current) => applyDeploymentStorage(current, checked ? envStorage : null));
+  };
+
   /**
    * Generate a `ModelDeployment` document (replaces the old hand-built
    * `BundleDeployment` template-literal string). Serialized with `js-yaml`'s
@@ -803,7 +847,9 @@ export default function ModelDeploymentManager() {
    * Per v3plan.md Q6, SambaWiz always references the bundle by name
    * (`spec.bundle`) — never inline `spec.models`. All other deployment
    * knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) carry
-   * over unchanged from the V2 `BundleDeployment` defaults.
+   * over unchanged from the V2 `BundleDeployment` defaults. `storage` (the
+   * environment's air-gapped checkpoint mount) is appended as `spec.storage`
+   * only when set.
    */
   // Build the `spec.engineConfig`, prepending the prompt-caching and/or ignore-EOS
   // env vars when requested (env_vars first for readability, then the default
@@ -823,7 +869,8 @@ export default function ModelDeploymentManager() {
     bundleName: string,
     deploymentName: string,
     withPromptCaching = false,
-    withIgnoreEos = false
+    withIgnoreEos = false,
+    storage: DeploymentStorage | null = null
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -843,6 +890,7 @@ export default function ModelDeploymentManager() {
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
         engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
+        ...(storage ? { storage } : {}),
       },
     };
 
@@ -871,7 +919,8 @@ export default function ModelDeploymentManager() {
     profile: string,
     deploymentName: string,
     withPromptCaching = false,
-    withIgnoreEos = false
+    withIgnoreEos = false,
+    storage: DeploymentStorage | null = null
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -898,6 +947,7 @@ export default function ModelDeploymentManager() {
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
         engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
+        ...(storage ? { storage } : {}),
       },
     };
 
@@ -927,7 +977,7 @@ export default function ModelDeploymentManager() {
       const suggestedName = deriveModelDeploymentName(modelPath);
       setDeploymentName(suggestedName);
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+        generateModelDeploymentYaml(modelPath, profileName, suggestedName, false, false, envStorage)
       );
     }
   };
@@ -952,7 +1002,7 @@ export default function ModelDeploymentManager() {
       setDeploymentName(suggestedName);
 
       // Generate YAML
-      const yaml = generateDeploymentYaml(bundleName, suggestedName);
+      const yaml = generateDeploymentYaml(bundleName, suggestedName, false, false, envStorage);
       setDeploymentYaml(yaml);
     } else {
       setDeploymentName('');
@@ -965,15 +1015,18 @@ export default function ModelDeploymentManager() {
     setDeploymentName(newName);
 
     // Regenerate YAML with new deployment name, preserving the prompt-caching
-    // (only meaningful when the selection supports it) and ignore-EOS choices.
+    // (only meaningful when the selection supports it), ignore-EOS and storage
+    // choices. The storage block is carried over as it is in the editor, so a
+    // hand-edited mount survives a rename.
     const withPromptCaching = enablePromptCaching && promptCachingAvailable;
     const withIgnoreEos = ignoreEos;
+    const storage = getDeploymentStorage(deploymentYaml);
     if (deployMode === 'model' && modelPath && profileName && newName) {
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching, withIgnoreEos)
+        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching, withIgnoreEos, storage)
       );
     } else if (selectedBundle && newName) {
-      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching, withIgnoreEos);
+      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching, withIgnoreEos, storage);
       setDeploymentYaml(yaml);
     }
   };
@@ -1294,6 +1347,53 @@ export default function ModelDeploymentManager() {
           <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
         </Tooltip>
       </Box>
+
+      {/* Air-gapped checkpoint storage — only offered when the current
+          environment has `storage` configured on the Home page. Checked means
+          the YAML carries `spec.storage`; it is on by default for every new
+          selection. */}
+      {envStorage && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+          <FormControlLabel
+            sx={{ mr: 0 }}
+            control={
+              <Checkbox
+                checked={yamlHasStorage}
+                onChange={(e) => handleToggleStorage(e.target.checked)}
+              />
+            }
+            label="Mount air-gapped checkpoint storage"
+          />
+          <Tooltip
+            arrow
+            title={
+              <Box>
+                <Typography variant="caption" sx={{ display: 'block', mb: 0.5 }}>
+                  Adds <code>spec.storage</code> so the pods read checkpoints from local/NFS storage
+                  instead of an artifact registry. Configured for this environment on the Home page:
+                </Typography>
+                {envStorage.hostPath.map((mount) => (
+                  <Typography key={mount.name} variant="caption" sx={{ display: 'block', fontFamily: 'monospace' }}>
+                    {mount.name}: {mount.path} → {mount.mountPath}
+                  </Typography>
+                ))}
+              </Box>
+            }
+          >
+            <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+          </Tooltip>
+          <Button size="small" onClick={() => router.push('/home')} sx={{ ml: 1, textTransform: 'none' }}>
+            Edit storage settings
+          </Button>
+        </Box>
+      )}
+      {envStorage && deploymentYaml && !yamlHasStorage && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          This environment is configured as air-gapped, but the YAML below has no{' '}
+          <code>spec.storage</code> block. Without it the pods cannot find their checkpoints and the
+          deployment will never become ready.
+        </Alert>
+      )}
 
       {/* Generated YAML */}
       <Box>

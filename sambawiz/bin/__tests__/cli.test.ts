@@ -236,6 +236,24 @@ describe('buildModelDeploymentYaml', () => {
     expect(yaml).toContain('engineConfig:');
     expect(yaml).toContain('startupTimeout: 7200');
   });
+
+  it('emits no spec.storage when the environment has none (online install)', () => {
+    const { yaml } = buildModelDeploymentYaml('my-bundle');
+    expect(yaml).not.toContain('storage:');
+    expect(buildModelDeploymentYaml('my-bundle', null).yaml).toBe(yaml);
+  });
+
+  it('appends spec.storage for an air-gapped environment (CUSTEI-1560)', () => {
+    const storage = {
+      hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }],
+    };
+    const { yaml } = buildModelDeploymentYaml('my-bundle', storage);
+    expect(yaml).toContain('bundle: my-bundle');
+    expect(yaml).toContain('sambanova-artifact-reader');
+    expect(yaml).toMatch(
+      /startupTimeout: 7200\n  storage:\n    hostPath:\n      - name: nfs\n        mountPath: \/nfsdata\n        path: \/data\/sambastack-ml-data$/
+    );
+  });
 });
 
 // ─── extractBundleName (parse-bundle-yaml.ts round-trip) ─────────────────────

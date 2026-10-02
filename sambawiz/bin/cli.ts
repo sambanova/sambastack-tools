@@ -27,6 +27,11 @@ import {
   type ModelBundleSelection,
 } from '../app/utils/bundle-yaml-generator';
 import { parseModelBundleYamlContent } from '../app/utils/parse-bundle-yaml';
+import {
+  applyDeploymentStorage,
+  readEnvironmentStorage,
+  type DeploymentStorage,
+} from '../app/utils/deployment-storage';
 
 // ─── V3 CLI data model ───────────────────────────────────────────────────────
 // V3 replaces the old model→PEF (SS/BS) selection model with a
@@ -199,8 +204,15 @@ export function extractBundleName(yamlContent: string): string {
  * deployment knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.)
  * are carried over verbatim from the old `BundleDeployment` builder (Step 5,
  * "Keep all other deployment parameters unchanged").
+ *
+ * `storage` is the current environment's air-gapped checkpoint mount
+ * (app-config.json `kubeconfigs.<env>.storage`); when set it is appended as
+ * `spec.storage`, otherwise the YAML is unchanged.
  */
-export function buildModelDeploymentYaml(bundleName: string): { yaml: string; deploymentName: string } {
+export function buildModelDeploymentYaml(
+  bundleName: string,
+  storage: DeploymentStorage | null = null
+): { yaml: string; deploymentName: string } {
   const deploymentName = `md-${bundleName}`;
   const yamlText = [
     'apiVersion: sambanova.ai/v1alpha1',
@@ -220,7 +232,7 @@ export function buildModelDeploymentYaml(bundleName: string): { yaml: string; de
     '  engineConfig:',
     '    startupTimeout: 7200',
   ].join('\n');
-  return { yaml: yamlText, deploymentName };
+  return { yaml: storage ? applyDeploymentStorage(yamlText, storage) : yamlText, deploymentName };
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
@@ -2321,7 +2333,13 @@ async function bundleDeployAction(rl: any, namespace: string) {
     const bundleToDeploy = await select(rl, 'Select bundle to deploy:', choices);
     if (!bundleToDeploy || bundleToDeploy === 'back') return;
 
-    const { yaml, deploymentName: depName } = buildModelDeploymentYaml(bundleToDeploy);
+    // Air-gapped environments mount checkpoints from local storage (spec.storage).
+    const appConfig = requireJson(CONFIG_PATH);
+    const storage = readEnvironmentStorage(appConfig.kubeconfigs?.[appConfig.currentKubeconfig]);
+    const { yaml, deploymentName: depName } = buildModelDeploymentYaml(bundleToDeploy, storage);
+    if (storage) {
+      process.stdout.write(chalk.reset(`  Including air-gapped checkpoint storage (spec.storage) from app-config.json\n`));
+    }
 
     yamlBox('Deployment YAML', yaml);
 
