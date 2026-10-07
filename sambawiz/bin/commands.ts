@@ -43,6 +43,7 @@ import {
   generateCheckpointMapping,
   generatePefConfigs,
   getDeploymentStatus,
+  deploymentStatuses,
   parsePodLine,
   getAppVersion,
   profileHasPromptCachingOnCluster,
@@ -536,13 +537,14 @@ export function buildProgram(): Command {
   common(deploy.command('list').description('List ModelDeployments')).action((o) => {
     const ctx = resolveCtx(o);
     const items = JSON.parse(kubectl(`get modeldeployment.sambanova.ai -n ${ctx.namespace} -o json`)).items || [];
+    const statuses = deploymentStatuses(ctx.namespace, items.map((i: any) => i.metadata.name));
     const mapping = existsSync(path.join(DATA_DIR, 'checkpoint_mapping.json')) ? readCache().mapping : {};
     const rows = items.map((i: any) => {
       const crname = String(i.spec?.models?.modelConfigs?.[0]?.model ?? '').split(':')[0];
       const model = crname ? Object.keys(mapping).find((d) => mapping[d].resource_name === crname) ?? crname : null;
-      return { name: i.metadata.name, bundle: i.spec?.bundle || null, model, phase: i.status?.phase ?? '' };
-    });
-    print(ctx, rows, () => rows.forEach((r: any) => say(`${r.name.padEnd(40)} ${(r.bundle ? `bundle:${r.bundle}` : `model:${r.model ?? ''}`).padEnd(40)} ${r.phase}`)));
+      return { name: i.metadata.name, bundle: i.spec?.bundle || null, model };
+    }).map((r: any) => ({ ...r, status: statuses[r.name] }));
+    print(ctx, rows, () => rows.forEach((r: any) => say(`${r.name.padEnd(40)} ${(r.bundle ? `bundle:${r.bundle}` : `model:${r.model ?? ''}`).padEnd(40)} ${r.status}`)));
   });
   common(deploy.command('status <name>').description('Pod readiness of a deployment (exit 1 if not fully Deployed)')).action((name, o) => {
     assertName('deployment name', name);

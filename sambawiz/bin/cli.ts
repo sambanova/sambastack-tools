@@ -90,6 +90,28 @@ export function parsePodLine(line: string): PodInfo | null {
   };
 }
 
+/**
+ * Pod-based status for each deployment, like the UI's getBundleDeploymentStatus: a ModelDeployment CR has no
+ * `status.phase`, so readiness comes from its cache + inference pods. One `kubectl get pods` for all of them.
+ */
+export function deploymentStatuses(namespace: string, names: string[]): Record<string, DeploymentStatus> {
+  let lines: string[] = [];
+  try {
+    lines = execSync(`kubectl -n ${namespace} get pods`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n');
+  } catch { /* unreachable cluster: everything shows Not Deployed */ }
+  const pods = new Map<string, PodInfo>();
+  for (const l of lines) { const p = parsePodLine(l); if (p) pods.set(p.name, p); }
+  const out: Record<string, DeploymentStatus> = {};
+  for (const n of names) {
+    const { cache, default: def } = inferencePodNames(n);
+    out[n] = getDeploymentStatus(pods.get(cache) ?? null, pods.get(def) ?? null);
+  }
+  return out;
+}
+
+const statusIcon = (st: DeploymentStatus) => (st === 'Deployed' ? chalk.green('●') : st === 'Deploying' ? chalk.yellow('◌') : chalk.red('○'));
+
+
 /** Whether a ModelProfile CR lists the `prompt_caching` feature (same gate as the UI's deploy page). */
 export function profileHasPromptCachingOnCluster(profile: string, namespace: string): boolean {
   try {
@@ -2899,10 +2921,10 @@ async function bundleDeploymentMenu(rl: any, namespace: string) {
       const items: any[] = list.items || [];
       if (items.length > 0) {
         process.stdout.write(chalk.reset.bold('  Current Deployments:\n'));
+        const statuses = deploymentStatuses(namespace, items.map((i: any) => i.metadata.name));
         items.forEach((i: any) => {
-          const phase = i.status?.phase || '';
-          const icon  = phase === 'Running' || phase === 'Deployed' ? chalk.green('●') : phase === 'Pending' ? chalk.yellow('◌') : chalk.red('○');
-          process.stdout.write(`  ${icon}  ${chalk.reset(i.metadata.name)}${phase ? `  ${chalk.reset(phase)}` : ''}\n`);
+          const st = statuses[i.metadata.name];
+          process.stdout.write(`  ${statusIcon(st)}  ${chalk.reset(i.metadata.name)}  ${chalk.reset(st)}\n`);
         });
         process.stdout.write('\n');
       } else {
@@ -3077,10 +3099,10 @@ async function monitorMenu(rl: any, namespace: string) {
 
     if (!list.items?.length) { warnMsg('No deployments found.'); return; }
 
+    const statuses = deploymentStatuses(namespace, list.items.map((i: any) => i.metadata.name));
     const choices: Choice[] = list.items.map((i: any) => {
-      const phase = i.status?.phase || '';
-      const icon  = phase === 'Running' || phase === 'Deployed' ? chalk.green('●') : phase ? chalk.yellow('◌') : chalk.red('○');
-      return { name: `${icon} ${i.metadata.name}`, value: i.metadata.name, hint: phase || undefined };
+      const st = statuses[i.metadata.name];
+      return { name: `${statusIcon(st)} ${i.metadata.name}`, value: i.metadata.name, hint: st };
     });
     choices.push({ name: chalk.reset('← Back'), value: 'back' });
 

@@ -550,17 +550,21 @@ describe('deploy', () => {
     failed(await run(['deploy', 'apply', '-f', f]), /not a ModelDeployment/);
     failed(await run(['deploy', 'apply', '-f', '/no/file']), /File not found/);
   });
-  it('list shows bundle- and model-based deployments', async () => {
-    writeFileSync(stateFile(), JSON.stringify({ ...readState(), deployments: {
-      a: { metadata: { name: 'a' }, spec: { bundle: 'bg' }, status: { phase: 'Running' } },
-      b: { metadata: { name: 'b' }, spec: { models: { modelConfigs: [{ model: 'llama:a1' }] } }, status: {} },
-    } }));
+  it('list shows bundle- and model-based deployments with pod-based status (CRs have no status.phase)', async () => {
+    const { inferencePodNames } = await import('../../app/utils/inference-pod-names');
+    const n = inferencePodNames('a');
+    writeFileSync(stateFile(), JSON.stringify({ ...readState(),
+      pods: `NAME READY STATUS RESTARTS AGE\n${n.cache} 1/1 Running 0 5m\n${n.default} 2/2 Running 0 5m\n`,
+      deployments: {
+        a: { metadata: { name: 'a' }, spec: { bundle: 'bg' }, status: {} },
+        b: { metadata: { name: 'b' }, spec: { models: { modelConfigs: [{ model: 'llama:a1' }] } }, status: {} },
+      } }));
     const rows = JSON.parse(ok(await run(['deploy', 'list', '--json'])).out);
     expect(rows).toEqual([
-      { name: 'a', bundle: 'bg', model: null, phase: 'Running' },
-      { name: 'b', bundle: null, model: 'Llama', phase: '' },
+      { name: 'a', bundle: 'bg', model: null, status: 'Deployed' },
+      { name: 'b', bundle: null, model: 'Llama', status: 'Not Deployed' },
     ]);
-    expect(ok(await run(['deploy', 'list'])).out).toMatch(/model:Llama/);
+    expect(ok(await run(['deploy', 'list'])).out).toMatch(/model:Llama\s+Not Deployed/);
   });
   it('status: exit 0 only when fully Deployed; shows pod states; surfaces kubectl failure', async () => {
     const pods = (c: string, d: string) => `NAME READY STATUS RESTARTS AGE\n${c}\n${d}\n`;
