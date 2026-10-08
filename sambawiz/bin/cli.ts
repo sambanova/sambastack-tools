@@ -6,7 +6,7 @@ declare const process: any;
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import { execSync, execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync, rmSync } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import * as readlineModule from 'readline';
@@ -95,10 +95,13 @@ export function parsePodLine(line: string): PodInfo | null {
  * `status.phase`, so readiness comes from its cache + inference pods. One `kubectl get pods` for all of them.
  */
 export function deploymentStatuses(namespace: string, names: string[]): Record<string, DeploymentStatus> {
-  let lines: string[] = [];
+  let lines: string[];
   try {
     lines = execSync(`kubectl -n ${namespace} get pods`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n');
-  } catch { /* unreachable cluster: everything shows Not Deployed */ }
+  } catch (e: any) {
+    // Not "everything is Not Deployed": that would hide an unreachable cluster or an RBAC denial behind a normal-looking answer.
+    throw new Error(`kubectl get pods failed: ${kubectlErrorDetail(e)}`);
+  }
   const pods = new Map<string, PodInfo>();
   for (const l of lines) { const p = parsePodLine(l); if (p) pods.set(p.name, p); }
   const out: Record<string, DeploymentStatus> = {};
@@ -114,13 +117,17 @@ const statusIcon = (st: DeploymentStatus) => (st === 'Deployed' ? chalk.green('�
 
 /** Whether a ModelProfile CR lists the `prompt_caching` feature (same gate as the UI's deploy page). */
 export function profileHasPromptCachingOnCluster(profile: string, namespace: string): boolean {
+  let out: string;
   try {
     // The profile name comes from the cluster, so it is passed as an argument (no shell) rather than interpolated.
-    const out = execFileSync('kubectl', ['get', 'modelprofile.sambanova.ai', profile, '-n', namespace, '-o', 'json'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    return Boolean(JSON.parse(out).spec?.features?.includes('prompt_caching'));
-  } catch {
-    return false;
+    out = execFileSync('kubectl', ['get', 'modelprofile.sambanova.ai', profile, '-n', namespace, '-o', 'json'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e: any) {
+    // A profile that isn't there simply doesn't have the feature; a real failure (RBAC, unreachable cluster) must surface
+    // instead of being reported as "no prompt_caching".
+    if (/NotFound|not found/i.test(String(e?.stderr ?? e?.message ?? ''))) return false;
+    throw new Error(`kubectl get modelprofile ${profile} failed: ${kubectlErrorDetail(e)}`);
   }
+  return Boolean(JSON.parse(out).spec?.features?.includes('prompt_caching'));
 }
 
 /**
@@ -161,6 +168,26 @@ export function formatDroppedSelections(dropped: DroppedSelection[]): string[] {
 
 function warnDropped(dropped: DroppedSelection[]): void {
   formatDroppedSelections(dropped).forEach((l) => warnMsg(l));
+}
+
+/**
+ * HTTP call that returns `"<body>\n<status>"` — the shape the old `curl -sk -w "\n%{http_code}"` calls produced, so the
+ * parsing at the call sites is unchanged — without putting the API key on a command line (visible to other users via `ps`).
+ * TLS verification is off process-wide (NODE_TLS_REJECT_UNAUTHORIZED, as `curl -k` was). Network failures throw a readable error.
+ */
+export async function curlLike(url: string, opts: { method?: string; apiKey?: string; body?: string; timeoutMs: number }): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      method: opts.method ?? 'GET',
+      headers: { ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {}), ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      ...(opts.body !== undefined ? { body: opts.body } : {}),
+      signal: AbortSignal.timeout(opts.timeoutMs),
+    });
+    return `${opts.method === 'HEAD' ? '' : await res.text()}\n${res.status}`;
+  } catch (e: any) {
+    const reason = e?.name === 'TimeoutError' ? `timed out after ${opts.timeoutMs / 1000}s` : e?.cause?.message || e?.message || 'unknown error';
+    throw new Error(`Cannot reach ${url}: ${reason}`);
+  }
 }
 
 /** Never reveals more than the last 4 characters, and nothing at all for short keys. */
@@ -679,7 +706,7 @@ export async function generatePefConfigs(kubeconfigPath: string, namespace: stri
 
     if (isDyt) {
       try {
-        const indOut = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
+        const indOut = execFileSync('kubectl', ['-n', namespace, 'get', 'pef', pefName, '-o', 'json'], {
           env, encoding: 'utf-8', timeout: 15000,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -977,7 +1004,7 @@ export function editInEditor(text: string): string | null {
     errorMsg(`Editor error: ${e.message}`);
     return null;
   } finally {
-    try { execSync(`rm "${tmp}"`); } catch {}
+    try { rmSync(tmp, { force: true }); } catch {}
   }
 }
 
@@ -1445,7 +1472,7 @@ async function addEnvironmentMenu(rl: any) {
     // ── Save kubeconfig file ──────────────────────────────────────────────────
     const kubeconfigsDir = path.join(PROJECT_ROOT, 'kubeconfigs');
     if (!existsSync(kubeconfigsDir)) {
-      try { execSync(`mkdir -p "${kubeconfigsDir}"`); } catch {}
+      try { mkdirSync(kubeconfigsDir, { recursive: true }); } catch {}
     }
     const destRelative = `kubeconfigs/kubeconfig-${name}.yaml`;
     const destPath     = path.join(PROJECT_ROOT, destRelative);
@@ -1763,6 +1790,11 @@ async function startCli() {
     if (!existsSync(kPath)) {
       return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: `Kubeconfig file not found: ${envConf.file}` };
     }
+    // The namespace is spliced into kubectl/helm commands throughout the menus, so it must be a legal name.
+    const nsErr = validateResourceName(ns);
+    if (nsErr) {
+      return { appConfig: config, envConfig: null, namespace: 'default', currentEnv: env, error: `Invalid namespace "${ns}" for environment "${env}": ${nsErr}` };
+    }
     process.env.KUBECONFIG = kPath;
     return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: null };
   }
@@ -2015,7 +2047,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     spinner.start('Testing /v1/models...');
     let availableModels: string[] = [];
     try {
-      const res   = execSync(`curl -sk -w "\\n%{http_code}" "${baseUrl}v1/models" -H "Authorization: Bearer ${envConfig.apiKey}"`, { encoding: 'utf-8', timeout: 15000 });
+      const res   = await curlLike(`${baseUrl}v1/models`, { apiKey: envConfig.apiKey, timeoutMs: 15000 });
       const parts = res.trimEnd().split('\n');
       const code  = safeParseInt(parts.pop());
       const body  = parts.join('\n');
@@ -2048,12 +2080,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       try {
         const testModel   = availableModels[0];
         const chatPayload = JSON.stringify({ model: testModel, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1, stream: false });
-        const res = execSync(
-          `curl -sk -w "\\n%{http_code}" -X POST "${baseUrl}v1/chat/completions" ` +
-          `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-          `-d '${chatPayload.replace(/'/g, "'\\''")}'`,
-          { encoding: 'utf-8', timeout: 30000 }
-        );
+        const res = await curlLike(`${baseUrl}v1/chat/completions`, { method: 'POST', apiKey: envConfig.apiKey, body: chatPayload, timeoutMs: 30000 });
         const parts = res.trimEnd().split('\n');
         const code  = safeParseInt(parts.pop());
 
@@ -2082,10 +2109,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     infoRow('UI Domain', envConfig.uiDomain);
     spinner.start('Checking UI Domain...');
     try {
-      const code = safeParseInt(execSync(
-        `curl -sk -o /dev/null -w "%{http_code}" --head "${envConfig.uiDomain}"`,
-        { encoding: 'utf-8', timeout: 10000 }
-      ).trim());
+      const code = safeParseInt((await curlLike(envConfig.uiDomain, { method: 'HEAD', timeoutMs: 10000 })).trim().split('\n').pop());
       if (code === 0) {
         spinner.fail('UI Domain unreachable — no response');
         allPassed = false;
@@ -2428,7 +2452,7 @@ function loadSelectionSession(): SavedSelectionSession | null {
 }
 
 function clearSelectionSession(): void {
-  try { if (existsSync(SESSION_STATE_PATH)) execSync(`rm "${SESSION_STATE_PATH}"`); } catch {}
+  try { if (existsSync(SESSION_STATE_PATH)) rmSync(SESSION_STATE_PATH, { force: true }); } catch {}
 }
 
 /** Re-resolves a saved session's crname/arch/profileName references against the current caches. */
@@ -2676,7 +2700,7 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
         if (!chosenBundle || chosenBundle === 'back') return;
 
         try {
-          const rawYaml = execSync(`kubectl -n ${namespace} get modelbundle.sambanova.ai ${chosenBundle} -o yaml`, { encoding: 'utf-8' });
+          const rawYaml = execFileSync('kubectl', ['-n', namespace, 'get', 'modelbundle.sambanova.ai', chosenBundle, '-o', 'yaml'], { encoding: 'utf-8' });
           // Strip everything the API server manages before treating this as an editable bundle definition,
           // so renaming and re-applying it isn't rejected (resourceVersion/uid) or in conflict.
           loadedYaml  = yaml.dump(stripServerManagedFields(yaml.load(rawYaml)));
@@ -2712,11 +2736,11 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
             execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
             try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
             finalYaml = readFileSync(tmp, 'utf-8');
-            try { execSync(`rm "${tmp}"`); } catch {}
+            try { rmSync(tmp, { force: true }); } catch {}
             yamlBox('Updated YAML', finalYaml);
           } catch (e: any) {
             errorMsg(`Editor error: ${e.message}`);
-            try { execSync(`rm "${tmp}"`); } catch {}
+            try { rmSync(tmp, { force: true }); } catch {}
           }
         } else if (act === 'save') {
           const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
@@ -2793,12 +2817,12 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
           execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
           try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           workingYaml = readFileSync(tmp, 'utf-8');
-          try { execSync(`rm "${tmp}"`); } catch {}
+          try { rmSync(tmp, { force: true }); } catch {}
           suggestedName = extractBundleName(workingYaml) || suggestedName;
           yamlBox('Updated YAML', workingYaml);
         } catch (e: any) {
           errorMsg(`Editor error: ${e.message}`);
-          try { execSync(`rm "${tmp}"`); } catch {}
+          try { rmSync(tmp, { force: true }); } catch {}
         }
         continue;
       }
@@ -2880,6 +2904,8 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
  * after a validation failure (so the caller can re-loop with the same selections).
  */
 async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'validated' | 'done' | 'restart'> {
+  const nameErr = validateResourceName(bundleName);   // the name may come from a loaded / edited YAML file
+  if (nameErr) { errorMsg(`Invalid bundle name "${bundleName}": ${nameErr} Not applying.`); return 'done'; }
   const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
   let activeBundleName = bundleName;
   try {
@@ -2923,7 +2949,7 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
       const spin       = chalk.magenta(spinFrames[spinIdx++ % spinFrames.length]);
 
       try {
-        const st    = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        const st    = JSON.parse(execFileSync('kubectl', ['get', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace, '-o', 'json'], { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
         const outcome = bundleValidationOutcome(st);
@@ -2982,10 +3008,14 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
           execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
           try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           finalYaml = readFileSync(tmp, 'utf-8');
-          try { execSync(`rm "${tmp}"`); } catch {}
-        } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { execSync(`rm "${tmp}"`); } catch {} }
+          try { rmSync(tmp, { force: true }); } catch {}
+        } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { rmSync(tmp, { force: true }); } catch {} }
 
-        activeBundleName = extractBundleName(finalYaml) || activeBundleName;
+        // The name now comes from text the user just edited: it must be a legal resource name before it is used anywhere.
+        const editedName = extractBundleName(finalYaml) || activeBundleName;
+        const editedNameErr = validateResourceName(editedName);
+        if (editedNameErr) { errorMsg(`Invalid bundle name "${editedName}": ${editedNameErr} Not re-applying.`); return 'done'; }
+        activeBundleName = editedName;
 
         const reApplyPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
         try {
@@ -2995,17 +3025,17 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
           execSync(`kubectl apply -f "${reApplyPath}" -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
           spinner.succeed('Bundle re-applied — check 📈 Check Deployment Progress for status');
         } catch (e: any) { spinner.fail(`Re-apply failed: ${e.message.split('\n')[0]}`); }
-        finally { try { execSync(`rm "${reApplyPath}"`); } catch {} }
+        finally { try { rmSync(reApplyPath, { force: true }); } catch {} }
 
       } else if (fix === 'builder') {
-        try { execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
+        try { execFileSync('kubectl', ['delete', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace], { stdio: ['pipe','pipe','pipe'] }); } catch {}
         return 'restart';
 
       } else if (fix === 'delete') {
         spinner.start(`Deleting ${activeBundleName}...`);
         await tick();
         try {
-          execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          execFileSync('kubectl', ['delete', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace], { stdio: ['pipe','pipe','pipe'] });
           spinner.succeed(`Deleted ${activeBundleName} from cluster`);
         } catch (e: any) { spinner.fail(`Delete failed: ${e.message.split('\n')[0]}`); }
       }
@@ -3014,7 +3044,7 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
   } catch (e: any) {
     errorMsg(`Error applying bundle: ${kubectlErrorDetail(e)}`);
   } finally {
-    try { execSync(`rm "${tempPath}"`); } catch {}
+    try { rmSync(tempPath, { force: true }); } catch {}
   }
 
   return 'done';
@@ -3042,8 +3072,8 @@ async function bundleDeploymentMenu(rl: any, namespace: string) {
       } else {
         process.stdout.write(chalk.reset('  No deployments found.\n\n'));
       }
-    } catch {
-      process.stdout.write(chalk.reset('  (Could not fetch deployments)\n\n'));
+    } catch (e: any) {
+      process.stdout.write(chalk.reset(`  (Could not fetch deployments: ${String(e?.message ?? e).split('\n')[0]})\n\n`));
     }
 
     const action = await select(rl, 'Model Deployment:', [
@@ -3133,7 +3163,7 @@ async function bundleDeployAction(rl: any, namespace: string) {
       execSync(`kubectl apply -f "${tempPath}" -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
       spinner.succeed(`Deployment ${depName} initiated`);
     } finally {
-      try { execSync(`rm "${tempPath}"`); } catch {}
+      try { rmSync(tempPath, { force: true }); } catch {}
     }
 
     if (await confirm(rl, 'Monitor progress now?')) await monitorDeployment(rl, namespace, depName);
@@ -3189,7 +3219,7 @@ async function bundleDeleteAction(rl: any, namespace: string) {
       spinner.start(`Deleting ${name}...`);
       await tick();
       try {
-        execSync(`kubectl delete ${res.kind} ${name} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+        execFileSync('kubectl', ['delete', res.kind, name, '-n', namespace], { stdio: ['pipe','pipe','pipe'] });
         spinner.succeed(`Deleted ${name}`);
       } catch (e: any) {
         spinner.fail(`Failed to delete ${name}: ${e.message.split('\n')[0]}`);
@@ -3370,25 +3400,9 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       modelName = await input(rl, 'Model name (leave empty to go back)');
       if (modelName === ESC) return;
     } else {
-      const allDeps: any[] = [];
-      for (const item of list.items) {
-        const dn = item.metadata.name;
-        const bn = item.spec.bundle;
-        let status = 'Not Deployed';
-        try {
-          const { cache: cacheName, default: defaultName } = inferencePodNames(dn);
-          const po = execSync(`kubectl -n ${namespace} get pods 2>/dev/null`, { encoding: 'utf-8' });
-          let cache: PodInfo | null = null, dflt: PodInfo | null = null;
-          for (const line of po.trim().split('\n').filter((l: string) => l.trim())) {
-            const pod = parsePodLine(line);
-            if (!pod) continue;
-            if (pod.name === cacheName)        cache = pod;
-            else if (pod.name === defaultName) dflt  = pod;
-          }
-          status = getDeploymentStatus(cache, dflt);
-        } catch { status = 'Not Deployed'; }
-        allDeps.push({ name: dn, bundle: bn, status });
-      }
+      // One pods read for all deployments (and a failure of it surfaces, rather than every deployment showing "Not Deployed").
+      const statuses = deploymentStatuses(namespace, list.items.map((i: any) => i.metadata.name));
+      const allDeps: any[] = list.items.map((item: any) => ({ name: item.metadata.name, bundle: item.spec.bundle, status: statuses[item.metadata.name] }));
 
       const deployed = allDeps.filter(d => d.status === 'Deployed');
 
@@ -3420,7 +3434,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           const bn = depItem?.bundle ?? '';
           const checkpointMapping: CheckpointMappingV3 = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
           try {
-            const bundle = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${bn} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+            const bundle = JSON.parse(execFileSync('kubectl', ['get', 'modelbundle.sambanova.ai', bn, '-n', namespace, '-o', 'json'], { encoding: 'utf-8' }));
             const modelConfigs: any[] = bundle.spec?.modelConfigs || [];
             const models = Array.from(new Set(
               modelConfigs
@@ -3488,17 +3502,10 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       }
       if (!userInput.trim()) continue;
 
-      const tmpPayload = path.join(PROJECT_ROOT, `.tmp_embed_${Date.now()}.json`);
       try {
         const payload = JSON.stringify({ input: userInput, model: modelName });
-        writeFileSync(tmpPayload, payload);
         process.stdout.write(chalk.reset('\n  ◌  Generating embedding...\r'));
-        const res = execSync(
-          `curl -sk -w "\\n%{http_code}" -X POST "${base}v1/embeddings" ` +
-          `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-          `-d @"${tmpPayload}"`,
-          { encoding: 'utf-8', timeout: 30000 }
-        );
+        const res = await curlLike(`${base}v1/embeddings`, { method: 'POST', apiKey: envConfig.apiKey, body: payload, timeoutMs: 30000 });
         process.stdout.write('\r\x1b[K');
         const resParts   = res.trimEnd().split('\n');
         const httpCode   = safeParseInt(resParts.pop());
@@ -3522,8 +3529,6 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       } catch (e: any) {
         process.stdout.write('\r\x1b[K');
         errorMsg(`Connection error: ${e.message.split('\n')[0]}`);
-      } finally {
-        try { execSync(`rm "${tmpPayload}"`); } catch {}
       }
     }
     return;
@@ -3554,22 +3559,14 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
     messages.push({ role: 'user', content: userInput });
 
-    const tmpPayload = path.join(PROJECT_ROOT, `.tmp_chat_${Date.now()}.json`);
     try {
       const apiUrl  = `${base}v1/chat/completions`;
       const payload = JSON.stringify({ model: modelName, messages, stream: false });
 
-      writeFileSync(tmpPayload, payload);
-
       process.stdout.write(chalk.reset('\n  ◌  Thinking...\r'));
 
       const t0  = Date.now();
-      const res = execSync(
-        `curl -sk -w "\\n%{http_code}" -X POST "${apiUrl}" ` +
-        `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-        `-d @"${tmpPayload}"`,
-        { encoding: 'utf-8', timeout: 120000 }
-      );
+      const res = await curlLike(apiUrl, { method: 'POST', apiKey: envConfig.apiKey, body: payload, timeoutMs: 120000 });
       const totalMs = Date.now() - t0;
 
       const parts    = res.trimEnd().split('\n');
@@ -3664,8 +3661,6 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       process.stdout.write('\r\x1b[K');
       errorMsg(`Connection error: ${e.message.split('\n')[0]}`);
       messages.pop();
-    } finally {
-      try { execSync(`rm "${tmpPayload}"`); } catch {}
     }
   }
 }
@@ -3703,11 +3698,11 @@ async function installSambaStackMenu(rl: any, namespace: string) {
       execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
       try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
       installYaml = readFileSync(tmp, 'utf-8');
-      try { execSync(`rm "${tmp}"`); } catch {}
+      try { rmSync(tmp, { force: true }); } catch {}
       yamlBox('Updated YAML', installYaml);
     } catch (e: any) {
       errorMsg(`Editor error: ${e.message}`);
-      try { execSync(`rm "${tmp}"`); } catch {}
+      try { rmSync(tmp, { force: true }); } catch {}
       return;
     }
   }
@@ -3725,10 +3720,10 @@ async function installSambaStackMenu(rl: any, namespace: string) {
     process.stdout.write(chalk.reset('  Press q or Esc to stop watching logs\n\n'));
   } catch (e: any) {
     spinner.fail(`Apply failed: ${e.message.split('\n')[0]}`);
-    try { execSync(`rm "${tempPath}"`); } catch {}
+    try { rmSync(tempPath, { force: true }); } catch {}
     return;
   }
-  try { execSync(`rm "${tempPath}"`); } catch {}
+  try { rmSync(tempPath, { force: true }); } catch {}
 
   // ── Stream installer logs ──
   let done     = false;
