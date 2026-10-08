@@ -12,8 +12,8 @@
 ### Interactive terminal interface for SambaStack bundle management — no browser needed
 
 ![CLI](https://img.shields.io/badge/interface-CLI-6C3FC4?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.5.3-412AA0?style=for-the-badge)
-![Node](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white)
+![Version](https://img.shields.io/badge/version-2.0.0-412AA0?style=for-the-badge)
+![Node](https://img.shields.io/badge/Node.js-20.12+-339933?style=for-the-badge&logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
 
 <br/>
@@ -66,7 +66,7 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
  ___) | (_| | | | | | | |_) | (_| |\ V  V / | |/ /
 |____/ \__,_|_| |_| |_|_.__/ \__,_| \_/\_/  |_/___|
 
-  SambaWiz CLI  v1.5.3
+  SambaWiz CLI  v2.0.0
   SambaStack Bundle Management
 ```
 
@@ -105,10 +105,10 @@ The SambaWiz CLI is a fully interactive terminal application. It covers every wo
 
 | Requirement | Details |
 |---|---|
-| Node.js | 18+ |
+| Node.js | 20.12+ (the web app needs ≥ 20.9; `@inquirer/prompts` needs ≥ 20.12) |
 | `kubectl` | Installed and on `PATH` |
 | `helm` | Installed and on `PATH` |
-| Kubernetes cluster | SambaStack installed, Helm chart ≥ `1.1.1` |
+| Kubernetes cluster | SambaStack installed, Helm chart ≥ `2.0.0` (the minimum in the `VERSION` file) |
 | `app-config.json` | Configured with at least one valid environment |
 
 ---
@@ -178,6 +178,11 @@ Shown after launch. The active environment name appears in brackets.
      ⏹️   Exit
 ```
 
+**Gating (same rules as the UI):**
+- Model Selection, Model Deployment, Check Deployment Progress, Playground and Install need a valid environment (kubeconfig file present). Without one you get *"No valid environment selected — add or activate one in Manage Environments first."* — the CLI never falls back to your ambient `kubectl` context.
+- If the installed SambaStack Helm chart is older than the minimum in `VERSION`, Model Selection, Model Deployment, Check Deployment Progress and Playground are blocked with the outdated-chart message (Install stays available so you can fix it). The check is refreshed after you change environment or run Install.
+
+
 ---
 
 ### ⚙️ Manage Environments
@@ -193,8 +198,6 @@ All environment management is in one place. Select an environment to see availab
 
   ▶  ➕  Add new environment
 
-     ○  staging-env
-     ○  sambastack-dev-2
      ●  my-env  ← active
 
      ← Back
@@ -308,7 +311,7 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 
   ✔  Kubeconfig         kubeconfigs/kubeconfig-my-env.yaml
   ✔  Helm               v4.0.1+g12500dd
-  ✔  SambaStack         1.1.2  (min: 1.1.1)
+  ✔  SambaStack         2.1.1  (min: 2.0.0)
   ✔  Kubernetes         connection OK
   ⚠  Namespace          using default
 
@@ -322,7 +325,7 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
   ✔  UI Domain reachable  (200)
 
   ──────────────────────────────────────────────────────────
-  ✅ All checks passed!
+  ✅ All checks passed!        (or: "All checks passed, with 1 warning (see ⚠ above)")
 
 [Checkpoint] ✓ Generated checkpoint_mapping.json with 25 models (multi-arch)
 [Model Profiles] ✓ Generated model_profiles.json with 18 profiles
@@ -333,7 +336,7 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 |---|---|
 | `✔` | Passed |
 | `✖` | Failed (blocks overall pass) |
-| `⚠` | Warning (non-blocking) |
+| `⚠` | Warning (non-blocking, but counted in the final banner: *"All checks passed, with N warning(s)"*) |
 | `ℹ` | Informational |
 
 | Check | What is verified |
@@ -350,9 +353,9 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
 If SambaStack chart is below the minimum:
 
 ```
-  ✖  SambaStack 1.0.9  (minimum: 1.1.1)
-     The installed SambaStack Helm chart version (1.0.9) is older than
-     the minimum required version (1.1.1). Please upgrade your SambaStack
+  ✖  SambaStack 1.9.0  (minimum: 2.0.0)
+     The installed SambaStack Helm chart version (1.9.0) is older than
+     the minimum required version (2.0.0). Please upgrade your SambaStack
      installation.
 ```
 
@@ -420,6 +423,8 @@ If saved bundle files exist in `saved_artifacts/`, you are asked how to start:
 
 Only files containing `kind: ModelBundle` are listed (V3-only — no backwards compatibility with old `BundleTemplate`/`Bundle` files). Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
 
+An in-progress selection is also remembered in `temp/cli-selection-state.json` (CLI-only — the web UI keeps its own file, since the two use different formats) and offered back the next time you open Model Selection. It shows the cluster it was started on so you can check the environment before applying. The saved selection is deleted once a bundle **validates successfully**, so it isn't offered again on your next visit.
+
 ---
 
 #### Step 1 — Select models
@@ -431,7 +436,7 @@ Only files containing `kind: ModelBundle` are listed (V3-only — no backwards c
 
      DeepSeek-R1-0528
      DeepSeek-V3-0324
-     Llama-4-Maverick-17B-128E-Instruct  (no matching profile)
+     Llama-4-Maverick-17B-128E-Instruct
      Meta-Llama-3.1-405B-Instruct
      Qwen3-32B
      ...
@@ -439,19 +444,19 @@ Only files containing `kind: ModelBundle` are listed (V3-only — no backwards c
      ✕  Cancel
 ```
 
-Models come from `checkpoint_mapping.json` (the `Model` CR cache). Select models one at a time, adding as many as needed; re-selecting an already-added model removes it (and its draft, if any) so you can redo the flow. A model with **no matching `ModelProfile` for any of its checkpoint archs** is labeled `(no matching profile)` and cannot be added. Select **✅ Finish and Create Bundle** when done.
+The model list comes from `checkpoint_mapping.json` (the `Model` CR cache), so it shows whatever models your cluster has. Select models one at a time, adding as many as needed; re-selecting an already-added model removes it (and its draft, if any) so you can redo the flow. A model with **no matching `ModelProfile` for any of its checkpoint archs** gets a `(no matching profile)` suffix and cannot be added. Select **✅ Finish and Create Bundle** when done.
 
 ---
 
 #### Step 2 — Pick a checkpoint arch (multi-arch models only)
 
-Shown only when a model has more than one checkpoint arch **with a matching `ModelProfile`**:
+Most models have a single checkpoint arch and skip this step (for example **DeepSeek-R1-0528** goes straight to Step 3). It appears only when a model has more than one checkpoint arch **with a matching `ModelProfile`**, and then lists the arch names and checkpoint status your cluster reports for that model:
 
 ```
-  › Select checkpoint arch for Llama-4-Maverick-17B-128E-Instruct:
+  › Select checkpoint arch for <model>:
 
-  ▶  llama-4-maverick  (stable)
-     llama-4-maverick-v2  (preview)
+  ▶  <arch-1>  (<checkpoint status>)
+     <arch-2>  (<checkpoint status>)
      ← Back
 ```
 
@@ -467,18 +472,28 @@ Profiles whose `model_arch` matches the chosen arch are listed. A model with onl
   Auto-selected profile: High Interactivity
 ```
 
-Otherwise, pick one — the card title is derived from `features` (`continuous_batching` → **High Throughput**, otherwise **High Interactivity**; numbered when more than one of the same type is offered for a model), never from the profile's `metadata.name`:
+Otherwise, pick one — the card title is derived from `features` (`continuous_batching` → **High Throughput**, otherwise **High Interactivity**; numbered when more than one of the same type is offered for a model), never from the profile's `metadata.name`. Each entry shows its context-length → batch-size map and features:
 
 ```
-  › Select a profile for Meta-Llama-3.3-70B-Instruct:
+  › Model Selection  (0 added): DeepSeek-R1-0528
 
-  ▶  High Interactivity 1     4k:[1,4] 16k:[1]   Features: default
-     High Interactivity 2     4k:[1] 16k:[1,2]   Features: default
-     ← Back
+  › Select a profile for DeepSeek-R1-0528:
+  ↑↓ navigate   Enter select   q / Esc to go back
 
-  High Interactivity 1
-    4k: batch_sizes=[1, 4]
+ ▶  High Interactivity  128k:[1] 16k:[1] 32k:[1] 4k:[1,4] 8k:[1,4]   Features: default
+    High Throughput  16k:[128] 32k:[64] 8k:[256]   Features: continuous_batching
+    ← Back
+```
+
+After you choose, the profile card is printed:
+
+```
+  High Interactivity
+    128k: batch_sizes=[1]
     16k: batch_sizes=[1]
+    32k: batch_sizes=[1]
+    4k: batch_sizes=[1, 4]
+    8k: batch_sizes=[1, 4]
     Features: default
 ```
 
@@ -486,23 +501,41 @@ Otherwise, pick one — the card title is derived from `features` (`continuous_b
 
 #### Step 4 — Override the batching config *(optional)*
 
-Seeded from the profile's effective batching config (`spec.defaultBatchingConfig`, else `status.batchingConfig`):
+Seeded from the profile's effective batching config (`recommended`, else `all`, else the resolved default):
 
 ```
-  › Override this profile's batching config for the bundle? [y/N]  Esc cancel: n
+  › Override this profile's batching config for the bundle? [y/N]  Esc cancel: y
 ```
 
-Answering `y` prompts per tier — enter a comma-separated list or `*` for "all batch sizes the PEF/tier offers":
+Answering `y` opens **one grid for every context length** (same layout as the UI): a row per context length, a column per batch size. Every size the profile supports (its full `all` set) is selectable; only the recommended ones start checked. Cells a context length doesn't support show as `·` and can't be toggled.
 
 ```
-  › Batch sizes for tier 4k (comma-separated, or * for all)  Esc cancel: 1,4
+  › Batching config  (context length × batch size)
+  ↑↓←→ move   Space toggle   r row   c column   a all   Enter confirm   Esc cancel
+
+  context        1    4
+  128k           ◉    ·
+  32k            ◉    ·
+  16k            ◉    ·
+  8k             ◉    ◉
+  4k             ◉    ○
 ```
 
-The full `batchingConfig` — overridden or not — is always written into `ModelBundle.spec.modelConfigs[].batchingConfig` as an explicit record of the bundle's contents. `is_default` on the smallest tier is auto-derived (embedding models only — `Model.spec.metadata.capabilities` contains `"embeddings"`) and is never a user control.
+| Key | Action |
+|---|---|
+| `↑ ↓ ← →` | Move the highlighted cell |
+| `Space` | Toggle the cell |
+| `r` / `c` / `a` | Toggle the whole row / column / everything |
+| `Enter` | Confirm |
+| `Esc` / `q` | Cancel — keeps the profile's own batching config |
+
+A context length with **every** supported size checked is written as `'*'` ("all sizes the profile offers"); otherwise the explicit list. If you uncheck every size of a model, that model can't be deployed and is **left out of the bundle** — a warning lists it (same wording as the UI) when the YAML preview is generated. `is_default` on the smallest tier is auto-derived (embedding models only) and is never a user control.
 
 ---
 
 #### Step 5 — Draft model for speculative decoding *(optional)*
+
+> Prompt caching is single-model only: while a prompt-caching profile is selected you can't add another model, and prompt-caching profiles are hidden once a model is already selected.
 
 Shown only when the selected profile's `pefs` contains a name with `sd` in it:
 
@@ -517,7 +550,15 @@ Shown only when the selected profile's `pefs` contains a name with `sd` in it:
      ← Back
 ```
 
-Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arch, profile pick, optional override). The draft is added to the bundle with `modelSettings: { routable: false }` and wired into `specDecodingPairs` (`{ target, draft }`, bare `Model` CR names — no `:version`/`:arch` suffix, and `experts` is always omitted so spec decoding applies to all of the target's experts).
+Only models that have a matching profile are offered as drafts. Re-selecting a draft model removes it again (no duplicate entries). Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arch, profile pick, optional override). The draft is added to the bundle with `modelSettings: { routable: false }` and wired into `specDecodingPairs` (`{ target, draft }`, bare `Model` CR names — no `:version`/`:arch` suffix, and `experts` is always omitted so spec decoding applies to all of the target's experts).
+
+When you select **✅ Finish and Create Bundle**, one last question covers the whole bundle:
+
+```
+  › Advanced options — keep some models resident in HBM (non-swappable)? [y/N]
+```
+
+The default (`N`) leaves every model swappable, so most bundles need no extra prompts. Answering `y` opens a multi-select of the bundle's models (drafts are tagged); the ones you tick are written with `modelSettings.swappable: false`.
 
 ---
 
@@ -528,8 +569,7 @@ Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arc
   │ 📋  Bundle Summary                                       │
   ╰──────────────────────────────────────────────────────────╯
 
-  1.  Meta-Llama-3.1-8B-Instruct              High Interactivity  (draft)
-  2.  Meta-Llama-3.3-70B-Instruct             High Interactivity
+  1.  DeepSeek-R1-0528                        High Interactivity
 
   ── YAML Preview  (my-bundle = placeholder) ─────────────────
   apiVersion: sambanova.ai/v1alpha1
@@ -538,21 +578,23 @@ Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arc
     name: my-bundle
   spec:
     modelConfigs:
-    - model: meta-llama-3-1-8b-instruct:1
-      profile: llama-3p1-8b
-      modelSettings:
-        routable: false
-      batchingConfig: { ... }
-    - model: meta-llama-3-3-70b-instruct:1
-      profile: llama-3p1-70b-sd
-      batchingConfig: { ... }
-    specDecodingPairs:
-    - draft: meta-llama-3-1-8b-instruct
-      target: meta-llama-3-3-70b-instruct
+      - model: deepseek-r1-0528:2
+        profile: deepseek
+        batchingConfig:
+          128k:
+            batch_sizes: '*'
+          32k:
+            batch_sizes: '*'
+          16k:
+            batch_sizes: '*'
+          8k:
+            batch_sizes: [1]
+          4k:
+            batch_sizes: [1]
   ────────────────────────────────────────────────────────────
 ```
 
-The builder displays only the single `ModelBundle` document — no `checkpoints` block (checkpoints come from the `Model` CR) and no `secretNames` (carried by the referenced profiles).
+With a draft model (Step 5) the preview also contains the draft's entry (with `modelSettings: { routable: false }`) and a `specDecodingPairs` list. If any model was dropped (see Step 4) a yellow warning appears above the preview. `checkpoint_overrides` from `app-config.json` pin checkpoint versions here, exactly as in the UI. The builder displays only the single `ModelBundle` document — no `checkpoints` block (checkpoints come from the `Model` CR) and no `secretNames` (carried by the referenced profiles).
 
 ---
 
@@ -564,13 +606,17 @@ The builder displays only the single `ModelBundle` document — no `checkpoints`
 
 Unlike the old V2 flow, there is **no `b-`/`bt-` prefix convention** — the name you enter becomes `ModelBundle.metadata.name` directly.
 
+**Name rules (same as the UI):** a lowercase RFC 1123 name — letters, digits, `-` and `.`, up to 253 characters. Names over 36 characters (once prefixed `md-`) trigger a warning that pod names will be truncated and hashed.
+
 **Hotkeys at this prompt:**
 
 | Key | Action |
 |---|---|
-| `e` | Open YAML in `$EDITOR` (fallback: `vi`) — edited YAML is read back; bundle name is re-parsed from the saved file via the shared `ModelBundle` parser |
+| `e` / `E` | Open YAML in `$EDITOR` (fallback: `vi`) — edited YAML is read back; bundle name is re-parsed from the saved file via the shared `ModelBundle` parser |
 | `Esc` | Go back to Model Selection (all model selections preserved) |
 | `Enter` | Confirm name and continue |
+
+The `e` hotkey only works while the pre-filled name is untouched. You can always edit later: **✏️ Edit in editor** is also in the *What next?* menu below.
 
 After confirming a name the final YAML is displayed before the action menu.
 
@@ -590,6 +636,7 @@ After confirming a name the final YAML is displayed before the action menu.
   › What next?
 
   ▶  ✅  Apply to cluster to validate
+     ✏️   Edit in editor
      💾  Save to file
      ← Skip (deploy later)
      ✕  Cancel
@@ -598,6 +645,7 @@ After confirming a name the final YAML is displayed before the action menu.
 | Option | Description |
 |---|---|
 | ✅ Apply to cluster to validate | Applies YAML via `kubectl apply` and polls for validation status |
+| ✏️ Edit in editor | Opens the final YAML in `$EDITOR`; the edited text is what gets applied |
 | 💾 Save to file | Saves YAML to `saved_artifacts/<bundle-name>.yaml`; path is pre-populated and editable |
 | ← Skip (deploy later) | Exits without applying; use **Model Deployment** later |
 | ✕ Cancel | Exits without saving or applying |
@@ -619,7 +667,14 @@ After confirming a name the final YAML is displayed before the action menu.
   ⠼  Running  12s  Legalized
 
   ✅ Bundle Validation Succeeded!
+
+  Memory utilization
+    DDR            ██████░░░░░░░░░░░░░░  31%
+    HBM resident   ████░░░░░░░░░░░░░░░░  22%
+    Host           ███░░░░░░░░░░░░░░░░░  15%
 ```
+
+Memory utilization (from `status.legalizerInfo.utilization`) is shown whether validation succeeds or fails; values above 80% are red.
 
 `kubectl apply` output is shown immediately after applying so you can confirm the resource name. Validation polls `ModelBundle.status.conditions` every 3 s (looking for `{ type: Valid, status: True }` = succeeded, `{ type: Valid, status: False }` = failed — the same status shape as the old V2 `Bundle`) with a braille spinner. Press `q` or `Esc` to stop watching — validation continues on the cluster.
 
@@ -627,11 +682,11 @@ After confirming a name the final YAML is displayed before the action menu.
 
 #### Validation failure — recovery options
 
-When validation fails, a recovery menu appears:
+When validation fails, the error text is the cluster's **legalizer errors** (`status.legalizerInfo.errors`) when present — the actionable part, same as the UI — otherwise the condition message. Then a recovery menu appears:
 
 ```
   Validation failed with the following errors:
-  Validation Errors: Legalization failed, see legalizerInfo for details
+  <legalizer errors, one per line>
 
   › What would you like to do?
 
@@ -644,7 +699,7 @@ When validation fails, a recovery menu appears:
 | Option | Description |
 |---|---|
 | ✏️ Edit YAML | Opens editor, then re-applies the edited YAML |
-| ← Go back to Model Selection | Deletes the failed `ModelBundle` from cluster and returns to model selection with all previous selections preserved |
+| ← Go back to Model Selection | Deletes the failed `ModelBundle` from cluster and returns to the model list **with your selections still in place** (shown as `✔`) so you can adjust them |
 | 🗑️ Delete from cluster | Removes the `ModelBundle` from the cluster |
 | ← Back to main menu | Leaves the resource on cluster, returns to main menu |
 
@@ -681,15 +736,12 @@ Every visit shows the current deployment state:
 
 **1 — Fetch and list bundles**
 
+Only **validated** bundles (`{ type: Valid, status: True }`) can be deployed, as in the UI. Unvalidated ones are hidden and counted:
+
 ```
   ℹ  Found 3 bundle(s)
-
-  · deepseek-prod    ✔ valid
-  · llama-staging    ⚠ unvalidated
-  · qwen-test        ✔ valid
+  ⚠  1 unvalidated bundle(s) hidden — validate them first (Bundle Builder).
 ```
-
-Validity is read from `ModelBundle.status.conditions` (`{ type: Valid, status: True }` = valid).
 
 **2 — Select bundle to deploy**
 
@@ -697,11 +749,21 @@ Validity is read from `ModelBundle.status.conditions` (`{ type: Valid, status: T
   › Select bundle to deploy:
 
   ▶  ● deepseek-prod    validated
-     ○ llama-staging    unvalidated
+     ● qwen-test        validated
      ← Back
 ```
 
-**3 — Review deployment YAML**
+**3 — Options**
+
+```
+  › Enable prompt caching? [y/N]          (only for a single-model bundle whose profile has `prompt_caching`)
+  › Ignore EOS token (benchmarking only)? [y/N]
+  › Deployment name  md-deepseek-prod
+```
+
+Prompt caching adds `ENABLE_KV_CACHE_MANAGER` and `KV_CACHE_INCLUDE_STATS_IN_RESPONSE`; Ignore EOS adds `ENABLE_IGNORE_EOS` (all `"true"` under `engineConfig.env_vars`) — the same variables the UI injects. The name defaults like the UI (`b-foo` → `md-foo`, otherwise `md-<bundle>`) and must be a valid RFC 1123 name.
+
+**4 — Review deployment YAML**
 
 ```
   Deployment YAML:
@@ -716,15 +778,21 @@ Validity is read from `ModelBundle.status.conditions` (`{ type: Valid, status: T
     - minReplicas: 1
       name: default
   ────────────────────────────────────────
+
+  › Deploy md-deepseek-prod?
+
+  ▶  🚀  Deploy
+     ✏️   Edit YAML in editor first
+     ← Cancel
 ```
 
-`spec.bundle` always references the `ModelBundle` **by name** — the CLI never generates the inline `spec.models` form (you can hand-edit the YAML for that). All other deployment knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) are unchanged from the old `BundleDeployment` builder.
+**✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't, for example the `storage:` block an air-gapped cluster needs. The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
 
-**4 — Confirm and deploy**
+`spec.bundle` references the `ModelBundle` **by name**.
+
+**5 — Deploy**
 
 ```
-  › Deploy md-deepseek-prod? [Y/n]  Esc cancel:
-
   ✔  Deployment md-deepseek-prod initiated
 
   › Monitor progress now? [Y/n]  Esc cancel:
@@ -748,7 +816,7 @@ Answering `y` jumps straight into the live monitor.
 
 `ModelProfile`s and `Model`s are pre-existing cluster resources the builder only references by name — it never creates or deletes them, so they aren't offered here (compare to V2's `BundleTemplate`, which the builder did own and cascade-delete).
 
-**2 — Select resources** (multi-select with `Space`)
+**2 — Select resources** (multi-select with `Space`; if you press `Enter` with nothing toggled, the highlighted entry is selected)
 
 ```
   › Select ModelDeployment(s) to delete:
@@ -758,6 +826,8 @@ Answering `y` jumps straight into the live monitor.
       ○  md-llama-staging
       ← Back
 ```
+
+If nothing ends up selected you'll see *"Nothing selected — move to an entry and press Space to toggle it, then Enter."*
 
 **3 — Confirm deletion**
 
@@ -823,6 +893,8 @@ When fully ready:
 | `● Deployed` | Both cache and inference pods ready |
 | `◌ Deploying` | Pods exist but not all ready |
 | `○ Not Deployed` | No matching pods found |
+
+Pod states `CrashLoopBackOff`, `ImagePullBackOff`, `ErrImagePull`, `Error` and `OOMKilled` are shown in red. If `kubectl` itself fails (cluster unreachable, auth error) a red `✖ kubectl error: …` line is shown instead of an endless "waiting for pod".
 
 Press `q` or `Esc` to stop and return to menu.
 
@@ -925,7 +997,7 @@ The CLI pre-populates the `version` field with the recommended next version (cur
       sambastack-installer: "true"
   data:
     sambastack.yaml: |
-      version: 1.1.2                     # [CHANGE ME] Helm version to install
+      version: 2.1.2                     # [CHANGE ME] Helm version to install
   ────────────────────────────────────────────────────────────
 
   › Edit in editor before applying? [y/N]
@@ -948,7 +1020,7 @@ Answering `y` opens `$EDITOR` (fallback: `vi`) with the YAML. The updated file i
 Logs are fetched from `kubectl -n sambastack-installer logs -l sambanova.ai/app=sambastack-installer --tail=20` and refreshed every 3 s:
 
 ```
-  [sambastack-installer] Pulling chart version 1.1.2...
+  [sambastack-installer] Pulling chart version 2.1.2...
   [sambastack-installer] Upgrading sambastack release...
   ...
   [sambastack-installer] configure_default_ingress complete
@@ -967,8 +1039,9 @@ Installation is detected as complete when the log line contains `configure_defau
 |---|---|---|---|
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
+| `checkpoint_overrides` | object | No | `{ "<model display name>": "<version>" }` — pin a checkpoint version instead of the highest |
 
-> **V3 note:** `checkpointsDir` and `checkpoint_overrides` are no longer read or written by the CLI. Checkpoints now come from the `Model` CR (`spec.checkpoints.<arch>.versions`), and the bundle always pins the **highest** checkpoint version under the chosen arch — there's no per-model override.
+> **V3 note:** `checkpointsDir` is no longer read or written by the CLI. Checkpoints come from the `Model` CR (`spec.checkpoints.<arch>.versions`), and a bundle pins the **highest** checkpoint version under the chosen arch — unless you set the optional `checkpoint_overrides` map (`{ "<model display name>": "<version>" }`, top level of `app-config.json`), which pins that version for the model, exactly as the UI does.
 
 ### Per-environment fields
 
@@ -1088,7 +1161,7 @@ Check `.status.conditions` for detailed error messages (`{ type: Valid, status, 
 
 <div align="center">
 
-*SambaWiz CLI v1.5.3 · Requires SambaStack Helm ≥ 1.1.1*
+*SambaWiz CLI v2.0.0 · Requires SambaStack Helm ≥ 2.0.0*
 
 ← Back to [Web UI docs (README.md)](README.md)
 

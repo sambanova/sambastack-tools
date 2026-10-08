@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { CheckpointMappingV3, ModelProfilesCache } from '../../app/types/bundle';
 import { generateModelBundleYaml, type ModelBundleSelection } from '../../app/utils/bundle-yaml-generator';
 import {
@@ -10,6 +11,14 @@ import {
   extractBundleName,
   buildModelDeploymentYaml,
   readValidCondition,
+  buildModelBasedDeploymentYaml,
+  suggestDeploymentName,
+  formatDroppedSelections,
+  withCheckpointOverrides,
+  printValidationErrors,
+  kubectlErrorDetail,
+  kubectlHint,
+  maskApiKey,
 } from '../cli';
 
 /**
@@ -313,5 +322,92 @@ describe('CLI selections → generateModelBundleYaml (shared generator integrati
     expect(yamlText).toContain('specDecodingPairs');
     expect(yamlText).toContain('draft: draft-model');
     expect(yamlText).toContain('target: llama-3-8b-instruct');
+  });
+});
+
+// ─── Parity with the UI (deploy knobs, dropped models, overrides, legalizer errors) ──
+
+describe('buildModelDeploymentYaml options', () => {
+  it('injects the same env vars as the UI, and a custom name', () => {
+    const { yaml, deploymentName } = buildModelDeploymentYaml('b', { deploymentName: 'md-x', promptCaching: true, ignoreEos: true });
+    expect(deploymentName).toBe('md-x');
+    expect(yaml).toContain('ENABLE_KV_CACHE_MANAGER: "true"');
+    expect(yaml).toContain('KV_CACHE_INCLUDE_STATS_IN_RESPONSE: "true"');
+    expect(yaml).toContain('ENABLE_IGNORE_EOS: "true"');
+  });
+  it('omits env_vars by default', () => {
+    expect(buildModelDeploymentYaml('b').yaml).not.toContain('env_vars');
+  });
+});
+
+describe('formatDroppedSelections', () => {
+  it('is empty when nothing dropped and mirrors the UI wording otherwise', () => {
+    expect(formatDroppedSelections([])).toEqual([]);
+    const out = formatDroppedSelections([{ model: 'm', profile: 'p', reason: 'batching-config-cleared' }]);
+    expect(out[0]).toBe('1 selected model left this bundle');
+    expect(out[1]).toContain('every batch size is unselected');
+  });
+});
+
+describe('withCheckpointOverrides', () => {
+  it('pins versionOverride by model display name only', () => {
+    const sels: any[] = [{ model: { spec: { name: 'A' } } }, { model: { spec: { name: 'B' } } }];
+    const out = withCheckpointOverrides(sels, { A: '3' });
+    expect(out[0].versionOverride).toBe('3');
+    expect(out[1].versionOverride).toBeUndefined();
+  });
+});
+
+describe('printValidationErrors', () => {
+  it('prefers legalizer errors over the condition message', () => {
+    const writes: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation((c: any) => (writes.push(String(c)), true));
+    printValidationErrors([{ type: 'Valid', status: 'False', message: 'generic' }], { errors: ['legalizer says no'] });
+    spy.mockRestore();
+    const text = writes.join('');
+    expect(text).toContain('legalizer says no');
+    expect(text).not.toContain('generic');
+  });
+});
+
+describe('quick deploy + naming', () => {
+  it('inlines spec.models for a single model + profile', () => {
+    const { yaml, deploymentName } = buildModelBasedDeploymentYaml('llama:a1', 'p1', { promptCaching: true });
+    expect(deploymentName).toBe('md-llama');
+    expect(yaml).toContain('models:');
+    expect(yaml).toContain('- model: llama:a1');
+    expect(yaml).toContain('profile: p1');
+    expect(yaml).not.toContain('bundle:');
+    expect(yaml).toContain('ENABLE_KV_CACHE_MANAGER: "true"');
+  });
+  it('uses the UI naming: b- becomes md-, else md- prefix', () => {
+    expect(suggestDeploymentName('b-x')).toBe('md-x');
+    expect(suggestDeploymentName('x')).toBe('md-x');
+  });
+});
+
+describe('kubectl error hints', () => {
+  const x509 = { message: 'Command failed', stderr: 'error: error validating "f.yaml": failed to download openapi: Get "https://1.2.3.4:6443/openapi/v2": tls: failed to verify certificate: x509: certificate signed by unknown authority' };
+  it('explains a stale kubeconfig CA instead of dumping the raw error', () => {
+    const out = kubectlErrorDetail(x509);
+    expect(out).toMatch(/certificate signed by unknown authority/);
+    expect(out).toMatch(/kubeconfig.*stale|re-add it/);
+  });
+  it('adds no hint for unrelated errors', () => {
+    expect(kubectlHint('connection refused')).toBe('');
+    expect(kubectlErrorDetail({ message: 'x', stderr: 'dial tcp 1.2.3.4:6443: i/o timeout' })).not.toContain('→');
+  });
+  it('flags rejected credentials', () => {
+    expect(kubectlHint('error: You must be logged in to the server (Unauthorized)')).toMatch(/credentials were rejected/);
+  });
+});
+
+describe('maskApiKey', () => {
+  it('shows only the last 4 characters of a long key and nothing of a short one', () => {
+    expect(maskApiKey('0123456789abcdef0123')).toBe('…0123');
+    expect(maskApiKey('0123456789abcdef0123')).not.toContain('0123456');
+    expect(maskApiKey('short')).toBe('••••');
+    expect(maskApiKey('')).toBe('••••');
+    expect(maskApiKey('123456789012345')).toBe('••••'); // 15 chars: still hidden
   });
 });
