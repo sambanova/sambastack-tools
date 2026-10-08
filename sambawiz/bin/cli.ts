@@ -229,6 +229,20 @@ export function readValidCondition(conditions: Array<{ type?: string; status?: s
   return 'pending';
 }
 
+/**
+ * The Valid outcome of a whole ModelBundle, ignoring a verdict about an OLDER version of it: after a bundle is changed
+ * the previous `Valid=True` can still be on the resource until the controller re-validates, so a condition only counts
+ * once its `observedGeneration` (or `status.observedGeneration`) has caught up with `metadata.generation`.
+ * Without those fields (older controllers) the condition is taken at face value.
+ */
+export function bundleValidationOutcome(bundle: any): ValidationOutcome {
+  const conds: Array<{ type?: string; status?: string; observedGeneration?: number }> = bundle?.status?.conditions ?? [];
+  const generation = bundle?.metadata?.generation;
+  const observed = conds.find((c) => c.type === 'Valid')?.observedGeneration ?? bundle?.status?.observedGeneration;
+  if (typeof generation === 'number' && typeof observed === 'number' && observed < generation) return 'pending';
+  return readValidCondition(conds);
+}
+
 // ─── V3 cache → CR adapters ──────────────────────────────────────────────────
 // Converts cache entries (CheckpointMappingV3 / ModelProfilesCache — plain
 // JSON caches, see v3plan.md "Data fetching & caching for V3") into the
@@ -2876,7 +2890,7 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
         const st    = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
-        const outcome = readValidCondition(conds);
+        const outcome = bundleValidationOutcome(st);
 
         if (conds.length > 0) {
           const latest = conds[conds.length - 1];
@@ -3018,7 +3032,7 @@ async function bundleDeployAction(rl: any, namespace: string) {
 
     // Like the UI, only validated bundles can be deployed.
     const bundles = list.items
-      .filter((i: any) => readValidCondition(i.status?.conditions || []) === 'succeeded')
+      .filter((i: any) => bundleValidationOutcome(i) === 'succeeded')
       .map((i: any) => ({ name: i.metadata.name, modelConfigs: i.spec?.modelConfigs || [] }));
     const hidden = list.items.length - bundles.length;
     if (hidden > 0) warnMsg(`${hidden} unvalidated bundle(s) hidden — validate them first (Bundle Builder).`);

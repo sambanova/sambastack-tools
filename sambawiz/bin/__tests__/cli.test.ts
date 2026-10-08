@@ -24,6 +24,7 @@ import {
   batchOverrideFromPicked,
   stripServerManagedFields,
   draftCandidates,
+  bundleValidationOutcome,
 } from '../cli';
 
 /**
@@ -484,5 +485,26 @@ describe('draftCandidates (review: a model added again as a draft)', () => {
   });
   it('hides a model the user already added on its own, and one already used as a draft', () => {
     expect(draftCandidates(names, mapping, profiles, [sel('Target', 'target'), sel('Small', 'small')])).toEqual(['Other']);
+  });
+});
+
+describe('bundleValidationOutcome (review: stale "valid" after a re-apply)', () => {
+  const valid = (observedGeneration?: number) => ({ type: 'Valid', status: 'True', ...(observedGeneration === undefined ? {} : { observedGeneration }) });
+  it('ignores a Valid=True that belongs to an older generation of the bundle', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [valid(1)] } })).toBe('pending');
+    expect(bundleValidationOutcome({ metadata: { generation: 3 }, status: { observedGeneration: 2, conditions: [valid()] } })).toBe('pending');
+  });
+  it('accepts it once the controller has caught up (equal or newer generation)', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [valid(2)] } })).toBe('succeeded');
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { observedGeneration: 2, conditions: [valid()] } })).toBe('succeeded');
+  });
+  it('a stale Valid=False is not reported as a failure either', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [{ type: 'Valid', status: 'False', observedGeneration: 1 }] } })).toBe('pending');
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [{ type: 'Valid', status: 'False', observedGeneration: 2 }] } })).toBe('failed');
+  });
+  it('falls back to the plain condition when the controller reports no generations', () => {
+    expect(bundleValidationOutcome({ metadata: {}, status: { conditions: [valid()] } })).toBe('succeeded');
+    expect(bundleValidationOutcome({ status: { conditions: [] } })).toBe('pending');
+    expect(bundleValidationOutcome(null)).toBe('pending');
   });
 });
