@@ -5,7 +5,7 @@ declare const process: any;
 // Allow self-signed SSL certificates for internal APIs
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
@@ -115,7 +115,8 @@ const statusIcon = (st: DeploymentStatus) => (st === 'Deployed' ? chalk.green('�
 /** Whether a ModelProfile CR lists the `prompt_caching` feature (same gate as the UI's deploy page). */
 export function profileHasPromptCachingOnCluster(profile: string, namespace: string): boolean {
   try {
-    const out = execSync(`kubectl get modelprofile.sambanova.ai ${profile} -n ${namespace} -o json`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    // The profile name comes from the cluster, so it is passed as an argument (no shell) rather than interpolated.
+    const out = execFileSync('kubectl', ['get', 'modelprofile.sambanova.ai', profile, '-n', namespace, '-o', 'json'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     return Boolean(JSON.parse(out).spec?.features?.includes('prompt_caching'));
   } catch {
     return false;
@@ -160,6 +161,11 @@ export function formatDroppedSelections(dropped: DroppedSelection[]): string[] {
 
 function warnDropped(dropped: DroppedSelection[]): void {
   formatDroppedSelections(dropped).forEach((l) => warnMsg(l));
+}
+
+/** Never reveals more than the last 4 characters, and nothing at all for short keys. */
+export function maskApiKey(key: string): string {
+  return key.length >= 16 ? `…${key.slice(-4)}` : '••••';
 }
 
 /** Format Kubernetes validation/legalizer errors the same way for ModelBundle as the UI does. */
@@ -1936,7 +1942,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     checkRow(chalk.red('✖'), 'API Key', 'not configured');
     allPassed = false;
   } else {
-    const masked = envConfig.apiKey.slice(0, 4) + '••••••••' + envConfig.apiKey.slice(-4);
+    const masked = maskApiKey(envConfig.apiKey);
     infoRow('API Key', masked);
   }
 
@@ -2264,12 +2270,18 @@ async function promptBatchingOverride(rl: any, profile: ModelProfile): Promise<B
 }
 
 /**
- * Advanced Options: whether this model stays resident in HBM (swappable: false) or can be
- * swapped out for other models in the bundle when required (swappable: true, the default —
- * only emitted into the YAML when set to false, per generateModelBundleYaml).
+ * Advanced Options, asked ONCE per bundle (not per model): which models stay resident in HBM
+ * (`swappable: false`) instead of being swappable out for other models in the bundle when required
+ * (`swappable: true`, the default — only emitted into the YAML when false, per generateModelBundleYaml).
+ * Answering No (the default) leaves every model swappable, so the common path has no extra prompts.
  */
-async function promptSwappable(rl: any): Promise<boolean> {
-  return confirm(rl, 'Swappable — allow this model to be swapped out for other models in the bundle when required?', true);
+async function promptAdvancedOptions(rl: any, selections: ModelBundleSelection[]): Promise<void> {
+  const current = new Set(selections.map((s, i) => (s.swappable === false ? i : -1)).filter((i) => i >= 0));
+  const wants = await confirm(rl, 'Advanced options — keep some models resident in HBM (non-swappable)?', current.size > 0);
+  if (!wants) return;
+  const choices: Choice[] = selections.map((s, i) => ({ name: `${s.model.spec.name}${s.isDraftFor ? '  (draft)' : ''}`, value: i }));
+  const picked = new Set<number>((await multiSelect(rl, 'Keep resident (non-swappable):', choices, current)) as number[]);
+  selections.forEach((s, i) => { s.swappable = !picked.has(i); });
 }
 
 // ─── In-progress builder session persistence ──────────────────────────────────
@@ -2369,9 +2381,10 @@ function resolveSelectionSession(
 async function collectModelSelections(
   rl: any,
   checkpointMapping: CheckpointMappingV3,
-  modelProfiles: ModelProfilesCache
+  modelProfiles: ModelProfilesCache,
+  initial: ModelBundleSelection[] = []   // pre-populated selections, e.g. when going back after a failed validation
 ): Promise<ModelBundleSelection[]> {
-  const selections: ModelBundleSelection[] = [];
+  const selections: ModelBundleSelection[] = [...initial];
   const displayNames = Object.keys(checkpointMapping).sort();
 
   let adding = true;
@@ -2426,9 +2439,7 @@ async function collectModelSelections(
     const { arch, profile } = picked;
 
     const batchingConfigOverride = await promptBatchingOverride(rl, profile);
-    const swappable = await promptSwappable(rl);
-
-    selections.push({ model, arch, profile, batchingConfigOverride, swappable });
+    selections.push({ model, arch, profile, batchingConfigOverride, swappable: true });
     successMsg(`Added ${chosenName}  (${getDisplayName(profile, getProfilesForArch(arch, modelProfiles))})`);
     saveSelectionSession(selections);
 
@@ -2452,13 +2463,12 @@ async function collectModelSelections(
         const draftPicked = await selectArchAndProfile(rl, draftName, draftModel, modelProfiles, true);
         if (draftPicked) {
           const draftOverride = await promptBatchingOverride(rl, draftPicked.profile);
-          const draftSwappable = await promptSwappable(rl);
           selections.push({
             model: draftModel,
             arch: draftPicked.arch,
             profile: draftPicked.profile,
             batchingConfigOverride: draftOverride,
-            swappable: draftSwappable,
+            swappable: true,
             isDraftFor: entry.resource_name,
           });
           successMsg(`Auto-added draft model ${draftName} for ${chosenName}`);
@@ -2468,6 +2478,11 @@ async function collectModelSelections(
         }
       }
     }
+  }
+
+  if (selections.length > 0) {
+    await promptAdvancedOptions(rl, selections);   // one question for the whole bundle, default No
+    saveSelectionSession(selections);
   }
 
   return selections;
@@ -2489,8 +2504,8 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
   }
 
   // ── Restore a previously in-progress session, if any ────────────────────────
-  // Mirrors the UI's /api/model-selection-state: saved as models are added, and
-  // never auto-cleared, so it's offered on every entry until explicitly discarded.
+  // Mirrors the UI's /api/model-selection-state: saved as models are added and
+  // offered on every entry until explicitly discarded or the bundle validates.
   let restoredSelections: ModelBundleSelection[] | null = null;
   const savedSession = loadSelectionSession();
   if (savedSession) {
@@ -2640,8 +2655,9 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
   }
   // ────────────────────────────────────────────────────────────────────────────
 
+  let carriedSelections: ModelBundleSelection[] = [];   // selections handed back by "Go back" after a failed validation
   builderLoop: while (true) {   // outer loop — allows "Go Back" after validation failure to re-enter model selection
-    const selections = restoredSelections ?? await collectModelSelections(rl, checkpointMapping, modelProfiles);
+    const selections = restoredSelections ?? await collectModelSelections(rl, checkpointMapping, modelProfiles, carriedSelections);
     restoredSelections = null; // only consume the restored session on the first pass
     if (selections.length === 0) return;
 
@@ -2754,7 +2770,8 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     if (!shouldApply) break builderLoop;
 
     const result = await applyModelBundle(rl, namespace, finalYaml, activeBundleName);
-    if (result === 'restart') continue builderLoop;
+    if (result === 'restart') { carriedSelections = selections; continue builderLoop; }   // keep what was selected
+    if (result === 'validated') clearSelectionSession();   // the work is done — don't offer to restore it on the next visit
     break builderLoop;
   }  // end builderLoop
 
@@ -2766,10 +2783,11 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
 /**
  * Applies a `ModelBundle` YAML document to the cluster and polls
  * `status.conditions` (Q5 — `{ type: Valid, status, reason, message }`) until
- * it resolves. Returns `'restart'` when the user chooses to go back to
- * Model Selection after a validation failure (so the caller can re-loop).
+ * it resolves. Returns `'validated'` when validation succeeded (the caller clears the
+ * saved session), and `'restart'` when the user chooses to go back to Model Selection
+ * after a validation failure (so the caller can re-loop with the same selections).
  */
-async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'done' | 'restart'> {
+async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'validated' | 'done' | 'restart'> {
   const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
   let activeBundleName = bundleName;
   try {
@@ -2849,6 +2867,8 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
       warnMsg('Still validating — check status with:');
       process.stdout.write(chalk.reset(`  kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o yaml\n\n`));
     }
+
+    if (validated && !validationFailed) return 'validated';
 
     // ── Recovery menu after validation failure ────────────────────────────────
     if (validationFailed) {
@@ -3503,7 +3523,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           shownCodeExamples = true;
           const showCode = await confirm(rl, 'View API code examples?', false);
           if (showCode) {
-            const maskedKey = envConfig.apiKey.slice(0, 4) + '••••••••' + envConfig.apiKey.slice(-4);
+            const maskedKey = maskApiKey(envConfig.apiKey);
             process.stdout.write('\n');
             process.stdout.write(chalk.reset.bold('  cURL\n'));
             process.stdout.write(chalk.reset('  ' + '─'.repeat(40)) + '\n');
@@ -3536,7 +3556,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           const apiBase = envConfig.uiDomain || envConfig.apiDomain || '';
           let code = '';
           try { code = JSON.parse(body).error?.code || ''; } catch { /* non-JSON body */ }
-          warnMsg(`API key rejected by the server${code ? ` (${code})` : ''} — key in use: ${envConfig.apiKey.slice(0, 6)}…${envConfig.apiKey.slice(-4)}. Update it in app-config.json.`);
+          warnMsg(`API key rejected by the server${code ? ` (${code})` : ''} — key in use: ${maskApiKey(envConfig.apiKey)}. Update it in app-config.json.`);
           process.stdout.write(chalk.reset('  Note: /v1/models is public, so listing models working does not prove the key is valid.\n'));
           if (apiBase) process.stdout.write(chalk.reset(`  Get a new key from: ${apiBase}\n\n`));
         } else {

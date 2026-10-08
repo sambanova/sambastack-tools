@@ -18,6 +18,7 @@ import {
   printValidationErrors,
   kubectlErrorDetail,
   kubectlHint,
+  maskApiKey,
 } from '../cli';
 
 /**
@@ -398,5 +399,15 @@ describe('kubectl error hints', () => {
   });
   it('flags rejected credentials', () => {
     expect(kubectlHint('error: You must be logged in to the server (Unauthorized)')).toMatch(/credentials were rejected/);
+  });
+});
+
+describe('maskApiKey', () => {
+  it('shows only the last 4 characters of a long key and nothing of a short one', () => {
+    expect(maskApiKey('0123456789abcdef0123')).toBe('…0123');
+    expect(maskApiKey('0123456789abcdef0123')).not.toContain('0123456');
+    expect(maskApiKey('short')).toBe('••••');
+    expect(maskApiKey('')).toBe('••••');
+    expect(maskApiKey('123456789012345')).toBe('••••'); // 15 chars: still hidden
   });
 });

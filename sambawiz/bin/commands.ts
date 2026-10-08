@@ -48,6 +48,7 @@ import {
   getAppVersion,
   profileHasPromptCachingOnCluster,
   kubectlErrorDetail,
+  maskApiKey,
   getOutdatedHelmChartWarning,
 } from './cli';
 
@@ -293,7 +294,7 @@ async function apiCall(ctx: Ctx, route: string, body?: unknown): Promise<any> {
   if (!res.ok) {
     if (res.status === 401 || res.status === 403) {
       const k: string = ctx.ec.apiKey;
-      fail(`API error ${res.status}: the server rejected the API key (${k.slice(0, 6)}…${k.slice(-4)}). Update it in app-config.json (\`env set-api-key\`). Note /v1/models is public, so \`api-models\` working does not prove the key is valid.`);
+      fail(`API error ${res.status}: the server rejected the API key (${maskApiKey(k)}). Update it in app-config.json (\`env set-api-key\`). Note /v1/models is public, so \`api-models\` working does not prove the key is valid.`);
     }
     let detail = text.trim();
     try { const e = JSON.parse(text); detail = e.error?.message || e.detail || e.message || detail; } catch { /* raw body */ }
@@ -336,6 +337,27 @@ async function followInstallLogs(ctx: Ctx, timeoutSec: number): Promise<boolean>
   }
   process.stderr.write(`Timed out after ${timeoutSec}s waiting for the installer.\n`);
   return false;
+}
+
+/** Reads a secret without echoing it: a hidden prompt on a terminal, otherwise everything piped on stdin. */
+async function readSecret(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) return readFileSync(0, 'utf-8').trim();
+  process.stderr.write(prompt);
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    const stdin = process.stdin;
+    stdin.setRawMode(true); stdin.resume(); stdin.setEncoding('utf8');
+    const done = (fn: () => void) => { stdin.setRawMode(false); stdin.pause(); stdin.removeListener('data', onData); process.stderr.write('\n'); fn(); };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === '\r' || ch === '\n') return done(() => resolve(buf.trim()));
+        if (ch === '\u0003') return done(() => reject(new CliError('Cancelled.')));
+        if (ch === '\u007f' || ch === '\b') buf = buf.slice(0, -1);
+        else if (ch >= ' ') buf += ch;
+      }
+    };
+    stdin.on('data', onData);
+  });
 }
 
 // ─── Command tree ────────────────────────────────────────────────────────────
@@ -428,7 +450,9 @@ export function buildProgram(): Command {
       const overrides = (() => { try { return readCheckpointOverrides(); } catch { return {}; } })();
       const { yaml: text, dropped } = generateModelBundle(o.name, withCheckpointOverrides(sels, overrides));
       formatDroppedSelections(dropped).forEach((l) => process.stderr.write(`warning: ${l}\n`));
-      if (dropped.length === sels.filter((s) => !s.isDraftFor).length) fail('Every selected model was dropped; nothing to build.');
+      // `dropped` can include draft models, so judge by the non-draft models that are still in the bundle.
+      const droppedNames = new Set(dropped.map((d) => d.model));
+      if (sels.filter((s) => !s.isDraftFor && !droppedNames.has(s.model.metadata.name)).length === 0) fail('Every selected model was dropped; nothing to build.');
       if (o.out) writeFileSync(o.out, text);
       const ctx = o.apply ? resolveCtx(o) : { json: Boolean(o.json) } as Ctx;
       let valid: boolean | undefined;
@@ -690,14 +714,16 @@ export function buildProgram(): Command {
       if (!text) fail('No transcription returned from the model.');
       print(ctx, { text }, () => say(text));
     });
-  common(program.command('speak <model> <text...>').description('Synthesize speech (TTS) to a WAV file')
+  common(program.command('speak <text...>').description('Synthesize speech (TTS) to a WAV file')
+    .option('--model <id>', 'TTS model id; an explicit value always wins, else the environment\'s / global `ttsModel` from app-config.json')
     .requiredOption('--voice <voice>', 'voice, e.g. serena').option('--language <lang>', 'e.g. english').requiredOption('-o, --out <file>', 'output .wav path'))
-    .action(async (model, text, o) => {
+    .action(async (text, o) => {
       const ctx = resolveCtx(o);
       if (!ctx.ec?.apiDomain || !ctx.ec?.apiKey) fail('apiDomain and apiKey must be configured for this environment in app-config.json.');
-      const cfg = loadAppConfig();
-      // per-env `ttsModel` wins over the global one, which wins over the model argument (same as the UI route)
-      const speechModel = ctx.ec.ttsModel || cfg.ttsModel || model;
+      // The model you name wins; `ttsModel` (per-env, then global) only fills in when none is given. The UI route does the
+      // opposite (config overrides the Playground's pick) because there the user can't always choose the speech model id.
+      const speechModel: string = o.model || ctx.ec.ttsModel || loadAppConfig().ttsModel;
+      if (!speechModel) fail('No TTS model: pass --model <id> or set `ttsModel` for this environment in app-config.json.');
       const res = await safeFetch(`${apiBase(ctx.ec.apiDomain)}v1/audio/speech`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${ctx.ec.apiKey}`, 'Content-Type': 'application/json' },
@@ -728,15 +754,20 @@ export function buildProgram(): Command {
         ? (existsSync(o.kubeconfigFile) ? readFileSync(o.kubeconfigFile, 'utf-8') : fail(`File not found: ${o.kubeconfigFile}`))
         : Buffer.from(o.kubeconfigB64.trim(), 'base64').toString('utf-8');
       if (!text.includes('apiVersion') || !text.includes('clusters')) fail('Content does not look like a valid kubeconfig.');
-      mkdirSync(path.join(PROJECT_ROOT, 'kubeconfigs'), { recursive: true });
-      const rel = `kubeconfigs/${name}.yaml`;
-      writeFileSync(path.join(PROJECT_ROOT, rel), text);
-      if (!cfg.kubeconfigs[name]) {
+      // Overwriting replaces the kubeconfig the environment actually points at (its `file`), not a guessed path.
+      const existing = cfg.kubeconfigs[name];
+      const rel: string = existing ? existing.file : `kubeconfigs/${name}.yaml`;
+      const dest = path.isAbsolute(rel) ? rel : path.join(PROJECT_ROOT, rel);
+      mkdirSync(path.dirname(dest), { recursive: true });
+      writeFileSync(dest, text);
+      if (!existing) {
         cfg.kubeconfigs[name] = { file: rel, namespace: o.namespace, uiDomain: o.uiDomain || '', apiDomain: o.apiDomain || '', apiKey: o.apiKey || '' };
         cfg.currentKubeconfig = name;
       }
       saveConfig(cfg);
-      say(`Environment '${name}' ${cfg.currentKubeconfig === name ? 'added and set current' : 'kubeconfig overwritten'}. Run \`data refresh --env ${name}\` next.`);
+      say(existing
+        ? `Environment '${name}': kubeconfig overwritten (${rel}). Run \`data refresh --env ${name}\` next.`
+        : `Environment '${name}' added and set current. Run \`data refresh --env ${name}\` next.`);
     });
   env.command('edit <name>').description('Edit an environment\'s namespace, domains or API key')
     .option('--namespace <ns>').option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>').option('--tts-model <id>')
@@ -761,11 +792,14 @@ export function buildProgram(): Command {
       saveConfig(cfg);
       say(`Environment '${name}' updated.`);
     });
-  env.command('set-api-key <key>').description('Save the API key for the current (or --env) environment')
-    .option('--env <name>').action((key, o) => {
+  env.command('set-api-key [key]').description('Save the API key for the current (or --env) environment (omit KEY to be prompted, or pipe it on stdin)')
+    .option('--env <name>').action(async (keyArg, o) => {
       const cfg = loadAppConfig();
       const name = o.env || cfg.currentKubeconfig;
       if (!cfg.kubeconfigs?.[name]) fail(`Environment "${name}" not found.`);
+      if (keyArg) process.stderr.write('warning: a key passed as an argument stays in your shell history; omit it to be prompted, or pipe it on stdin.\n');
+      const key = keyArg || await readSecret(`API key for '${name}' (input hidden): `);
+      if (!key) fail('No API key given.');
       cfg.kubeconfigs[name].apiKey = key;
       saveConfig(cfg);
       say(`API key saved for '${name}'.`);

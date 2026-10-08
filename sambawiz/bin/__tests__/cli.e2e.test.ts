@@ -27,12 +27,15 @@ const MAPPING = {
   Target: { resource_name: 'target', capabilities: [], checkpoints: { a3: { versions: { '2': { source: 's' } } } } },
   Multi: { resource_name: 'multi', capabilities: [], checkpoints: { a1: { versions: { '1': { source: 's' } } }, a2: { versions: { '1': { source: 's' } } } } },
   NoProfile: { resource_name: 'noprofile', capabilities: [], checkpoints: { zz: { versions: { '1': { source: 's' } } } } },
+  DraftEmpty: { resource_name: 'draftempty', capabilities: [], checkpoints: { a4: { versions: { '1': { source: 's' } } } } },
   Embedder: { resource_name: 'embedder', capabilities: ['embeddings'], checkpoints: { e1: { versions: { '1': { source: 's' } } } } },
 };
 const PROFILES = {
   p1: { model_arch: 'a1', features: [], batchingConfig: {}, pefs: ['x:1'], batchingConfigs: { all: { '32k': { batch_sizes: [1, 2, 4] }, '8k': { batch_sizes: [1, 2] } }, recommended: { '32k': { batch_sizes: [1] }, '8k': { batch_sizes: [1] } } } },
   cache: { model_arch: 'a2', features: ['prompt_caching'], batchingConfig: {}, pefs: ['x:1'], batchingConfigs: { all: { '8k': { batch_sizes: [1] } } } },
   sdp: { model_arch: 'a3', features: [], batchingConfig: {}, pefs: ['m-sd-x:1'], batchingConfigs: { all: { '8k': { batch_sizes: [1, 2] } } } },
+  // every tier lists no batch sizes -> a model using it is dropped from the bundle
+  emptyb: { model_arch: 'a4', features: [], batchingConfig: {}, pefs: ['x:1'], batchingConfigs: { all: { '8k': { batch_sizes: [] } } } },
   emb: { model_arch: 'e1', features: [], batchingConfig: {}, pefs: ['e:1'], batchingConfigs: { all: { '512': { batch_sizes: [1, 2] } } } },
 };
 
@@ -261,6 +264,24 @@ describe('env', () => {
     failed(await run(['env', 'add', 'y', '--kubeconfig-file', kf, '--namespace', 'Bad_NS']), /Invalid namespace/);
     expect(existsSync(path.join(sandbox, '..', 'evil.yaml'))).toBe(false);
   });
+  it('add --overwrite replaces the kubeconfig the env actually points at, and does not claim it was added/made current', async () => {
+    const cfg = readConfig();
+    cfg.kubeconfigs.custom = { file: 'kubeconfigs/somewhere-else.yaml', namespace: 'ns3' };
+    writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify(cfg));
+    writeFileSync(path.join(sandbox, 'kubeconfigs/somewhere-else.yaml'), 'apiVersion: v1\nclusters: []\n# OLD\n');
+    const fresh = path.join(sandbox, 'fresh.yaml'); writeFileSync(fresh, 'apiVersion: v1\nclusters: []\n# FRESH\n');
+    const r = ok(await run(['env', 'add', 'custom', '--kubeconfig-file', fresh, '--overwrite']));
+    expect(readFileSync(path.join(sandbox, 'kubeconfigs/somewhere-else.yaml'), 'utf-8')).toContain('# FRESH');
+    expect(existsSync(path.join(sandbox, 'kubeconfigs/custom.yaml'))).toBe(false);
+    expect(readConfig().kubeconfigs.custom).toMatchObject({ file: 'kubeconfigs/somewhere-else.yaml', namespace: 'ns3' });
+    expect(readConfig().currentKubeconfig).toBe('lab'); // overwrite never switches the current env
+    expect(r.out).toMatch(/kubeconfig overwritten \(kubeconfigs\/somewhere-else\.yaml\)/);
+    expect(r.out).not.toMatch(/added and set current/);
+    // overwriting the env that IS current must not be reported as "added"
+    const cur = ok(await run(['env', 'add', 'lab', '--kubeconfig-file', fresh, '--overwrite']));
+    expect(cur.out).toMatch(/kubeconfig overwritten/);
+    expect(readFileSync(path.join(sandbox, 'kubeconfigs/lab.yaml'), 'utf-8')).toContain('# FRESH');
+  });
   it('add creates app-config.json when none exists', async () => {
     resetSandbox({}, { config: false });
     const kf = path.join(sandbox, 'k.yaml'); writeFileSync(kf, KUBECONFIG_TEXT);
@@ -283,12 +304,17 @@ describe('env', () => {
     failed(await run(['env', 'edit', 'ghost', '--ui-domain', 'x']), /not found/);
     failed(await run(['env', 'edit', 'lab', '--namespace', 'Bad_NS']), /Invalid namespace/);
   });
-  it('set-api-key saves for current or --env, rejects unknown env', async () => {
-    ok(await run(['env', 'set-api-key', 'k-current']));
-    expect(readConfig().kubeconfigs.lab.apiKey).toBe('k-current');
-    ok(await run(['env', 'set-api-key', 'k-other', '--env', 'other']));
+  it('set-api-key: key from stdin (no argv), argument still works with a history warning, rejects unknown env / empty key', async () => {
+    ok(await run(['env', 'set-api-key'], { stdin: 'k-from-stdin\n' }));
+    expect(readConfig().kubeconfigs.lab.apiKey).toBe('k-from-stdin');
+    ok(await run(['env', 'set-api-key', '--env', 'other'], { stdin: 'k-other\n' }));
     expect(readConfig().kubeconfigs.other.apiKey).toBe('k-other');
-    failed(await run(['env', 'set-api-key', 'k', '--env', 'ghost']), /not found/);
+    const viaArg = ok(await run(['env', 'set-api-key', 'k-current']));
+    expect(readConfig().kubeconfigs.lab.apiKey).toBe('k-current');
+    expect(viaArg.err).toMatch(/shell history/);
+    failed(await run(['env', 'set-api-key', '--env', 'ghost'], { stdin: 'k\n' }), /not found/);
+    failed(await run(['env', 'set-api-key'], { stdin: '\n' }), /No API key given/);
+    expect(readConfig().kubeconfigs.lab.apiKey).toBe('k-current');
   });
   it('delete needs --yes, removes, and moves "current" when deleting it', async () => {
     failed(await run(['env', 'delete', 'other']), /without --yes/);
@@ -407,6 +433,13 @@ describe('bundle build', () => {
     expect(r.out).toContain('specDecodingPairs');
     expect(r.out).toContain('routable: false');
   });
+  it('a dropped DRAFT does not trigger the "every model was dropped" error; a dropped sole model does', async () => {
+    const r = ok(await build('--name', 'b1', '--model', 'Target:sdp', '--draft', 'Target=DraftEmpty:emptyb'));
+    expect(r.err).toMatch(/1 selected model left this bundle/);
+    expect(r.out).toContain('profile: sdp');
+    expect(r.out).not.toContain('draftempty');
+    failed(await build('--name', 'b1', '--model', 'DraftEmpty:emptyb'), /Every selected model was dropped/);
+  });
   it('writes -o file; --json carries yaml + dropped', async () => {
     const out = path.join(sandbox, 'out.yaml');
     ok(await build('--name', 'b1', '--model', 'Llama:p1', '-o', out));
@@ -519,6 +552,15 @@ describe('deploy', () => {
     failed(await run(['deploy', 'create']), /exactly one of/);
     failed(await run(['deploy', 'create', '--bundle', 'bg', '--model', 'Llama:p1']), /exactly one of/);
     failed(await run(['deploy', 'create', '--bundle', '$(id)']), /Invalid bundle name/);
+  });
+  it('a profile name coming from the cluster is never interpreted by a shell', async () => {
+    const evil = 'p;touch pwned-by-profile';
+    writeFileSync(stateFile(), JSON.stringify({ ...readState(), bundles: { ...readState().bundles,
+      bx: { metadata: { name: 'bx' }, spec: { modelConfigs: [{ profile: evil }] }, status: { conditions: [{ type: 'Valid', status: 'True' }] } } } }));
+    failed(await run(['deploy', 'create', '--bundle', 'bx', '--prompt-caching', '--dry-run']), /prompt_caching feature/);
+    expect(existsSync(path.join(sandbox, 'pwned-by-profile'))).toBe(false);
+    // kubectl received the name as ONE literal argument
+    expect(calls().some((c) => c.args.includes(`get modelprofile.sambanova.ai ${evil} -n ns1`))).toBe(true);
   });
   it('create --model (quick deploy) inlines spec.models with the latest-version ref', async () => {
     const r = ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run']));
@@ -642,6 +684,9 @@ describe('playground (API)', () => {
     writeConfig(); writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify({ currentKubeconfig: 'lab', kubeconfigs: { lab: { file: 'kubeconfigs/lab.yaml', namespace: 'ns1', apiDomain: `http://127.0.0.1:${port}`, apiKey: 'wrong' } } }));
     failed(await run(['chat', 'm1', 'hi']), /401|rejected the API key/);
     failed(await run(['api-models']), /rejected the API key/);
+    const short = await run(['chat', 'm1', 'hi']);
+    expect(short.err).not.toContain('wrong'); // a short key is never echoed back, not even partly
+    expect(short.err).toContain('••••');
     writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify({ currentKubeconfig: 'lab', kubeconfigs: { lab: { file: 'kubeconfigs/lab.yaml', namespace: 'ns1', apiDomain: 'http://127.0.0.1:1', apiKey: 'good' } } }));
     failed(await run(['chat', 'm1', 'hi']), /Cannot reach the API/);
     writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify({ currentKubeconfig: 'lab', kubeconfigs: { lab: { file: 'kubeconfigs/lab.yaml', namespace: 'ns1' } } }));
@@ -664,22 +709,31 @@ describe('playground (API)', () => {
     const big = path.join(sandbox, 'big.wav'); writeFileSync(big, Buffer.alloc(25 * 1024 * 1024 + 1));
     failed(await run(['transcribe', 'whisper', big]), /25 MB/);
   });
-  it('speak writes a WAV, honours ttsModel override, and reports stream errors / empty audio', async () => {
+  it('speak writes a WAV; the explicit --model wins over ttsModel, which only fills in when no model is given', async () => {
     const out = path.join(sandbox, 'o.wav');
-    ok(await run(['speak', 'qwen', 'hi', 'there', '--voice', 'serena', '--language', 'english', '-o', out]));
+    ok(await run(['speak', 'hi', 'there', '--model', 'qwen', '--voice', 'serena', '--language', 'english', '-o', out]));
     const wav = readFileSync(out);
     expect(wav.subarray(0, 4).toString()).toBe('RIFF');
     expect(wav.readUInt32LE(24)).toBe(16000); // sample rate taken from the response header
     expect(JSON.parse(apiHits.at(-1)!.body)).toMatchObject({ model: 'qwen', voice: 'serena', input: 'hi there', language: 'english' });
-    ok(await run(['env', 'edit', 'lab', '--tts-model', 'override-tts']));
-    ok(await run(['speak', 'qwen', 'hi', '--voice', 'v', '-o', out]));
-    expect(JSON.parse(apiHits.at(-1)!.body).model).toBe('override-tts');
-    ok(await run(['env', 'edit', 'lab', '--tts-model', '']));
-    writeConfig(); // clears override
-    failed(await run(['speak', 'errstream', 'hi', '--voice', 'v', '-o', out]), /tts blew up/);
-    failed(await run(['speak', 'silent', 'hi', '--voice', 'v', '-o', out]), /No audio returned/);
-    failed(await run(['speak', 'qwen', 'hi', '-o', out]), /--voice/);
-    failed(await run(['speak', 'qwen', 'hi', '--voice', 'v']), /--out/);
+    // no --model and no ttsModel anywhere -> clear error
+    failed(await run(['speak', 'hi', '--voice', 'v', '-o', out]), /No TTS model/);
+    // per-env ttsModel is the fallback ...
+    ok(await run(['env', 'edit', 'lab', '--tts-model', 'env-tts']));
+    ok(await run(['speak', 'hi', '--voice', 'v', '-o', out]));
+    expect(JSON.parse(apiHits.at(-1)!.body).model).toBe('env-tts');
+    // ... but never overrides an explicit --model
+    ok(await run(['speak', 'hi', '--model', 'explicit', '--voice', 'v', '-o', out]));
+    expect(JSON.parse(apiHits.at(-1)!.body).model).toBe('explicit');
+    // global ttsModel is used when the env has none
+    writeConfig({ ttsModel: 'global-tts' });
+    ok(await run(['speak', 'hi', '--voice', 'v', '-o', out]));
+    expect(JSON.parse(apiHits.at(-1)!.body).model).toBe('global-tts');
+    writeConfig();
+    failed(await run(['speak', 'errstream', '--model', 'errstream', '--voice', 'v', '-o', out]), /tts blew up/);
+    failed(await run(['speak', 'silent', '--model', 'silent', '--voice', 'v', '-o', out]), /No audio returned/);
+    failed(await run(['speak', 'hi', '--model', 'qwen', '-o', out]), /--voice/);
+    failed(await run(['speak', 'hi', '--model', 'qwen', '--voice', 'v']), /--out/);
   });
 });
 

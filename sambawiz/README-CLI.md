@@ -426,7 +426,7 @@ If saved bundle files exist in `saved_artifacts/`, you are asked how to start:
 
 Only files containing `kind: ModelBundle` are listed (V3-only — no backwards compatibility with old `BundleTemplate`/`Bundle` files). Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
 
-An in-progress selection is also remembered in `temp/cli-selection-state.json` (CLI-only — the web UI keeps its own file, since the two use different formats) and offered back the next time you open Model Selection. It shows the cluster it was started on so you can check the environment before applying.
+An in-progress selection is also remembered in `temp/cli-selection-state.json` (CLI-only — the web UI keeps its own file, since the two use different formats) and offered back the next time you open Model Selection. It shows the cluster it was started on so you can check the environment before applying. The saved selection is deleted once a bundle **validates successfully**, so it isn't offered again on your next visit.
 
 ---
 
@@ -554,6 +554,14 @@ Shown only when the selected profile's `pefs` contains a name with `sd` in it:
 ```
 
 Only models that have a matching profile are offered as drafts. Re-selecting a draft model removes it again (no duplicate entries). Choosing a draft repeats Steps 2–4 for the draft model (arch pick if multi-arch, profile pick, optional override). The draft is added to the bundle with `modelSettings: { routable: false }` and wired into `specDecodingPairs` (`{ target, draft }`, bare `Model` CR names — no `:version`/`:arch` suffix, and `experts` is always omitted so spec decoding applies to all of the target's experts).
+
+When you select **✅ Finish and Create Bundle**, one last question covers the whole bundle:
+
+```
+  › Advanced options — keep some models resident in HBM (non-swappable)? [y/N]
+```
+
+The default (`N`) leaves every model swappable, so most bundles need no extra prompts. Answering `y` opens a multi-select of the bundle's models (drafts are tagged); the ones you tick are written with `modelSettings.swappable: false`.
 
 ---
 
@@ -694,7 +702,7 @@ When validation fails, the error text is the cluster's **legalizer errors** (`st
 | Option | Description |
 |---|---|
 | ✏️ Edit YAML | Opens editor, then re-applies the edited YAML |
-| ← Go back to Model Selection | Deletes the failed `ModelBundle` from cluster and returns to model selection with all previous selections preserved |
+| ← Go back to Model Selection | Deletes the failed `ModelBundle` from cluster and returns to the model list **with your selections still in place** (shown as `✔`) so you can adjust them |
 | 🗑️ Delete from cluster | Removes the `ModelBundle` from the cluster |
 | ← Back to main menu | Leaves the resource on cluster, returns to main menu |
 
@@ -1050,10 +1058,10 @@ npm run dev-cli -- bundle build --name ds --model DeepSeek-R1-0528:deepseek --ba
 npm run dev-cli -- deploy create --bundle ds && npm run dev-cli -- deploy status md-ds
 ```
 
-| Environments (add / edit / delete / API key) | `env add <name> --kubeconfig-file P \| --kubeconfig-b64 S [--namespace --ui-domain --api-domain --api-key --overwrite]`, `env edit <name> [--namespace --ui-domain --api-domain --api-key --tts-model]`, `env set-api-key <key>`, `env delete <name> --yes` |
+| Environments (add / edit / delete / API key) | `env add <name> --kubeconfig-file P \| --kubeconfig-b64 S [--namespace --ui-domain --api-domain --api-key --overwrite]` (`--overwrite` replaces the kubeconfig file the environment already points at and never changes the current environment), `env edit <name> [--namespace --ui-domain --api-domain --api-key --tts-model]`, `env set-api-key [key]` (omit the key to be prompted with hidden input, or pipe it on stdin — a key given as an argument stays in your shell history), `env delete <name> --yes` |
 | Model Deployment → Deploy Model (single model, no bundle) | `deploy create --model <model>:<profile>[:<arch>] [--name] [--prompt-caching] [--ignore-eos] [--dry-run]` |
 | Playground (chat incl. vision, embeddings, model list) | `chat <model> [message...] [--system] [--image F...]` (stdin if no message), `embed <model> <text...>`, `api-models` |
-| Playground ASR / TTS | `transcribe <model> <file> [--language --prompt --response-format]`, `speak <model> <text...> --voice V [--language L] -o out.wav` |
+| Playground ASR / TTS | `transcribe <model> <file> [--language --prompt --response-format]`, `speak <text...> --voice V [--model ID] [--language L] -o out.wav` |
 | Get API Key (Keycloak admin credentials) | `env credentials [name]` |
 | Install / Upgrade SambaStack | `install apply --chart-version V \| -f file [--wait]`, `install logs [--follow]` |
 | Prerequisite and connectivity checks | `doctor` (exit 1 if a check fails) |
@@ -1082,7 +1090,7 @@ The end-to-end suite (`bin/__tests__/cli.e2e.test.ts`) spawns the real CLI for e
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
 | `checkpoint_overrides` | object | No | `{ "<model display name>": "<version>" }` — pin a checkpoint version instead of the highest |
-| `ttsModel` | string | No | Global fallback model id for text-to-speech (`speak`); a per-environment `ttsModel` wins |
+| `ttsModel` | string | No | Global default TTS model id for `speak` (a per-environment `ttsModel` is preferred; `--model` overrides both) |
 
 > **V3 note:** `checkpointsDir` is no longer read or written by the CLI. Checkpoints come from the `Model` CR (`spec.checkpoints.<arch>.versions`), and a bundle pins the **highest** checkpoint version under the chosen arch — unless you set the optional `checkpoint_overrides` map (`{ "<model display name>": "<version>" }`, top level of `app-config.json`), which pins that version for the model, exactly as the UI does.
 
@@ -1095,7 +1103,7 @@ The end-to-end suite (`bin/__tests__/cli.e2e.test.ts`) spawns the real CLI for e
 | `uiDomain` | string | No | SambaStack UI URL (checked during Validate) |
 | `apiDomain` | string | Playground | API base URL e.g. `https://api.example.com/` |
 | `apiKey` | string | Playground | Bearer token for API requests |
-| `ttsModel` | string | No | Model id sent to the speech endpoint, overriding the model argument (`speak`) |
+| `ttsModel` | string | No | Default TTS model id for `speak` when `--model` is not given (an explicit `--model` always wins) |
 | `enableUpdates` | boolean | No | Show SambaStack update banner in the web UI. Defaults to `true`. Set to `false` to hide it for this environment. |
 
 ### Example
