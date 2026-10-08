@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { CheckpointMappingV3, ModelProfilesCache } from '../../app/types/bundle';
+import yaml from 'js-yaml';
 import { generateModelBundleYaml, type ModelBundleSelection } from '../../app/utils/bundle-yaml-generator';
 import {
   toModelCR,
@@ -19,6 +20,10 @@ import {
   kubectlErrorDetail,
   kubectlHint,
   maskApiKey,
+  initialBatchChecks,
+  batchOverrideFromPicked,
+  stripServerManagedFields,
+  draftCandidates,
 } from '../cli';
 
 /**
@@ -409,5 +414,75 @@ describe('maskApiKey', () => {
     expect(maskApiKey('short')).toBe('••••');
     expect(maskApiKey('')).toBe('••••');
     expect(maskApiKey('123456789012345')).toBe('••••'); // 15 chars: still hidden
+  });
+});
+
+describe('batching override grid (review: tiers the user never chose)', () => {
+  const universe = { '32k': { batch_sizes: [1, 2, 4] }, '8k': { batch_sizes: [1, 2] }, '128k': { batch_sizes: [1] } };
+  const recommended = { '32k': { batch_sizes: [1] }, '8k': { batch_sizes: [1, 2] } };
+  it('starts only the recommended sizes checked; a tier that is in `all` but not `recommended` starts empty', () => {
+    expect(initialBatchChecks(universe, recommended)).toEqual({ '32k': [1], '8k': [1, 2], '128k': [] });
+  });
+  it('confirming the grid unchanged never turns on a tier the user did not pick', () => {
+    const allowed = { '32k': [1, 2, 4], '8k': [1, 2], '128k': [1] };
+    const override = batchOverrideFromPicked(allowed, initialBatchChecks(universe, recommended));
+    expect(Object.keys(override).sort()).toEqual(['32k', '8k']);       // 128k is left out
+    expect(override['32k']).toEqual({ batch_sizes: [1] });             // not widened to '*'
+    expect(override['8k']).toEqual({ batch_sizes: '*' });              // whole universe ticked -> '*'
+  });
+  it('ticking a tier that was empty adds it; ticking everything collapses to *', () => {
+    const allowed = { '128k': [1], '32k': [1, 2, 4] };
+    expect(batchOverrideFromPicked(allowed, { '128k': [1], '32k': [1, 2, 4] })).toEqual({ '128k': { batch_sizes: '*' }, '32k': { batch_sizes: '*' } });
+    expect(batchOverrideFromPicked(allowed, { '128k': [], '32k': [2] })).toEqual({ '32k': { batch_sizes: [2] } });
+  });
+});
+
+describe('stripServerManagedFields (review: Load from cluster)', () => {
+  const live = `
+apiVersion: sambanova.ai/v1alpha1
+kind: ModelBundle
+metadata:
+  name: my-bundle
+  namespace: sambastack
+  annotations: { kopf.zalando.org/last-handled-configuration: x }
+  labels: { a: b }
+  resourceVersion: "123"
+  uid: abc-def
+  creationTimestamp: "2026-09-01T00:00:00Z"
+  generation: 4
+  managedFields: [ { manager: kopf } ]
+spec:
+  modelConfigs: [ { model: "m:1", profile: p } ]
+status:
+  conditions: [ { type: Valid, status: "True" } ]
+`;
+  it('removes every field the server manages, and status, but keeps the definition', () => {
+    const doc: any = stripServerManagedFields(yaml.load(live));
+    expect(Object.keys(doc.metadata).sort()).toEqual(['name', 'namespace']);
+    expect(doc.status).toBeUndefined();
+    expect(doc.spec.modelConfigs).toHaveLength(1);
+    expect(doc.kind).toBe('ModelBundle');
+  });
+  it('tolerates documents without metadata or status', () => {
+    expect(stripServerManagedFields({ kind: 'X' })).toEqual({ kind: 'X' });
+    expect(stripServerManagedFields(null)).toBeNull();
+  });
+});
+
+describe('draftCandidates (review: a model added again as a draft)', () => {
+  const mapping: any = {
+    Target: { resource_name: 'target', capabilities: [], checkpoints: { a3: { versions: {} } } },
+    Small: { resource_name: 'small', capabilities: [], checkpoints: { a1: { versions: {} } } },
+    Other: { resource_name: 'other', capabilities: [], checkpoints: { a1: { versions: {} } } },
+    NoProfile: { resource_name: 'noprofile', capabilities: [], checkpoints: { zz: { versions: {} } } },
+  };
+  const profiles: any = { p1: { model_arch: 'a1', features: [], batchingConfig: {}, pefs: [] }, sd: { model_arch: 'a3', features: [], batchingConfig: {}, pefs: [] } };
+  const sel = (display: string, crname: string): any => ({ model: { metadata: { name: crname }, spec: { name: display, checkpoints: {} } } });
+  const names = Object.keys(mapping);
+  it('offers only models with a profile that are not already in the bundle', () => {
+    expect(draftCandidates(names, mapping, profiles, [sel('Target', 'target')])).toEqual(['Small', 'Other']);
+  });
+  it('hides a model the user already added on its own, and one already used as a draft', () => {
+    expect(draftCandidates(names, mapping, profiles, [sel('Target', 'target'), sel('Small', 'small')])).toEqual(['Other']);
   });
 });
