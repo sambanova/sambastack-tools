@@ -37,10 +37,11 @@ import {
   formatDroppedSelections,
   withCheckpointOverrides,
   readCheckpointOverrides,
-  readValidCondition,
+  bundleValidationOutcome,
   printValidationErrors,
   printMemoryUtilization,
   generateCheckpointMapping,
+  cacheSourceStatus,
   generatePefConfigs,
   getDeploymentStatus,
   deploymentStatuses,
@@ -223,6 +224,21 @@ const say = (s = '') => process.stdout.write(s + '\n');
 const kubectl = (args: string, input?: string) =>
   execSync(`kubectl ${args}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], ...(input ? { input } : {}) });
 
+/**
+ * The cached model data must come from the cluster being targeted: building from another cluster's models, profiles
+ * and checkpoint versions and applying it here would be wrong without any sign of it. A cache with no (or an outdated)
+ * stamp — e.g. written by the web UI — can't be checked, so that only warns.
+ */
+function assertCacheMatches(ctx: Ctx): void {
+  const r = cacheSourceStatus(ctx.kubeconfig, ctx.namespace);
+  if (r.status === 'mismatch') {
+    fail(`The cached model data was generated for ${r.from}, not for environment "${ctx.env}" (namespace ${ctx.namespace}). Run \`data refresh --env ${ctx.env}\` first.`);
+  }
+  if (r.status === 'unknown') {
+    process.stderr.write(`warning: can't tell which cluster the cached model data came from; run \`data refresh --env ${ctx.env}\` if it may be for another environment.\n`);
+  }
+}
+
 function readCache(): { mapping: CheckpointMappingV3; profiles: ModelProfilesCache } {
   const mp = path.join(DATA_DIR, 'checkpoint_mapping.json');
   const pp = path.join(DATA_DIR, 'model_profiles.json');
@@ -245,20 +261,30 @@ function assertChartOk(ctx: Ctx): void {
 }
 
 /** Polls a ModelBundle until its Valid condition resolves. Returns true if valid. */
+/** kubectl says the resource doesn't exist (yet). Anything else is a real error. */
+function isNotFound(e: any): boolean {
+  return /NotFound|not found/i.test(String(e?.stderr ?? e?.message ?? ''));
+}
+
 async function waitForValidation(ctx: Ctx, name: string, timeoutSec: number): Promise<boolean> {
   assertName('bundle name', name);
   const start = Date.now();
   while ((Date.now() - start) / 1000 < timeoutSec) {
+    let st: any = null;
     try {
-      const st = JSON.parse(kubectl(`get modelbundle.sambanova.ai ${name} -n ${ctx.namespace} -o json`));
-      const outcome = readValidCondition(st.status?.conditions || []);
-      if (outcome === 'succeeded') { if (!ctx.json) printMemoryUtilization(st.status?.legalizerInfo); return true; }
-      if (outcome === 'failed') {
-        if (!ctx.json) { printValidationErrors(st.status?.conditions || [], st.status?.legalizerInfo); printMemoryUtilization(st.status?.legalizerInfo); }
-        else process.stderr.write(JSON.stringify({ validation: 'failed', conditions: st.status?.conditions, legalizerInfo: st.status?.legalizerInfo }) + '\n');
-        return false;
-      }
-    } catch { /* resource not visible yet */ }
+      st = JSON.parse(kubectl(`get modelbundle.sambanova.ai ${name} -n ${ctx.namespace} -o json`));
+    } catch (e: any) {
+      // Only "not there yet" is worth retrying; a typo'd name's RBAC denial or an unreachable cluster fails right away with the real error.
+      if (!isNotFound(e)) fail(`kubectl get modelbundle failed: ${kubectlErrorDetail(e)}`);
+    }
+    // `bundleValidationOutcome` ignores a verdict about an older generation of the bundle (a re-apply of an already-valid one).
+    const outcome = st ? bundleValidationOutcome(st) : 'pending';
+    if (outcome === 'succeeded') { if (!ctx.json) printMemoryUtilization(st.status?.legalizerInfo); return true; }
+    if (outcome === 'failed') {
+      if (!ctx.json) { printValidationErrors(st.status?.conditions || [], st.status?.legalizerInfo); printMemoryUtilization(st.status?.legalizerInfo); }
+      else process.stderr.write(JSON.stringify({ validation: 'failed', conditions: st.status?.conditions, legalizerInfo: st.status?.legalizerInfo }) + '\n');
+      return false;
+    }
     await new Promise((r) => setTimeout(r, 3000));
   }
   return fail(`Timed out after ${timeoutSec}s waiting for bundle "${name}" validation.`);
@@ -446,6 +472,8 @@ export function buildProgram(): Command {
       const warn = bundleNameLengthWarning(o.name);
       if (warn) process.stderr.write(`warning: ${warn}\n`);
       const { mapping, profiles } = readCache();
+      const applyCtx = o.apply ? resolveCtx(o) : null;
+      if (applyCtx) assertCacheMatches(applyCtx);   // never build for one cluster from another cluster's data
       const sels = buildSelections({ models: o.model, batch: o.batch, nonSwappable: o.nonSwappable, draft: o.draft }, mapping, profiles);
       const overrides = (() => { try { return readCheckpointOverrides(); } catch { return {}; } })();
       const { yaml: text, dropped } = generateModelBundle(o.name, withCheckpointOverrides(sels, overrides));
@@ -454,7 +482,7 @@ export function buildProgram(): Command {
       const droppedNames = new Set(dropped.map((d) => d.model));
       if (sels.filter((s) => !s.isDraftFor && !droppedNames.has(s.model.metadata.name)).length === 0) fail('Every selected model was dropped; nothing to build.');
       if (o.out) writeFileSync(o.out, text);
-      const ctx = o.apply ? resolveCtx(o) : { json: Boolean(o.json) } as Ctx;
+      const ctx = applyCtx ?? ({ json: Boolean(o.json) } as Ctx);
       let valid: boolean | undefined;
       if (o.apply) {
         assertChartOk(ctx);
@@ -471,7 +499,7 @@ export function buildProgram(): Command {
   common(bundle.command('list').description('List ModelBundles and their validation state')).action((o) => {
     const ctx = resolveCtx(o);
     const items = JSON.parse(kubectl(`get modelbundle.sambanova.ai -n ${ctx.namespace} -o json`)).items || [];
-    const rows = items.map((i: any) => ({ name: i.metadata.name, validation: readValidCondition(i.status?.conditions || []) }));
+    const rows = items.map((i: any) => ({ name: i.metadata.name, validation: bundleValidationOutcome(i) }));
     print(ctx, rows, () => rows.forEach((r: any) => say(`${r.name.padEnd(40)} ${r.validation}`)));
   });
   common(bundle.command('show <name>').description('Print a ModelBundle as YAML')).action((name, o) => {
@@ -524,12 +552,13 @@ export function buildProgram(): Command {
       let cachingProfile: string | undefined;
       if (o.bundle) {
         const b = JSON.parse(kubectl(`get modelbundle.sambanova.ai ${o.bundle} -n ${ctx.namespace} -o json`));
-        if (readValidCondition(b.status?.conditions || []) !== 'succeeded') fail(`Bundle "${o.bundle}" is not validated; run \`bundle validate ${o.bundle}\`.`);
+        if (bundleValidationOutcome(b) !== 'succeeded') fail(`Bundle "${o.bundle}" is not validated; run \`bundle validate ${o.bundle}\`.`);
         const mc = b.spec?.modelConfigs || [];
         cachingProfile = mc.length === 1 ? mc[0].profile : undefined;
         built = buildModelDeploymentYaml(o.bundle, { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos });
       } else {
         const { mapping, profiles } = readCache();
+        assertCacheMatches(ctx);
         const [sel] = buildSelections({ models: [o.model] }, mapping, profiles);
         const ref = formatModelRefLatest(sel.model, sel.arch, readCheckpointOverrides()[sel.model.spec.name]);
         cachingProfile = sel.profile.metadata.name;
@@ -783,14 +812,20 @@ export function buildProgram(): Command {
       if (o.apiDomain !== undefined) e.apiDomain = o.apiDomain;
       if (o.apiKey !== undefined) e.apiKey = o.apiKey;
       if (o.ttsModel !== undefined) e.ttsModel = o.ttsModel;
-      if (o.namespace !== undefined && o.namespace !== before.namespace) {
+      // pef_configs.json is ONE shared file for the current environment. Only the current environment's namespace change may
+      // regenerate it; doing it for another environment would leave the current one running on that cluster's PEFs.
+      const namespaceChanged = o.namespace !== undefined && o.namespace !== before.namespace;
+      const isCurrent = name === cfg.currentKubeconfig;
+      if (namespaceChanged && isCurrent) {
         // Like the UI's update-config: refresh PEF configs for the new namespace first and roll back on failure.
         const kp = path.isAbsolute(e.file) ? e.file : path.join(PROJECT_ROOT, e.file);
         try { await generatePefConfigs(kp, o.namespace, false); }
         catch (err: any) { return fail(`Could not refresh PEF configs for namespace "${o.namespace}"; nothing changed. ${err.message}`); }
       }
       saveConfig(cfg);
-      say(`Environment '${name}' updated.`);
+      say(namespaceChanged && !isCurrent
+        ? `Environment '${name}' updated. It is not the current environment, so the cached PEF data was left alone; run \`env use ${name}\` and \`data refresh\` when you switch to it.`
+        : `Environment '${name}' updated.`);
     });
   env.command('set-api-key [key]').description('Save the API key for the current (or --env) environment (omit KEY to be prompted, or pipe it on stdin)')
     .option('--env <name>').action(async (keyArg, o) => {

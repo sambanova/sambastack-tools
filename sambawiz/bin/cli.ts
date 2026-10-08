@@ -6,7 +6,7 @@ declare const process: any;
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import { execSync, execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import * as readlineModule from 'readline';
@@ -441,11 +441,46 @@ export function kubectlHint(raw: string): string {
 
 export function kubectlErrorDetail(e: any): string {
   const raw = e.stderr ? String(e.stderr).trim() : e.message;
-  const errField = raw.match(/err="([^"]+)"/);
+  // kubectl's own `err="Get \"https://…\": tls: …"` contains escaped quotes; take the whole quoted value and unescape it
+  const errField = raw.match(/err="((?:[^"\\]|\\.)*)"/);
   const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
   const hint = kubectlHint(raw);
-  const detail = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
+  const detail = errField ? errField[1].replace(/\\"/g, '"') : connMsg ? connMsg[0] : raw.split('\n')[0];
   return hint ? `${detail}\n  → ${hint}` : detail;
+}
+
+// ─── Which cluster the cached model data came from ─────────────────────────────
+// checkpoint_mapping.json / model_profiles.json are ONE shared cache, whichever environment they were last generated
+// for. A stamp records the kubeconfig + namespace (and the files' mtimes, so a cache rewritten by something else — e.g.
+// the web UI — isn't trusted on the strength of an old stamp) so a command can refuse to build for a different cluster.
+
+const CACHE_SOURCE_PATH = path.join(DATA_DIR, 'cache_source.json');
+
+function cacheMtimes(): { mapping: number; profiles: number } | null {
+  try {
+    return {
+      mapping: statSync(path.join(DATA_DIR, 'checkpoint_mapping.json')).mtimeMs,
+      profiles: statSync(path.join(DATA_DIR, 'model_profiles.json')).mtimeMs,
+    };
+  } catch { return null; }
+}
+
+export function stampCacheSource(kubeconfigPath: string, namespace: string): void {
+  const m = cacheMtimes();
+  if (!m) return;
+  writeFileSync(CACHE_SOURCE_PATH, JSON.stringify({ kubeconfig: path.resolve(kubeconfigPath), namespace, ...m }, null, 2) + '\n');
+}
+
+export type CacheSourceStatus = { status: 'ok' } | { status: 'unknown' } | { status: 'mismatch'; from: string };
+
+/** Is the cached model data known to come from this kubeconfig + namespace? `unknown` = no (or an outdated) stamp. */
+export function cacheSourceStatus(kubeconfigPath: string, namespace: string): CacheSourceStatus {
+  let stamp: any;
+  try { stamp = JSON.parse(readFileSync(CACHE_SOURCE_PATH, 'utf-8')); } catch { return { status: 'unknown' }; }
+  const m = cacheMtimes();
+  if (!m || Math.abs(stamp.mapping - m.mapping) > 1 || Math.abs(stamp.profiles - m.profiles) > 1) return { status: 'unknown' };
+  if (stamp.kubeconfig === path.resolve(kubeconfigPath) && stamp.namespace === namespace) return { status: 'ok' };
+  return { status: 'mismatch', from: `${path.basename(stamp.kubeconfig)} / ${stamp.namespace}` };
 }
 
 export async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, verbose = true, chain = true): Promise<{ count: number }> {
@@ -568,6 +603,7 @@ export async function generateModelProfiles(kubeconfigPath: string, namespace: s
   const count = Object.keys(cache).length;
   ensureAppDataDir();
   writeFileSync(path.join(DATA_DIR, 'model_profiles.json'), JSON.stringify(cache, null, 2) + '\n');
+  stampCacheSource(kubeconfigPath, namespace);
   mpLog(`✓ Generated model_profiles.json with ${count} profiles`, verbose);
   return { count };
 }
@@ -3761,5 +3797,6 @@ if (isMainModule) {
   // Any argument → non-interactive subcommands (bin/commands.ts); none → the interactive menu.
   (args.length > 0 ? import('./commands').then((m) => m.runCommands(args)) : startCli()).catch(err => {
     console.error(chalk.red('\nFatal error:'), err);
+    process.exitCode = 1;   // scripts must see the failure (e.g. a missing dependency after a pull without `npm install`)
   });
 }

@@ -508,3 +508,13 @@ describe('bundleValidationOutcome (review: stale "valid" after a re-apply)', () 
     expect(bundleValidationOutcome(null)).toBe('pending');
   });
 });
+
+describe('kubectlErrorDetail with kubectl\'s escaped-quote err="…" field', () => {
+  it('returns the whole message, not the text up to the first escaped quote', () => {
+    const stderr = 'E1007 memcache.go:381] "Couldn\'t get current server API group list" err="Get \\"https://1.2.3.4:6443/api?timeout=32s\\": tls: failed to verify certificate: x509: certificate signed by unknown authority"';
+    const out = kubectlErrorDetail({ message: 'x', stderr });
+    expect(out).toContain('Get "https://1.2.3.4:6443/api?timeout=32s": tls: failed to verify certificate');
+    expect(out).not.toMatch(/^Get \\\n/);
+    expect(out).toContain('→');  // the CA hint is still appended
+  });
+});

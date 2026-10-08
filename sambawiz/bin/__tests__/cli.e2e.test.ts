@@ -9,7 +9,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { spawn, spawnSync } from 'child_process';
 import { createServer, type Server } from 'http';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync, realpathSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync, realpathSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 
@@ -60,6 +60,7 @@ else if (/get modelprofiles -o json/.test(j)) out({ items: st.modelprofiles || [
 else if (/get pef -o json/.test(j)) out({ items: [] });
 else if (/get modelprofile\\.sambanova\\.ai (\\S+)/.test(j)) { const p = nm(/get modelprofile\\.sambanova\\.ai (\\S+)/); if (!st.profileFeatures?.[p]) die('Error from server (NotFound): modelprofiles "' + p + '" not found'); out({ spec: { features: st.profileFeatures[p] } }); }
 else if (/get modelbundle\\.sambanova\\.ai -n \\S+ -o json/.test(j)) out({ items: Object.values(st.bundles || {}) });
+else if (st.forbidden && /get modelbundle/.test(j)) die('Error from server (Forbidden): modelbundles.sambanova.ai "x" is forbidden: User "u" cannot get resource "modelbundles"');
 else if (/get modelbundle\\.sambanova\\.ai (\\S+) -n \\S+ -o (json|yaml)/.test(j)) {
   const n = nm(/get modelbundle\\.sambanova\\.ai (\\S+)/); const b = (st.bundles || {})[n];
   if (!b) die('Error from server (NotFound): modelbundles.sambanova.ai "' + n + '" not found');
@@ -230,6 +231,19 @@ describe('meta', () => {
   });
 });
 
+describe('review #40.5: a fatal error exits non-zero', () => {
+  beforeEach(() => resetSandbox());
+  it('an unloadable dependency (commander missing) prints "Fatal error" and exits 1, not 0', async () => {
+    // simulate `commander` not being installed
+    writeFileSync(path.join(sandbox, 'block-commander.js'),
+      "const M = require('module'); const o = M._resolveFilename; M._resolveFilename = function (r, ...a) { if (r === 'commander') { const e = new Error(\"Cannot find module 'commander'\"); e.code = 'MODULE_NOT_FOUND'; throw e; } return o.call(this, r, ...a); };");
+    const r = await run(['env', 'list'], { env: { NODE_OPTIONS: `--require ${path.join(sandbox, 'block-commander.js')}` } });
+    expect(r.err).toMatch(/Fatal error/);
+    expect(r.err).toMatch(/commander/);
+    expect(r.code).toBe(1);
+  });
+});
+
 // ─── env ─────────────────────────────────────────────────────────────────────
 
 describe('env', () => {
@@ -303,6 +317,19 @@ describe('env', () => {
     expect(readConfig().kubeconfigs.lab.namespace).toBe('ns9');
     failed(await run(['env', 'edit', 'ghost', '--ui-domain', 'x']), /not found/);
     failed(await run(['env', 'edit', 'lab', '--namespace', 'Bad_NS']), /Invalid namespace/);
+  });
+  it('review #40.3: editing ANOTHER environment\'s namespace does not regenerate the current environment\'s PEF data', async () => {
+    const r = ok(await run(['env', 'edit', 'other', '--namespace', 'ns9']));
+    expect(readConfig().kubeconfigs.other.namespace).toBe('ns9');          // the edit itself is applied
+    expect(calls().some((c) => /get pef/.test(c.args))).toBe(false);        // but pef_configs.json is untouched
+    expect(r.out).toMatch(/not the current environment/);
+    // the current environment still refreshes, as before
+    ok(await run(['env', 'edit', 'lab', '--namespace', 'ns8']));
+    expect(calls().some((c) => /-n ns8 get pef/.test(c.args))).toBe(true);
+    // a non-namespace edit of another environment never touches PEFs either
+    const before = calls().length;
+    ok(await run(['env', 'edit', 'other', '--ui-domain', 'http://x']));
+    expect(calls().slice(before).some((c) => /get pef/.test(c.args))).toBe(false);
   });
   it('set-api-key: key from stdin (no argv), argument still works with a history warning, rejects unknown env / empty key', async () => {
     ok(await run(['env', 'set-api-key'], { stdin: 'k-from-stdin\n' }));
@@ -477,6 +504,48 @@ describe('bundle build', () => {
   });
 });
 
+describe('review #40.2: model data must come from the targeted cluster', () => {
+  beforeEach(() => resetSandbox());
+  const stamp = (kubeconfig: string, namespace: string, drift = 0) => writeFileSync(path.join(sandbox, 'app/data/cache_source.json'), JSON.stringify({
+    kubeconfig, namespace,
+    mapping: statSync(path.join(sandbox, 'app/data/checkpoint_mapping.json')).mtimeMs + drift,
+    profiles: statSync(path.join(sandbox, 'app/data/model_profiles.json')).mtimeMs + drift,
+  }));
+  const labConfig = () => path.join(sandbox, 'kubeconfigs/lab.yaml');
+
+  it('refuses `bundle build --apply` when the cache was generated for another environment, and applies nothing', async () => {
+    stamp(path.join(sandbox, 'kubeconfigs/other.yaml'), 'ns2');
+    failed(await run(['bundle', 'build', '--name', 'b1', '--model', 'Llama:p1', '--apply']), /generated for other\.yaml \/ ns2, not for environment "lab".*data refresh --env lab/);
+    expect(calls().some((c) => c.args.startsWith('apply'))).toBe(false);
+  });
+  it('refuses `deploy create --model` the same way, and a different namespace of the same kubeconfig also counts', async () => {
+    stamp(path.join(sandbox, 'kubeconfigs/other.yaml'), 'ns2');
+    failed(await run(['deploy', 'create', '--model', 'Llama:p1']), /generated for other\.yaml/);
+    stamp(labConfig(), 'another-namespace');
+    failed(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run']), /another-namespace/);
+  });
+  it('--env targets are checked, not just the current environment', async () => {
+    stamp(labConfig(), 'ns1');                                       // cache is for lab/ns1
+    expect(ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run'])).out).toContain('md-llama'); // matches current env
+    failed(await run(['deploy', 'create', '--model', 'Llama:p1', '--env', 'other']), /not for environment "other"/);
+  });
+  it('a matching stamp works silently; no stamp (or one made stale by a rewritten cache) only warns', async () => {
+    stamp(labConfig(), 'ns1');
+    const matching = ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run']));
+    expect(matching.err).not.toMatch(/can't tell which cluster/);
+    rmSync(path.join(sandbox, 'app/data/cache_source.json'));
+    expect(ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run'])).err).toMatch(/can't tell which cluster/);
+    stamp(path.join(sandbox, 'kubeconfigs/other.yaml'), 'ns2', 5000);   // stamp for another env, but the cache files changed since
+    expect(ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run'])).err).toMatch(/can't tell which cluster/);
+  });
+  it('`data refresh` stamps the cache for the refreshed environment', async () => {
+    writeFileSync(stateFile(), JSON.stringify({ models: [], modelprofiles: [] }));
+    ok(await run(['data', 'refresh']));
+    const st = JSON.parse(readFileSync(path.join(sandbox, 'app/data/cache_source.json'), 'utf-8'));
+    expect(st).toMatchObject({ kubeconfig: labConfig(), namespace: 'ns1' });
+  });
+});
+
 describe('bundle list/show/apply/validate/delete', () => {
   const GOOD = { metadata: { name: 'bg' }, spec: { modelConfigs: [{ profile: 'p1' }] }, status: { conditions: [{ type: 'Valid', status: 'True' }] } };
   const PEND = { metadata: { name: 'bp' }, spec: {}, status: { conditions: [] } };
@@ -503,6 +572,28 @@ describe('bundle list/show/apply/validate/delete', () => {
     writeFileSync(f, 'key: [unclosed');
     expect((await run(['bundle', 'apply', '-f', f])).code).toBe(1);
     failed(await run(['bundle', 'apply', '-f', '/no/file.yaml']), /ENOENT|no such file/);
+  });
+  it('review #40.1: a Valid=True from an OLDER generation is not reported as valid (re-apply of an already-valid bundle)', async () => {
+    const stale = { metadata: { name: 'bs', generation: 2 }, spec: {}, status: { observedGeneration: 1, conditions: [{ type: 'Valid', status: 'True', observedGeneration: 1 }] } };
+    const fresh = { metadata: { name: 'bf', generation: 2 }, spec: {}, status: { observedGeneration: 2, conditions: [{ type: 'Valid', status: 'True', observedGeneration: 2 }] } };
+    writeFileSync(stateFile(), JSON.stringify({ ...readState(), bundles: { ...readState().bundles, bs: stale, bf: fresh } }));
+    failed(await run(['bundle', 'validate', 'bs', '--timeout', '1']), /Timed out/);          // not "valid"
+    expect(ok(await run(['bundle', 'validate', 'bf', '--timeout', '5'])).out).toContain('bf is valid');
+    expect(JSON.parse(ok(await run(['bundle', 'list', '--json'])).out).find((r: any) => r.name === 'bs').validation).toBe('pending');
+    failed(await run(['deploy', 'create', '--bundle', 'bs', '--dry-run']), /not validated/);  // deploy can't roll out the stale one
+  });
+  it('review #40.4: a real kubectl error fails immediately with that error instead of waiting out the timeout', async () => {
+    writeFileSync(stateFile(), JSON.stringify({ forbidden: true }));
+    let t0 = Date.now();
+    failed(await run(['bundle', 'validate', 'anything', '--timeout', '60']), /Forbidden/);
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    writeFileSync(stateFile(), JSON.stringify({ kubectlDown: true }));
+    t0 = Date.now();
+    failed(await run(['bundle', 'validate', 'anything', '--timeout', '60']), /connection refused/);
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    // a bundle that simply isn't there yet is still retried until the timeout
+    writeFileSync(stateFile(), JSON.stringify({}));
+    failed(await run(['bundle', 'validate', 'not-yet', '--timeout', '1']), /Timed out/);
   });
   it('validate reports success / failure / unknown bundle by timeout', async () => {
     expect(ok(await run(['bundle', 'validate', 'bg', '--timeout', '5'])).out).toContain('bg is valid');
@@ -884,6 +975,19 @@ try:
         expect('What would you like to do?', 60); pump(0.5); buf = ''
         down(1); send('\\r', 2.0); pump(1.5)
         report('selections_kept', 'model(s) selected' in buf and '\\u2714 Llama' in buf)
+    elif scenario == 'esc_name':
+        build_to_name(); send('\\x1b', 2.0); pump(1.5)       # Esc at the bundle-name prompt
+        report('esc_keeps_selection', 'model(s) selected' in buf and '\\u2714 Llama' in buf)
+    elif scenario == 'remove_model':
+        down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
+        down(1); send('\\r', 1.5); pump(1.5)                  # add Llama
+        expect('Override this profile', 20); send('\\r', 1.0); pump(1.5)
+        down(1); send('\\r', 1.5); pump(1.0)                  # re-select Llama -> removes it
+        report('removed_message', 'Removed Llama' in allout)
+        send('\\x1b', 1.5); pump(1.5)                         # leave Model Selection
+        expect('Main Menu', 30); pump(0.5); buf = ''
+        down(1); send('\\r', 2.0); pump(1.5)                  # re-enter
+        report('removed_model_not_restored', 'Restore this session?' not in buf)
     elif scenario == 'advanced_no':
         down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
         down(1); send('\\r', 1.5); pump(1.5)
@@ -934,6 +1038,12 @@ describePty('interactive bundle builder (pseudo-terminal)', () => {
   });
   it('review #4: "Go back" after a failed validation returns to the model list with the selections still in place', async () => {
     expect(await drive('goback')).toEqual({ selections_kept: 'PASS' });
+  });
+  it('review #39.3: Esc at the bundle-name prompt keeps the selections', async () => {
+    expect(await drive('esc_name')).toEqual({ esc_keeps_selection: 'PASS' });
+  });
+  it('review #39.5: removing a model updates the saved session, so it is not restored on the next visit', async () => {
+    expect(await drive('remove_model')).toEqual({ removed_message: 'PASS', removed_model_not_restored: 'PASS' });
   });
   it('review #7: no per-model Swappable prompt; models stay swappable by default', async () => {
     expect(await drive('advanced_no')).toEqual({ no_per_model_swappable_prompt: 'PASS', default_is_swappable: 'PASS' });
