@@ -7,7 +7,7 @@
  * cluster or the real app-config.json.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { createServer, type Server } from 'http';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync, realpathSync } from 'fs';
 import { tmpdir } from 'os';
@@ -46,7 +46,7 @@ const j = a.join(' ');
 const stateFile = process.env.FAKE_STATE;
 const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
 const save = () => fs.writeFileSync(stateFile, JSON.stringify(st));
-const stdin = a.includes('-f') && a.includes('-') ? fs.readFileSync(0, 'utf-8') : '';
+const fi = a.indexOf('-f'); const stdin = fi >= 0 ? (a[fi + 1] === '-' ? fs.readFileSync(0, 'utf-8') : fs.readFileSync(a[fi + 1], 'utf-8')) : '';
 fs.appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ args: j, stdin, kubeconfig: process.env.KUBECONFIG }) + '\\n');
 const die = (m) => { process.stderr.write(m + '\\n'); process.exit(1); };
 if (st.kubectlDown) die('Unable to connect to the server: dial tcp 127.0.0.1:6443: connect: connection refused');
@@ -822,5 +822,123 @@ describe('shell-injection and path safety', () => {
     expect(r.code).toBe(1);
     expect(existsSync(path.join(sandbox, 'pwned'))).toBe(false);
     expect(calls().some((c) => c.args.includes('touch'))).toBe(false);
+  });
+});
+
+// ─── interactive bundle builder (drives the real menus through a pseudo-terminal) ─────────────────
+
+const PTY_DRIVER = `
+import os, pty, re, select, sys, time, signal
+ANSI = re.compile(r'\\x1b\\[[0-9;?]*[a-zA-Z]|\\x1b\\][^\\x07]*\\x07')
+cwd, tsx, cli, scenario = sys.argv[1:5]
+env = dict(os.environ, NO_COLOR='1', FAKE_STATE=cwd+'/state.json', FAKE_CALLS=cwd+'/calls.log', PATH=cwd+'/bin:'+os.environ['PATH'])
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(cwd); os.execvpe(tsx, ['tsx', cli], env)
+buf = ''; allout = ''
+def pump(t=0.3):
+    global buf, allout
+    end = time.time() + t
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.05)
+        if r:
+            try: d = os.read(fd, 65536).decode('utf8', 'replace')
+            except OSError: return False
+            if not d: return False
+            d = ANSI.sub('', d); buf += d; allout += d
+    return True
+def expect(text, timeout=60):
+    global buf
+    end = time.time() + timeout
+    while time.time() < end:
+        if text in buf:
+            buf = buf[buf.index(text) + len(text):]; return
+        if not pump(0.2) and text not in buf: break
+    raise TimeoutError('waiting for ' + repr(text) + '; tail: ' + allout[-800:])
+def send(s, wait=0.4): os.write(fd, s.encode()); pump(wait)
+def down(n=1):
+    for _ in range(n): send('\\x1b[B', 0.25)
+def build_to_name():
+    down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
+    down(1); send('\\r', 1.5); pump(1.5)                 # first model; its single profile is auto-selected
+    expect('Override this profile', 20); send('\\r', 1.0)  # batching override? default No
+    pump(1.0); send('\\r', 1.5)                          # Finish and Create Bundle
+    expect('Advanced options', 20); send('\\r', 1.5)     # default No
+    expect('Review the bundle and enter a name', 30)
+def report(name, ok): print('RESULT ' + name + ' ' + ('PASS' if ok else 'FAIL'))
+try:
+    expect('Main Menu', 90); pump(1.0)
+    if scenario == 'validated':
+        build_to_name(); send('\\r', 1.5)
+        expect('What next?', 30); send('\\r', 1.0)
+        expect('Bundle Validation Succeeded', 60); pump(1.5)
+        report('session_file_removed', not os.path.exists(cwd + '/temp/cli-selection-state.json'))
+        expect('Main Menu', 30); pump(0.5); buf = ''
+        down(1); send('\\r', 2.0); pump(1.5)
+        report('no_restore_prompt', 'Restore this session?' not in buf)
+    elif scenario == 'goback':
+        build_to_name()
+        for _ in range(12): send('\\x7f', 0.05)
+        send('bad-x', 0.3); send('\\r', 1.5)
+        expect('What next?', 30); send('\\r', 1.0)
+        expect('What would you like to do?', 60); pump(0.5); buf = ''
+        down(1); send('\\r', 2.0); pump(1.5)
+        report('selections_kept', 'model(s) selected' in buf and '\\u2714 Llama' in buf)
+    elif scenario == 'advanced_no':
+        down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
+        down(1); send('\\r', 1.5); pump(1.5)
+        expect('Override this profile', 20); send('\\r', 1.0); pump(1.0); send('\\r', 1.5)
+        expect('Advanced options', 20); send('\\r', 1.5)
+        expect('Review the bundle and enter a name', 30); pump(0.5)
+        report('no_per_model_swappable_prompt', 'Swappable' not in allout)
+        report('default_is_swappable', 'swappable: false' not in allout)
+    elif scenario == 'advanced_yes':
+        down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
+        down(1); send('\\r', 1.5); pump(1.5)
+        expect('Override this profile', 20); send('\\r', 1.0); pump(1.0); send('\\r', 1.5)
+        expect('Advanced options', 20); send('y', 0.3); send('\\r', 1.5)
+        expect('Keep resident', 20); down(1); send(' ', 0.3); send('\\r', 1.5)
+        expect('Review the bundle and enter a name', 30); pump(0.5)
+        report('non_swappable_emitted', 'swappable: false' in allout)
+finally:
+    try: os.kill(pid, signal.SIGKILL)
+    except Exception: pass
+`;
+
+const HAS_PYTHON = spawnSync('python3', ['--version']).status === 0;
+const describePty = HAS_PYTHON ? describe : describe.skip;
+
+describePty('interactive bundle builder (pseudo-terminal)', () => {
+  const STATE = {
+    models: [{ metadata: { name: 'llama' }, spec: { name: 'Llama', metadata: { capabilities: [] }, checkpoints: { a1: { versions: { '1': { source: 'gs://b/x' } } } } } }],
+    modelprofiles: [{ metadata: { name: 'p1' }, spec: { model_arch: 'a1', features: [], pefs: ['x:1'], batchingConfigs: { all: { '8k': { batch_sizes: [1, 2] } }, recommended: { '8k': { batch_sizes: [1] } } } } }],
+  };
+  const drive = (scenario: string): Promise<Record<string, string>> => new Promise((resolve, reject) => {
+    writeFileSync(path.join(sandbox, 'pty_driver.py'), PTY_DRIVER);
+    const p = spawn('python3', [path.join(sandbox, 'pty_driver.py'), sandbox, TSX, CLI, scenario]);
+    let out = '', err = '';
+    p.stdout.on('data', (d) => (out += d));
+    p.stderr.on('data', (d) => (err += d));
+    p.on('close', () => {
+      const res: Record<string, string> = {};
+      for (const m of out.matchAll(/RESULT (\S+) (PASS|FAIL)/g)) res[m[1]] = m[2];
+      if (Object.keys(res).length === 0) return reject(new Error(`no result from pty driver\n${out}\n${err}`));
+      resolve(res);
+    });
+  });
+  beforeEach(() => { resetSandbox(STATE, { cache: false }); rmSync(path.join(sandbox, 'temp'), { recursive: true, force: true }); });
+
+  jest.setTimeout(120_000);
+  it('review #4: the saved session is deleted once a bundle validates, so the next visit offers no restore', async () => {
+    expect(await drive('validated')).toEqual({ session_file_removed: 'PASS', no_restore_prompt: 'PASS' });
+  });
+  it('review #4: "Go back" after a failed validation returns to the model list with the selections still in place', async () => {
+    expect(await drive('goback')).toEqual({ selections_kept: 'PASS' });
+  });
+  it('review #7: no per-model Swappable prompt; models stay swappable by default', async () => {
+    expect(await drive('advanced_no')).toEqual({ no_per_model_swappable_prompt: 'PASS', default_is_swappable: 'PASS' });
+  });
+  it('review #7: answering yes to the single "Advanced options" step marks the chosen model swappable: false', async () => {
+    expect(await drive('advanced_yes')).toEqual({ non_swappable_emitted: 'PASS' });
   });
 });
