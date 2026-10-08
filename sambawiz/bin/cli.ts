@@ -6,7 +6,7 @@ declare const process: any;
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import { execSync, execFileSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, statSync, rmSync, chmodSync } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import * as readlineModule from 'readline';
@@ -188,6 +188,15 @@ export async function curlLike(url: string, opts: { method?: string; apiKey?: st
     const reason = e?.name === 'TimeoutError' ? `timed out after ${opts.timeoutMs / 1000}s` : e?.cause?.message || e?.message || 'unknown error';
     throw new Error(`Cannot reach ${url}: ${reason}`);
   }
+}
+
+/**
+ * Writes a file that holds secrets (API keys in app-config.json, cluster credentials in kubeconfigs) readable by the
+ * owner only. `mode` only applies when a file is created, so an existing world-readable one is tightened as well.
+ */
+export function writePrivateFile(file: string, data: string): void {
+  writeFileSync(file, data, { mode: 0o600 });
+  try { chmodSync(file, 0o600); } catch { /* e.g. a filesystem without POSIX modes */ }
 }
 
 /** Never reveals more than the last 4 characters, and nothing at all for short keys. */
@@ -492,10 +501,16 @@ function cacheMtimes(): { mapping: number; profiles: number } | null {
   } catch { return null; }
 }
 
+/** The API server a kubeconfig points at (its first `server:` line), or '' if it can't be read. */
+export function kubeconfigServer(kubeconfigPath: string): string {
+  try { return /^\s*server:\s*(\S+)/m.exec(readFileSync(kubeconfigPath, 'utf-8'))?.[1] ?? ''; } catch { return ''; }
+}
+
 export function stampCacheSource(kubeconfigPath: string, namespace: string): void {
   const m = cacheMtimes();
   if (!m) return;
-  writeFileSync(CACHE_SOURCE_PATH, JSON.stringify({ kubeconfig: path.resolve(kubeconfigPath), namespace, ...m }, null, 2) + '\n');
+  // The server URL is part of the identity: `env add --overwrite` can point the same kubeconfig path at another cluster.
+  writeFileSync(CACHE_SOURCE_PATH, JSON.stringify({ kubeconfig: path.resolve(kubeconfigPath), namespace, server: kubeconfigServer(kubeconfigPath), ...m }, null, 2) + '\n');
 }
 
 export type CacheSourceStatus = { status: 'ok' } | { status: 'unknown' } | { status: 'mismatch'; from: string };
@@ -506,6 +521,8 @@ export function cacheSourceStatus(kubeconfigPath: string, namespace: string): Ca
   try { stamp = JSON.parse(readFileSync(CACHE_SOURCE_PATH, 'utf-8')); } catch { return { status: 'unknown' }; }
   const m = cacheMtimes();
   if (!m || Math.abs(stamp.mapping - m.mapping) > 1 || Math.abs(stamp.profiles - m.profiles) > 1) return { status: 'unknown' };
+  const server = kubeconfigServer(kubeconfigPath);
+  if (stamp.server && server && stamp.server !== server) return { status: 'mismatch', from: `${stamp.server} / ${stamp.namespace}` };
   if (stamp.kubeconfig === path.resolve(kubeconfigPath) && stamp.namespace === namespace) return { status: 'ok' };
   return { status: 'mismatch', from: `${path.basename(stamp.kubeconfig)} / ${stamp.namespace}` };
 }
@@ -1487,7 +1504,7 @@ async function addEnvironmentMenu(rl: any) {
           ? kubeconfigInput.replace(/^~/, process.env.HOME || '')
           : path.join(process.cwd(), kubeconfigInput);
       if (!existsSync(srcPath)) { errorMsg(`File not found: ${srcPath}`); return; }
-      try { writeFileSync(destPath, readFileSync(srcPath, 'utf-8')); }
+      try { writePrivateFile(destPath, readFileSync(srcPath, 'utf-8')); }
       catch (e: any) { errorMsg(`Failed to copy kubeconfig: ${e.message}`); return; }
     } else {
       try {
@@ -1495,7 +1512,7 @@ async function addEnvironmentMenu(rl: any) {
         if (!decoded.includes('apiVersion') && !decoded.includes('clusters')) {
           errorMsg('Decoded content does not look like a valid kubeconfig. Check your base64 string.'); return;
         }
-        writeFileSync(destPath, decoded);
+        writePrivateFile(destPath, decoded);
       } catch (e: any) { errorMsg(`Failed to decode base64: ${e.message}`); return; }
     }
 
@@ -1511,7 +1528,7 @@ async function addEnvironmentMenu(rl: any) {
     };
     appConfig.currentKubeconfig = name;
 
-    writeFileSync(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
+    writePrivateFile(CONFIG_PATH, JSON.stringify(appConfig, null, 2) + '\n');
     successMsg(`Environment "${name}" added and set as active.`);
     infoRow('Kubeconfig', destRelative);
     if (uiDomain)  infoRow('UI Domain',  uiDomain);
@@ -1568,7 +1585,7 @@ async function addEnvironmentMenu(rl: any) {
           apiKey:        aKey,
           enableUpdates: enableUpdStr.toLowerCase() !== 'n',
         };
-        writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+        writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
         successMsg(`Environment "${name}" updated.`);
       } else if (action === 'delete') {
         const ok = await confirm(rl, chalk.red(`Delete environment "${name}"?`), false);
@@ -1578,7 +1595,7 @@ async function addEnvironmentMenu(rl: any) {
           const remaining = Object.keys(freshConfig.kubeconfigs);
           freshConfig.currentKubeconfig = remaining[0] || null;
         }
-        writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+        writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
         successMsg(`Environment "${name}" deleted.`);
         break;
       }
@@ -1610,7 +1627,7 @@ async function addEnvironmentMenu(rl: any) {
         continue;
       }
       freshConfig.currentKubeconfig = envName;
-      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`"${envName}" is now the active environment.`);
       const kPath  = path.join(PROJECT_ROOT, kFile);
       const ns     = ec.namespace || 'default';
@@ -1655,7 +1672,7 @@ async function addEnvironmentMenu(rl: any) {
         apiKey:        apiKey,
         enableUpdates: enableUpdStr2.toLowerCase() !== 'n',
       };
-      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`Environment "${envName}" updated.`);
       // stay in sub-menu after edit
 
@@ -1668,7 +1685,7 @@ async function addEnvironmentMenu(rl: any) {
         const remaining = Object.keys(freshConfig.kubeconfigs);
         freshConfig.currentKubeconfig = remaining[0] || null;
       }
-      writeFileSync(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
+      writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`Environment "${envName}" deleted.`);
       break; // leave sub-menu after delete
     }
@@ -1753,7 +1770,7 @@ async function startCli() {
       newConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
     }
     if (yamlFiles.length) newConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
-    writeFileSync(CONFIG_PATH, JSON.stringify(newConfig, null, 2) + '\n');
+    writePrivateFile(CONFIG_PATH, JSON.stringify(newConfig, null, 2) + '\n');
     successMsg(`Created app-config.json${yamlFiles.length ? ` with ${yamlFiles.length} kubeconfig(s) found in kubeconfigs/` : ''}.`);
   } else {
     // Mirrors /api/auto-populate-kubeconfigs: offer to populate an existing
@@ -1771,7 +1788,7 @@ async function startCli() {
             existingConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
           }
           existingConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
-          writeFileSync(CONFIG_PATH, JSON.stringify(existingConfig, null, 2) + '\n');
+          writePrivateFile(CONFIG_PATH, JSON.stringify(existingConfig, null, 2) + '\n');
           successMsg('app-config.json populated.');
         }
       }
@@ -1821,7 +1838,7 @@ async function startCli() {
       const chosen = await select(rl, 'Select a valid environment to continue:', envChoices);
       if (chosen && chosen !== 'skip') {
         loaded.appConfig.currentKubeconfig = chosen;
-        writeFileSync(CONFIG_PATH, JSON.stringify(loaded.appConfig, null, 2) + '\n');
+        writePrivateFile(CONFIG_PATH, JSON.stringify(loaded.appConfig, null, 2) + '\n');
         loaded = loadEnvConfig();
         if (!loaded.error) {
           successMsg(`Switched to: ${loaded.currentEnv}  (namespace: ${loaded.namespace})`);

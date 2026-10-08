@@ -58,6 +58,7 @@ else if (/^get namespace/.test(j)) { if (st.noNamespace) die('Error from server 
 else if (/get models -o json/.test(j)) out({ items: st.models || [] });
 else if (/get modelprofiles -o json/.test(j)) out({ items: st.modelprofiles || [] });
 else if (/get pef -o json/.test(j)) out({ items: [] });
+else if (st.profileForbidden && /get modelprofile/.test(j)) die('Error from server (Forbidden): modelprofiles.sambanova.ai is forbidden: User "u" cannot get resource "modelprofiles"');
 else if (/get modelprofile\\.sambanova\\.ai (\\S+)/.test(j)) { const p = nm(/get modelprofile\\.sambanova\\.ai (\\S+)/); if (!st.profileFeatures?.[p]) die('Error from server (NotFound): modelprofiles "' + p + '" not found'); out({ spec: { features: st.profileFeatures[p] } }); }
 else if (/get modelbundle\\.sambanova\\.ai -n \\S+ -o json/.test(j)) out({ items: Object.values(st.bundles || {}) });
 else if (st.forbidden && /get modelbundle/.test(j)) die('Error from server (Forbidden): modelbundles.sambanova.ai "x" is forbidden: User "u" cannot get resource "modelbundles"');
@@ -318,6 +319,24 @@ describe('env', () => {
     failed(await run(['env', 'edit', 'ghost', '--ui-domain', 'x']), /not found/);
     failed(await run(['env', 'edit', 'lab', '--namespace', 'Bad_NS']), /Invalid namespace/);
   });
+  it('proactive: --api-key on env add / env edit warns that the key lands in shell history', async () => {
+    const kf = path.join(sandbox, 'kk.yaml'); writeFileSync(kf, KUBECONFIG_TEXT);
+    expect(ok(await run(['env', 'add', 'withkey', '--kubeconfig-file', kf, '--api-key', 'k-1'])).err).toMatch(/shell history.*env set-api-key/);
+    expect(ok(await run(['env', 'edit', 'withkey', '--api-key', 'k-2'])).err).toMatch(/shell history/);
+    expect(ok(await run(['env', 'edit', 'withkey', '--ui-domain', 'http://u'])).err).not.toMatch(/shell history/);
+  });
+  it('proactive: the files the CLI writes with secrets (app-config.json, kubeconfigs) are owner-only', async () => {
+    const mode = (f: string) => statSync(f).mode & 0o777;
+    chmodSync(path.join(sandbox, 'app-config.json'), 0o644);
+    chmodSync(path.join(sandbox, 'kubeconfigs/lab.yaml'), 0o777);
+    ok(await run(['env', 'set-api-key'], { stdin: 'k-secret\n' }));
+    expect(mode(path.join(sandbox, 'app-config.json'))).toBe(0o600);
+    const kf = path.join(sandbox, 'k.yaml'); writeFileSync(kf, KUBECONFIG_TEXT);
+    ok(await run(['env', 'add', 'priv', '--kubeconfig-file', kf]));
+    expect(mode(path.join(sandbox, 'kubeconfigs/priv.yaml'))).toBe(0o600);
+    ok(await run(['env', 'add', 'lab', '--kubeconfig-file', kf, '--overwrite']));      // an existing 777 kubeconfig is tightened
+    expect(mode(path.join(sandbox, 'kubeconfigs/lab.yaml'))).toBe(0o600);
+  });
   it('review #40.3: editing ANOTHER environment\'s namespace does not regenerate the current environment\'s PEF data', async () => {
     const r = ok(await run(['env', 'edit', 'other', '--namespace', 'ns9']));
     expect(readConfig().kubeconfigs.other.namespace).toBe('ns9');          // the edit itself is applied
@@ -506,8 +525,8 @@ describe('bundle build', () => {
 
 describe('review #40.2: model data must come from the targeted cluster', () => {
   beforeEach(() => resetSandbox());
-  const stamp = (kubeconfig: string, namespace: string, drift = 0) => writeFileSync(path.join(sandbox, 'app/data/cache_source.json'), JSON.stringify({
-    kubeconfig, namespace,
+  const stamp = (kubeconfig: string, namespace: string, drift = 0, server?: string) => writeFileSync(path.join(sandbox, 'app/data/cache_source.json'), JSON.stringify({
+    kubeconfig, namespace, ...(server ? { server } : {}),
     mapping: statSync(path.join(sandbox, 'app/data/checkpoint_mapping.json')).mtimeMs + drift,
     profiles: statSync(path.join(sandbox, 'app/data/model_profiles.json')).mtimeMs + drift,
   }));
@@ -528,6 +547,22 @@ describe('review #40.2: model data must come from the targeted cluster', () => {
     stamp(labConfig(), 'ns1');                                       // cache is for lab/ns1
     expect(ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run'])).out).toContain('md-llama'); // matches current env
     failed(await run(['deploy', 'create', '--model', 'Llama:p1', '--env', 'other']), /not for environment "other"/);
+  });
+  it('same kubeconfig path and namespace but a DIFFERENT API server (kubeconfig replaced) is a mismatch', async () => {
+    writeFileSync(labConfig(), 'apiVersion: v1\nclusters:\n- cluster:\n    server: https://new-cluster:6443\n  name: c\n');
+    stamp(labConfig(), 'ns1', 0, 'https://old-cluster:6443');
+    failed(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run']), /generated for https:\/\/old-cluster:6443 \/ ns1/);
+    stamp(labConfig(), 'ns1', 0, 'https://new-cluster:6443');
+    ok(await run(['deploy', 'create', '--model', 'Llama:p1', '--dry-run']));
+  });
+  it('read-only commands only warn when the cache is for another environment', async () => {
+    stamp(path.join(sandbox, 'kubeconfigs/other.yaml'), 'ns2');
+    const r = ok(await run(['models', 'list']));
+    expect(r.err).toMatch(/generated for other\.yaml \/ ns2, not for the current environment "lab"/);
+    expect(r.out).toContain('Llama');                                                    // still shows the models
+    expect(ok(await run(['bundle', 'build', '--name', 'b1', '--model', 'Llama:p1'])).err).toMatch(/not for the current environment/);
+    stamp(labConfig(), 'ns1');
+    expect(ok(await run(['models', 'list'])).err).not.toMatch(/generated for/);
   });
   it('a matching stamp works silently; no stamp (or one made stale by a rewritten cache) only warns', async () => {
     stamp(labConfig(), 'ns1');
@@ -601,6 +636,15 @@ describe('bundle list/show/apply/validate/delete', () => {
     failed(pend, /Timed out/);
     failed(await run(['bundle', 'validate', 'ghost', '--timeout', '1']), /Timed out/);
   });
+  it('proactive: a bundle that a deployment still uses is not deleted without --force', async () => {
+    writeFileSync(stateFile(), JSON.stringify({ ...readState(), deployments: { md1: { metadata: { name: 'md1' }, spec: { bundle: 'bg' }, status: {} } } }));
+    failed(await run(['bundle', 'delete', 'bg', '--yes']), /still used by deployment\(s\): md1/);
+    expect(readState().bundles.bg).toBeDefined();
+    ok(await run(['bundle', 'delete', 'bp', '--yes']));                  // not referenced -> deleted
+    expect(readState().bundles.bp).toBeUndefined();
+    ok(await run(['bundle', 'delete', 'bg', '--yes', '--force']));       // explicit override
+    expect(readState().bundles.bg).toBeUndefined();
+  });
   it('delete needs --yes, removes, and reports a missing bundle', async () => {
     failed(await run(['bundle', 'delete', 'bg']), /without --yes/);
     ok(await run(['bundle', 'delete', 'bg', '--yes']));
@@ -673,6 +717,14 @@ describe('deploy', () => {
     expect((await run(['deploy', 'create', '--bundle', 'bg'])).code).toBe(1);
     writeFileSync(stateFile(), JSON.stringify({ ...readState(), helmOutdated: false, applyFail: true }));
     failed(await run(['deploy', 'create', '--bundle', 'bg']), /kubectl apply failed/);
+  });
+  it('proactive: real kubectl failures surface instead of looking like a normal answer', async () => {
+    // `deploy list` used to show every deployment as "Not Deployed" when the pods could not be read
+    writeFileSync(stateFile(), JSON.stringify({ kubectlDown: true }));
+    failed(await run(['deploy', 'list']), /connection refused|Unable to connect/);
+    // `--prompt-caching` used to say "needs the prompt_caching feature" when the profile lookup was merely denied
+    writeFileSync(stateFile(), JSON.stringify({ bundles: { bc: { metadata: { name: 'bc' }, spec: { modelConfigs: [{ profile: 'cache' }] }, status: { conditions: [{ type: 'Valid', status: 'True' }] } } }, profileForbidden: true }));
+    failed(await run(['deploy', 'create', '--bundle', 'bc', '--prompt-caching', '--dry-run']), /modelprofile cache failed: .*Forbidden/);
   });
   it('apply -f applies a hand-edited ModelDeployment (e.g. with storage:) and validates the file', async () => {
     const f = path.join(sandbox, 'md.yaml');
@@ -768,6 +820,11 @@ describe('playground (API)', () => {
     failed(await run(['chat', 'm1', 'look', '--image', path.join(sandbox, 'x.bmp')]), /Unsupported image type/);
     failed(await run(['chat', 'm1', 'look', '--image', path.join(sandbox, 'missing.png')]), /Image not found/);
   });
+  it('proactive: an oversized image is refused before it is read into the request', async () => {
+    const big = path.join(sandbox, 'big.png'); writeFileSync(big, Buffer.alloc(21 * 1024 * 1024));
+    failed(await run(['chat', 'm1', 'look', '--image', big]), /Image too large.*20 MB/);
+    expect(apiHits.length).toBe(0);
+  });
   it('maps API failures to clear errors and exit 1: 401, 404, 500, non-JSON, unreachable, unconfigured', async () => {
     failed(await run(['chat', 'boom', 'hi']), /API error 500: internal boom/);
     failed(await run(['chat', 'missing', 'hi']), /API error 404: model not found/);
@@ -850,6 +907,15 @@ describe('install', () => {
     const f = path.join(sandbox, 'cm.yaml'); writeFileSync(f, 'kind: ConfigMap\nmetadata:\n  name: custom\n');
     ok(await run(['install', 'apply', '-f', f]));
     expect(calls().find((c) => c.args.startsWith('apply'))!.stdin).toContain('name: custom');
+  });
+  it('proactive: install apply -f only accepts the installer ConfigMap, not an arbitrary manifest', async () => {
+    const f = path.join(sandbox, 'not-cm.yaml');
+    writeFileSync(f, 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: oops\n');
+    failed(await run(['install', 'apply', '-f', f]), /not a ConfigMap/);
+    writeFileSync(f, 'key: [unclosed');
+    failed(await run(['install', 'apply', '-f', f]), /Invalid YAML|not a ConfigMap/);
+    failed(await run(['install', 'apply', '-f', path.join(sandbox, 'missing.yaml')]), /File not found/);
+    expect(calls().some((c) => c.args.startsWith('apply'))).toBe(false);
   });
   it('--wait exits 0 once the installer log shows a completion marker (1.x and 2.x)', async () => {
     writeFileSync(stateFile(), JSON.stringify({ logs: 'step\nconfigure_default_ingress\n' }));

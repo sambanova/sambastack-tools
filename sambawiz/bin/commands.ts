@@ -9,9 +9,10 @@ declare const process: any;
  */
 
 import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'fs';
 import path from 'path';
 import { Command } from 'commander';
+import jsYaml from 'js-yaml';
 import type { CheckpointMappingV3, ModelProfilesCache, BatchingConfig } from '../app/types/bundle';
 import {
   generateModelBundle,
@@ -50,6 +51,7 @@ import {
   profileHasPromptCachingOnCluster,
   kubectlErrorDetail,
   maskApiKey,
+  writePrivateFile,
   getOutdatedHelmChartWarning,
 } from './cli';
 
@@ -197,6 +199,11 @@ function archArgNeeded(archs: string[], archName?: string): boolean {
 
 interface Ctx { env: string; kubeconfig: string; namespace: string; json: boolean; ec?: any }
 
+/** A key given as an argument stays in the shell history and shows in `ps`; point at the safer ways. */
+function warnKeyOnCommandLine(o: { apiKey?: string }): void {
+  if (o.apiKey) process.stderr.write('warning: --api-key puts the key in your shell history; prefer `env set-api-key` (hidden prompt or stdin).\n');
+}
+
 function loadAppConfig(): any {
   if (!existsSync(CONFIG_PATH)) fail('app-config.json not found. Run `sambawiz` once (interactive) to create it.');
   return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
@@ -237,6 +244,15 @@ function assertCacheMatches(ctx: Ctx): void {
   if (r.status === 'unknown') {
     process.stderr.write(`warning: can't tell which cluster the cached model data came from; run \`data refresh --env ${ctx.env}\` if it may be for another environment.\n`);
   }
+}
+
+/** For commands that don't touch a cluster (`models …`, `bundle build` without --apply): warn, never block. */
+function warnIfCacheIsForAnotherCluster(): void {
+  try {
+    const ctx = resolveCtx({});
+    const r = cacheSourceStatus(ctx.kubeconfig, ctx.namespace);
+    if (r.status === 'mismatch') process.stderr.write(`warning: this model data was generated for ${r.from}, not for the current environment "${ctx.env}"; run \`data refresh\` for it.\n`);
+  } catch { /* no usable environment configured: nothing to compare with */ }
 }
 
 function readCache(): { mapping: CheckpointMappingV3; profiles: ModelProfilesCache } {
@@ -331,10 +347,14 @@ async function apiCall(ctx: Ctx, route: string, body?: unknown): Promise<any> {
 
 
 const IMAGE_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+/** Images are inlined as base64 in the request, so cap them (the API rejects huge bodies anyway). */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
 export function imageDataUrl(file: string): string {
   const type = IMAGE_TYPES[path.extname(file).toLowerCase()];
   if (!type) fail(`Unsupported image type: ${file} (png, jpg, gif, webp).`);
   if (!existsSync(file)) fail(`Image not found: ${file}`);
+  if (statSync(file).size > MAX_IMAGE_BYTES) fail(`Image too large: ${file} (limit ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`);
   return `data:${type};base64,${readFileSync(file).toString('base64')}`;
 }
 
@@ -386,6 +406,16 @@ async function readSecret(prompt: string): Promise<string> {
   });
 }
 
+/** `install apply -f` only takes a ConfigMap (what the installer reads), not an arbitrary manifest. */
+function readInstallerConfigMap(file: string): string {
+  if (!existsSync(file)) fail(`File not found: ${file}`);
+  const text = readFileSync(file, 'utf-8');
+  let doc: any;
+  try { doc = jsYaml.load(text); } catch (e: any) { return fail(`Invalid YAML in ${file}: ${String(e.message).split('\n')[0]}`); }
+  if (doc?.kind !== 'ConfigMap' || !doc?.metadata?.name) fail(`${file} is not a ConfigMap with metadata.name (the installer ConfigMap).`);
+  return text;
+}
+
 // ─── Command tree ────────────────────────────────────────────────────────────
 
 export function buildProgram(): Command {
@@ -412,7 +442,7 @@ export function buildProgram(): Command {
     const cfg = loadAppConfig();
     if (!cfg.kubeconfigs?.[name]) fail(`Environment "${name}" not found.`);
     cfg.currentKubeconfig = name;
-    writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
+    writePrivateFile(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
     say(`Current environment: ${name}`);
   });
 
@@ -430,6 +460,7 @@ export function buildProgram(): Command {
   const models = program.command('models').description('Browse models and profiles (from `data refresh` cache)');
   models.command('list').description('List models with their archs').option('--json', 'JSON output').action((o) => {
     const { mapping, profiles } = readCache();
+    warnIfCacheIsForAnotherCluster();
     const rows = Object.keys(mapping).sort().map((name) => {
       const archs = getArchsWithProfiles(mapping[name].checkpoints, profiles);
       return { model: name, archs, capabilities: mapping[name].capabilities, deployable: archs.length > 0 };
@@ -439,6 +470,7 @@ export function buildProgram(): Command {
   models.command('profiles <model>').description('List profiles and batching configs for a model')
     .option('--arch <arch>', 'checkpoint arch').option('--json', 'JSON output').action((name, o) => {
       const { mapping, profiles } = readCache();
+      warnIfCacheIsForAnotherCluster();
       const display = Object.keys(mapping).find((d) => d.toLowerCase() === name.toLowerCase());
       if (!display) fail(`Unknown model "${name}".`);
       const archs = getArchsWithProfiles(mapping[display!].checkpoints, profiles).filter((a) => !o.arch || a === o.arch);
@@ -474,6 +506,7 @@ export function buildProgram(): Command {
       const { mapping, profiles } = readCache();
       const applyCtx = o.apply ? resolveCtx(o) : null;
       if (applyCtx) assertCacheMatches(applyCtx);   // never build for one cluster from another cluster's data
+      else warnIfCacheIsForAnotherCluster();
       const sels = buildSelections({ models: o.model, batch: o.batch, nonSwappable: o.nonSwappable, draft: o.draft }, mapping, profiles);
       const overrides = (() => { try { return readCheckpointOverrides(); } catch { return {}; } })();
       const { yaml: text, dropped } = generateModelBundle(o.name, withCheckpointOverrides(sels, overrides));
@@ -528,11 +561,18 @@ export function buildProgram(): Command {
       if (!ok) process.exitCode = 1;
       print(ctx, { name, valid: ok }, () => say(ok ? `Bundle ${name} is valid.` : `Bundle ${name} failed validation.`));
     });
-  common(bundle.command('delete <name>').description('Delete a ModelBundle').option('-y, --yes', 'skip the confirmation requirement'))
+  common(bundle.command('delete <name>').description('Delete a ModelBundle').option('-y, --yes', 'skip the confirmation requirement')
+    .option('--force', 'delete even if a ModelDeployment still uses the bundle'))
     .action((name, o) => {
       if (!o.yes) fail('Refusing to delete without --yes.');
       assertName('bundle name', name);
       const ctx = resolveCtx(o);
+      if (!o.force) {
+        // Deleting a bundle that a deployment references breaks that deployment.
+        const users: string[] = (JSON.parse(kubectl(`get modeldeployment.sambanova.ai -n ${ctx.namespace} -o json`)).items || [])
+          .filter((d: any) => d.spec?.bundle === name).map((d: any) => d.metadata.name);
+        if (users.length) fail(`Bundle "${name}" is still used by deployment(s): ${users.join(', ')}. Delete them first, or pass --force.`);
+      }
       say(kubectl(`delete modelbundle.sambanova.ai ${name} -n ${ctx.namespace}`).trim());
     });
 
@@ -689,7 +729,7 @@ export function buildProgram(): Command {
       if (o.chartVersion && !/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(o.chartVersion)) fail(`Invalid --chart-version "${o.chartVersion}".`);
       const ctx = resolveCtx(o);
       const text = o.file
-        ? readFileSync(o.file, 'utf-8')
+        ? readInstallerConfigMap(o.file)
         : ['apiVersion: v1', 'kind: ConfigMap', 'metadata:', '  name: sambastack', '  labels:', '    sambastack-installer: "true"',
            'data:', '  sambastack.yaml: |', `    version: ${o.chartVersion}`].join('\n');
       say(applyYaml(ctx, text));
@@ -767,12 +807,13 @@ export function buildProgram(): Command {
     });
 
   // environment management (same app-config.json writes as the UI / interactive menu)
-  const saveConfig = (cfg: any) => writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
+  const saveConfig = (cfg: any) => writePrivateFile(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
   env.command('add <name>').description('Add an environment from a kubeconfig file or base64 string')
     .option('--kubeconfig-file <path>', 'path to a kubeconfig').option('--kubeconfig-b64 <string>', 'base64-encoded kubeconfig')
     .option('--namespace <ns>', 'namespace', 'default').option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>')
     .option('--overwrite', 'replace the kubeconfig of an existing environment').action((name, o) => {
       assertEnvName(name);
+      warnKeyOnCommandLine(o);
       if (!o.kubeconfigFile === !o.kubeconfigB64) fail('Give exactly one of --kubeconfig-file or --kubeconfig-b64.');
       // like the UI's check-app-config, the first environment may be added before any app-config.json exists
       const cfg = existsSync(CONFIG_PATH) ? loadAppConfig() : { currentKubeconfig: null, kubeconfigs: {} };
@@ -788,7 +829,7 @@ export function buildProgram(): Command {
       const rel: string = existing ? existing.file : `kubeconfigs/${name}.yaml`;
       const dest = path.isAbsolute(rel) ? rel : path.join(PROJECT_ROOT, rel);
       mkdirSync(path.dirname(dest), { recursive: true });
-      writeFileSync(dest, text);
+      writePrivateFile(dest, text);
       if (!existing) {
         cfg.kubeconfigs[name] = { file: rel, namespace: o.namespace, uiDomain: o.uiDomain || '', apiDomain: o.apiDomain || '', apiKey: o.apiKey || '' };
         cfg.currentKubeconfig = name;
@@ -802,6 +843,7 @@ export function buildProgram(): Command {
     .option('--namespace <ns>').option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>').option('--tts-model <id>')
     .action(async (name, o) => {
       assertEnvName(name);
+      warnKeyOnCommandLine(o);
       if (o.namespace !== undefined) assertName('namespace', o.namespace);
       const cfg = loadAppConfig();
       const e = cfg.kubeconfigs?.[name];
