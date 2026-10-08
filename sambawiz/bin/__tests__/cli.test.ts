@@ -25,6 +25,7 @@ import {
   stripServerManagedFields,
   draftCandidates,
   bundleValidationOutcome,
+  profileHasPromptCachingOnCluster,
 } from '../cli';
 
 /**
@@ -506,5 +507,37 @@ describe('bundleValidationOutcome (review: stale "valid" after a re-apply)', () 
     expect(bundleValidationOutcome({ metadata: {}, status: { conditions: [valid()] } })).toBe('succeeded');
     expect(bundleValidationOutcome({ status: { conditions: [] } })).toBe('pending');
     expect(bundleValidationOutcome(null)).toBe('pending');
+  });
+});
+
+describe('profileHasPromptCachingOnCluster (review class: errors must not be swallowed)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const childProcess = require('child_process');
+  let spy: jest.SpyInstance;
+  afterEach(() => spy?.mockRestore());
+  const kubectlFails = (stderr: string) => spy.mockImplementation(() => { throw Object.assign(new Error('Command failed'), { stderr }); });
+
+  it('true / false from the profile\'s features', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync').mockReturnValue('{"spec":{"features":["prompt_caching"]}}');
+    expect(profileHasPromptCachingOnCluster('p', 'ns')).toBe(true);
+    spy.mockReturnValue('{"spec":{"features":[]}}');
+    expect(profileHasPromptCachingOnCluster('p', 'ns')).toBe(false);
+  });
+  it('a profile that is not there has no such feature', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync');
+    kubectlFails('Error from server (NotFound): modelprofiles.sambanova.ai "ghost" not found');
+    expect(profileHasPromptCachingOnCluster('ghost', 'ns')).toBe(false);
+  });
+  it('a real failure (RBAC denial, unreachable cluster) surfaces instead of being reported as "no prompt_caching"', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync');
+    kubectlFails('Error from server (Forbidden): cannot get resource "modelprofiles"');
+    expect(() => profileHasPromptCachingOnCluster('p', 'ns')).toThrow(/kubectl get modelprofile p failed: .*Forbidden/);
+    kubectlFails('Unable to connect to the server: dial tcp 1.2.3.4:6443: connect: connection refused');
+    expect(() => profileHasPromptCachingOnCluster('p', 'ns')).toThrow(/connection refused/);
+  });
+  it('the name is passed to kubectl as ONE argument (no shell is involved), whatever it contains', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync').mockReturnValue('{}');
+    profileHasPromptCachingOnCluster('x;touch /tmp/pwned $(id)', 'ns');
+    expect(spy).toHaveBeenCalledWith('kubectl', ['get', 'modelprofile.sambanova.ai', 'x;touch /tmp/pwned $(id)', '-n', 'ns', '-o', 'json'], expect.anything());
   });
 });
