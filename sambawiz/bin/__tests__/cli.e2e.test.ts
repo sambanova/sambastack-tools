@@ -988,6 +988,13 @@ try:
         expect('Main Menu', 30); pump(0.5); buf = ''
         down(1); send('\\r', 2.0); pump(1.5)                  # re-enter
         report('removed_model_not_restored', 'Restore this session?' not in buf)
+    elif scenario == 'edited_name':
+        down(1); send('\\r', 1.5); expect('start from', 40); pump(0.5)
+        down(1); send('\\r', 1.5); expect('Select saved bundle', 20); send('\\r', 1.5)   # Load from saved_artifacts/ -> my-bundle.yaml
+        expect('What next?', 30); down(1); send('\\r', 1.5)  # Edit in editor -> the fake editor renames the bundle to a shell payload
+        expect('What next?', 30); send('\\r', 1.0)           # Apply -> the CLI polls / deletes using the edited name
+        pump(8.0)
+        report('no_command_injection', not os.path.exists(cwd + '/PWN'))
     elif scenario == 'advanced_no':
         down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
         down(1); send('\\r', 1.5); pump(1.5)
@@ -1044,6 +1051,19 @@ describePty('interactive bundle builder (pseudo-terminal)', () => {
   });
   it('review #39.5: removing a model updates the saved session, so it is not restored on the next visit', async () => {
     expect(await drive('remove_model')).toEqual({ removed_message: 'PASS', removed_model_not_restored: 'PASS' });
+  });
+  it('shell hardening: a bundle name edited in the editor is never interpreted by a shell', async () => {
+    mkdirSync(path.join(sandbox, 'saved_artifacts'), { recursive: true });
+    writeFileSync(path.join(sandbox, 'saved_artifacts/my-bundle.yaml'),
+      'apiVersion: sambanova.ai/v1alpha1\nkind: ModelBundle\nmetadata:\n  name: my-bundle\nspec:\n  modelConfigs:\n    - model: llama:1\n      profile: p1\n');
+    writeFileSync(path.join(sandbox, 'evil-editor.sh'), '#!/bin/sh\nsed -i.bak \'s/name: my-bundle/name: x;touch${IFS}PWN/\' "$1"\n');
+    chmodSync(path.join(sandbox, 'evil-editor.sh'), 0o755);
+    const prev = process.env.EDITOR;
+    process.env.EDITOR = path.join(sandbox, 'evil-editor.sh');
+    try { expect(await drive('edited_name')).toEqual({ no_command_injection: 'PASS' }); }
+    finally { if (prev === undefined) delete process.env.EDITOR; else process.env.EDITOR = prev; }
+    expect(existsSync(path.join(sandbox, 'PWN'))).toBe(false);
+    rmSync(path.join(sandbox, 'saved_artifacts'), { recursive: true, force: true });
   });
   it('review #7: no per-model Swappable prompt; models stay swappable by default', async () => {
     expect(await drive('advanced_no')).toEqual({ no_per_model_swappable_prompt: 'PASS', default_is_swappable: 'PASS' });
