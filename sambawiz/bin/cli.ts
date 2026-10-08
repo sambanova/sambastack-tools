@@ -296,6 +296,19 @@ export function crNameToDisplayName(checkpointMapping: CheckpointMappingV3, crna
   return found?.[0];
 }
 
+/** Metadata the API server owns; left in, re-applying a loaded bundle under a new name is rejected. */
+const SERVER_MANAGED_METADATA = [
+  'annotations', 'labels', 'resourceVersion', 'uid', 'creationTimestamp', 'generation', 'managedFields', 'selfLink', 'deletionTimestamp',
+];
+
+/** Turns a `kubectl get -o yaml` document into an editable definition: no server-managed metadata and no `status`. */
+export function stripServerManagedFields<T = any>(doc: T): T {
+  const d: any = doc;
+  if (d?.metadata) for (const k of SERVER_MANAGED_METADATA) delete d.metadata[k];
+  if (d && 'status' in d) delete d.status;
+  return doc;
+}
+
 /** Extracts a ModelBundle's `metadata.name` from YAML text via the shared V3 parser (returns '' on parse failure). */
 export function extractBundleName(yamlContent: string): string {
   const parsed = parseModelBundleYamlContent(yamlContent);
@@ -2230,6 +2243,36 @@ export async function batchGrid(
   });
 }
 
+/** Batch sizes a tier offers in `cfg` (`'*'`/unset means the default columns). */
+function batchSizesOf(cfg: BatchingConfig, tier: string): number[] {
+  const bs = cfg[tier]?.batch_sizes;
+  return bs === '*' || bs === undefined ? [...DEFAULT_BATCH_COLUMNS] : [...bs].sort((x, y) => x - y);
+}
+
+/**
+ * What the override grid starts with: only the recommended sizes are checked. A context length that is in
+ * `all` but not in `recommended` starts EMPTY, so confirming the grid unchanged never switches on a tier the user didn't pick.
+ */
+export function initialBatchChecks(universe: BatchingConfig, effective: BatchingConfig): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const tier of Object.keys(universe)) out[tier] = effective[tier] ? batchSizesOf(effective, tier) : [];
+  return out;
+}
+
+/**
+ * The override written into the bundle from what the user ticked. A tier with nothing ticked is left out;
+ * `'*'` (resolved against the universe by the generator) is used only when the whole universe is ticked.
+ */
+export function batchOverrideFromPicked(allowed: Record<string, number[]>, picked: Record<string, number[]>): BatchingConfig {
+  const override: BatchingConfig = {};
+  for (const tier of Object.keys(allowed)) {
+    const chosen = picked[tier] ?? [];
+    if (chosen.length === 0) continue;
+    override[tier] = { batch_sizes: allowed[tier].every((n) => chosen.includes(n)) ? '*' : chosen };
+  }
+  return override;
+}
+
 /**
  * Step 3: optional bundle-level batching-config override, seeded from the profile's effective
  * default. Mirrors the UI's BatchingOverrideEditor: per context-length tier, pick which of the
@@ -2245,28 +2288,14 @@ async function promptBatchingOverride(rl: any, profile: ModelProfile): Promise<B
   const wantsOverride = await confirm(rl, "Override this profile's batching config for the bundle?", false);
   if (!wantsOverride) return undefined;
 
-  const sizesOf = (cfg: BatchingConfig, tier: string): number[] => {
-    const bs = cfg[tier]?.batch_sizes;
-    return bs === '*' || bs === undefined ? [...DEFAULT_BATCH_COLUMNS] : [...bs].sort((a, b) => a - b);
-  };
-
   const allowed: Record<string, number[]> = {};
-  const initial: Record<string, number[]> = {};
-  for (const tier of tiers) {
-    allowed[tier] = sizesOf(universe, tier);
-    initial[tier] = effective[tier] ? sizesOf(effective, tier) : allowed[tier]; // recommended subset starts checked
-  }
+  for (const tier of tiers) allowed[tier] = batchSizesOf(universe, tier);
+  const initial = initialBatchChecks(universe, effective);
   const columns = Array.from(new Set(tiers.flatMap((t) => allowed[t]))).sort((a, b) => a - b);
 
   const picked = await batchGrid("Batching config  (context length × batch size)", tiers, columns, allowed, initial);
   if (!picked) return undefined; // cancelled → keep the profile's own config
-
-  const override: BatchingConfig = {};
-  for (const tier of tiers) {
-    // '*' resolves against the universe in the generator, so only collapse when the whole universe is chosen.
-    override[tier] = { batch_sizes: allowed[tier].every((s) => picked[tier].includes(s)) ? '*' : picked[tier] };
-  }
-  return override;
+  return batchOverrideFromPicked(allowed, picked);
 }
 
 /**
@@ -2377,6 +2406,23 @@ function resolveSelectionSession(
   return selections;
 }
 
+/**
+ * Models offered as a draft: they need a matching profile, and must not already be in the bundle
+ * (as a top-level model or another model's draft), or the bundle would contain the same model twice.
+ */
+export function draftCandidates(
+  displayNames: string[],
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache,
+  selections: ModelBundleSelection[]
+): string[] {
+  const inBundle = new Set(selections.map((s) => s.model.metadata.name));
+  return displayNames.filter((n) => {
+    const entry = checkpointMapping[n];
+    return !inBundle.has(entry.resource_name) && getArchsWithProfiles(entry.checkpoints, modelProfiles).length > 0;
+  });
+}
+
 /** Steps 1–3 combined: interactively builds the full `ModelBundleSelection[]` list, including spec-decoding drafts. */
 async function collectModelSelections(
   rl: any,
@@ -2424,6 +2470,7 @@ async function collectModelSelections(
           selections.splice(i, 1);
         }
       }
+      if (selections.length > 0) saveSelectionSession(selections); else clearSelectionSession();   // keep the saved session in step
       successMsg(`Removed ${chosenName} — re-select to add it back`);
       continue;
     }
@@ -2450,10 +2497,8 @@ async function collectModelSelections(
 
       const draftChoices: Choice[] = [
         { name: chalk.reset('↩  Skip (no draft model)'), value: 'skip' },
-        // like the UI, only models that have a matching profile can be drafts
-        ...displayNames
-          .filter((n) => n !== chosenName && getArchsWithProfiles(checkpointMapping[n].checkpoints, modelProfiles).length > 0)
-          .map((n) => ({ name: n, value: n })),
+        // like the UI, only models that have a matching profile can be drafts, and not ones already in the bundle
+        ...draftCandidates(displayNames, checkpointMapping, modelProfiles, selections).map((n) => ({ name: n, value: n })),
         { name: chalk.reset('← Back'), value: 'back' },
       ];
       const draftName = await select(rl, `Draft model for ${chosenName}:`, draftChoices);
@@ -2582,12 +2627,9 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
 
         try {
           const rawYaml = execSync(`kubectl -n ${namespace} get modelbundle.sambanova.ai ${chosenBundle} -o yaml`, { encoding: 'utf-8' });
-          // Strip cluster-assigned metadata (annotations/labels) before treating this as an
-          // editable bundle definition — mirrors /api/load-deployed-bundle.
-          const doc: any = yaml.load(rawYaml);
-          if (doc?.metadata?.annotations) delete doc.metadata.annotations;
-          if (doc?.metadata?.labels) delete doc.metadata.labels;
-          loadedYaml  = yaml.dump(doc);
+          // Strip everything the API server manages before treating this as an editable bundle definition,
+          // so renaming and re-applying it isn't rejected (resourceVersion/uid) or in conflict.
+          loadedYaml  = yaml.dump(stripServerManagedFields(yaml.load(rawYaml)));
           loadedBName = extractBundleName(loadedYaml) || chosenBundle;
           yamlBox(`Loaded from cluster: ${chosenBundle}`, loadedYaml);
         } catch (e: any) {
@@ -2689,7 +2731,7 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     while (true) {
       const nameInput = await input(rl, chalk.yellow.bold('Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu'), suggestedName, '', { e: EDIT });
 
-      if (!nameInput || nameInput === ESC) continue builderLoop;
+      if (!nameInput || nameInput === ESC) { carriedSelections = selections; continue builderLoop; }   // Esc keeps the selections, as the prompt says
 
       if (nameInput === EDIT) {
         const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
