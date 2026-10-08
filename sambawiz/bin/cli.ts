@@ -3701,7 +3701,9 @@ async function installSambaStackMenu(rl: any, namespace: string) {
 // actual entry script (`tsx bin/cli.ts`, `node dist/cli.js`, ...).
 const isMainModule = /(^|[\\/])cli\.(ts|js)$/.test(process.argv[1] || '');
 if (isMainModule) {
-  startCli().catch(err => {
+  const args = process.argv.slice(2);
+  // Any argument → non-interactive subcommands (bin/commands.ts); none → the interactive menu.
+  (args.length > 0 ? import('./commands').then((m) => m.runCommands(args)) : startCli()).catch(err => {
     console.error(chalk.red('\nFatal error:'), err);
   });
 }

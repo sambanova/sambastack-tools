@@ -47,6 +47,8 @@
   - [Check Deployment Progress](#check-deployment-progress)
   - [Playground — Chat Console](#playground--chat-console)
   - [Install / Upgrade SambaStack](#install--upgrade-sambastack)
+- [Non-interactive commands](#non-interactive-commands)
+- [Testing the CLI](#testing-the-cli)
 - [Configuration Reference](#configuration-reference)
 - [npm Scripts](#npm-scripts)
 - [Troubleshooting](#troubleshooting)
@@ -55,7 +57,7 @@
 
 ## Overview
 
-The SambaWiz CLI is a fully interactive terminal application. It covers every workflow available in the web UI — environment management, bundle building, deployment, live monitoring, and model chat — all from the command line.
+The SambaWiz CLI covers every workflow available in the web UI — environment management, bundle building, deployment, live monitoring, model chat, speech, and installation — from the command line. Run it with no arguments for the interactive menus described below, or pass a command (`bundle build`, `deploy create`, `chat`, `doctor`, …) for scriptable, non-interactive use — see [Non-interactive commands](#non-interactive-commands).
 
 > **V3 bundles.** The CLI emits the V3 CR family: a single **`ModelBundle`** (replaces the old `BundleTemplate` + `Bundle` pair) and a **`ModelDeployment`** (replaces `BundleDeployment`) that references it by name. Model→PEF/SS/BS selection is gone — you now pick a **model → checkpoint arch (if multi-arch) → `ModelProfile`**, optionally add a **draft model** for speculative decoding, and optionally **override the profile's batching config**. Checkpoints are no longer authored by the builder; they come from the `Model` CR at reconcile time, so `checkpointsDir` is no longer used by the CLI.
 
@@ -182,6 +184,7 @@ Shown after launch. The active environment name appears in brackets.
 - Model Selection, Model Deployment, Check Deployment Progress, Playground and Install need a valid environment (kubeconfig file present). Without one you get *"No valid environment selected — add or activate one in Manage Environments first."* — the CLI never falls back to your ambient `kubectl` context.
 - If the installed SambaStack Helm chart is older than the minimum in `VERSION`, Model Selection, Model Deployment, Check Deployment Progress and Playground are blocked with the outdated-chart message (Install stays available so you can fix it). The check is refreshed after you change environment or run Install.
 
+> The same actions are available non-interactively — see [Non-interactive commands](#non-interactive-commands).
 
 ---
 
@@ -788,7 +791,7 @@ Prompt caching adds `ENABLE_KV_CACHE_MANAGER` and `KV_CACHE_INCLUDE_STATS_IN_RES
 
 **✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't, for example the `storage:` block an air-gapped cluster needs. The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
 
-`spec.bundle` references the `ModelBundle` **by name**.
+`spec.bundle` references the `ModelBundle` **by name**. For a single model without a bundle, use `deploy create --model` (see [Non-interactive commands](#non-interactive-commands)).
 
 **5 — Deploy**
 
@@ -1031,6 +1034,53 @@ Installation is detected as complete when the log line contains `configure_defau
 
 ---
 
+## Non-interactive commands
+
+`npm run dev-cli` with no arguments opens the interactive menu. Any argument runs a script-friendly subcommand instead. Every command accepts `--help`; cluster commands accept `--env <name>`, `-n/--namespace <ns>` and `--json`. Failures print `error: ...` to stderr and exit non-zero. `kubectl` is always pointed at the selected environment's kubeconfig, never the ambient context.
+
+| UI feature | CLI command |
+|---|---|
+| Environments (list / switch) | `env list`, `env use <name>` |
+| Home → Apply (refresh model data) | `data refresh` |
+| Model Selection (browse models, profiles, batching) | `models list`, `models profiles <model> [--arch]` |
+| Model Selection (build + validate a bundle) | `bundle build --name N --model <model>:<profile>[:<arch>] [--batch <model>:<ctx>=<sizes>] [--non-swappable <model>] [--draft <target>=<draft>:<profile>] [-o file] [--apply]` |
+| Bundle list / YAML / validate / delete | `bundle list`, `bundle show <name>`, `bundle apply -f file`, `bundle validate <name>`, `bundle delete <name> --yes` |
+| Model Deployment (deploy a validated bundle) | `deploy create --bundle B [--name N] [--prompt-caching] [--ignore-eos] [--dry-run]` |
+| Check Deployment Progress | `deploy apply -f file` (hand-edited ModelDeployment, e.g. with a `storage:` block), `deploy list`, `deploy status <name>` (exit 1 until fully Deployed), `deploy logs <name> [--pod cache\|inference] [--tail N]`, `deploy delete <name> --yes` |
+
+Conventions for every command: success output goes to stdout (`--json` for machine-readable), warnings and errors to stderr, exit code `0` on success and `1` on any failure (`deploy status` also exits `1` until the deployment is fully Deployed, and `doctor` exits `1` if any check fails). Delete commands refuse to run without `--yes`. All user-supplied names are validated before they reach `kubectl`: resource and namespace names must be RFC 1123 (lowercase letters, digits, `-`, `.`), environment names may use letters, digits, `.`, `_`, `-` (no path separators), `--timeout`/`--tail` must be positive integers, and `install --chart-version` must look like a version. API calls time out after 120 s. `chat` with no message and no piped stdin fails instead of waiting.
+
+Same rules as the UI: names must be valid RFC 1123 resource names (with the 36-character pod-name warning), batch sizes must come from the profile's full set, `checkpoint_overrides` pin versions, prompt-caching profiles are single-model only, only validated bundles can be deployed, and models whose batching is fully unchecked are reported as dropped.
+
+```bash
+npm run dev-cli -- models profiles DeepSeek-R1-0528
+npm run dev-cli -- bundle build --name ds --model DeepSeek-R1-0528:deepseek --batch DeepSeek-R1-0528:4k=1 --apply
+npm run dev-cli -- deploy create --bundle ds && npm run dev-cli -- deploy status md-ds
+```
+
+| Environments (add / edit / delete / API key) | `env add <name> --kubeconfig-file P \| --kubeconfig-b64 S [--namespace --ui-domain --api-domain --api-key --overwrite]` (`--overwrite` replaces the kubeconfig file the environment already points at and never changes the current environment), `env edit <name> [--namespace --ui-domain --api-domain --api-key --tts-model]`, `env set-api-key [key]` (omit the key to be prompted with hidden input, or pipe it on stdin — a key given as an argument stays in your shell history), `env delete <name> --yes` |
+| Model Deployment → Deploy Model (single model, no bundle) | `deploy create --model <model>:<profile>[:<arch>] [--name] [--prompt-caching] [--ignore-eos] [--dry-run]` |
+| Playground (chat incl. vision, embeddings, model list) | `chat <model> [message...] [--system] [--image F...]` (stdin if no message), `embed <model> <text...>`, `api-models` |
+| Playground ASR / TTS | `transcribe <model> <file> [--language --prompt --response-format]`, `speak <text...> --voice V [--model ID] [--language L] -o out.wav` |
+| Get API Key (Keycloak admin credentials) | `env credentials [name]` |
+| Install / Upgrade SambaStack | `install apply --chart-version V \| -f file [--wait]`, `install logs [--follow]` |
+| Prerequisite and connectivity checks | `doctor` (exit 1 if a check fails) |
+
+The interactive menu keeps its own session file (`temp/cli-selection-state.json`); it is no longer shared with the UI because the two use different schemas. Cluster-changing commands (`bundle apply`, `bundle build --apply`, `deploy create`) refuse to run when the installed SambaStack chart is older than the minimum, like the UI's disabled pages.
+
+In the interactive Model Deployment menu, the review step now offers **Edit YAML in editor first** before deploying.
+
+Not available as commands: re-editing a loaded bundle in the builder (edit the YAML and use `bundle apply -f`).
+
+## Testing the CLI
+
+```bash
+npx jest bin            # unit tests + end-to-end tests
+npx jest bin/__tests__/cli.e2e.test.ts
+```
+
+The end-to-end suite (`bin/__tests__/cli.e2e.test.ts`) spawns the real CLI for every command in a throwaway sandbox (its own `app-config.json`, `kubeconfigs/` and `app/data/`) with a fake `kubectl`/`helm` on `PATH` and a local fake API server, so it never touches a real cluster or your real config. It is not a substitute for a run against a real cluster. The interactive menus are only covered by unit tests and manual pseudo-terminal checks.
+
 ## Configuration Reference
 
 ### `app-config.json` top-level fields
@@ -1040,6 +1090,7 @@ Installation is detected as complete when the log line contains `configure_defau
 | `currentKubeconfig` | string | **Yes** | Name of the active environment |
 | `kubeconfigs` | object | **Yes** | Map of environment name → config |
 | `checkpoint_overrides` | object | No | `{ "<model display name>": "<version>" }` — pin a checkpoint version instead of the highest |
+| `ttsModel` | string | No | Global default TTS model id for `speak` (a per-environment `ttsModel` is preferred; `--model` overrides both) |
 
 > **V3 note:** `checkpointsDir` is no longer read or written by the CLI. Checkpoints come from the `Model` CR (`spec.checkpoints.<arch>.versions`), and a bundle pins the **highest** checkpoint version under the chosen arch — unless you set the optional `checkpoint_overrides` map (`{ "<model display name>": "<version>" }`, top level of `app-config.json`), which pins that version for the model, exactly as the UI does.
 
@@ -1047,11 +1098,12 @@ Installation is detected as complete when the log line contains `configure_defau
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `file` | string | **Yes** | Kubeconfig YAML path relative to project root. Saved as `kubeconfigs/kubeconfig-<name>.yaml` when added via CLI |
+| `file` | string | **Yes** | Kubeconfig YAML path relative to project root. Saved as `kubeconfigs/kubeconfig-<name>.yaml` when added through the menu, `kubeconfigs/<name>.yaml` via `env add` |
 | `namespace` | string | **Yes** | Kubernetes namespace |
 | `uiDomain` | string | No | SambaStack UI URL (checked during Validate) |
 | `apiDomain` | string | Playground | API base URL e.g. `https://api.example.com/` |
 | `apiKey` | string | Playground | Bearer token for API requests |
+| `ttsModel` | string | No | Default TTS model id for `speak` when `--model` is not given (an explicit `--model` always wins) |
 | `enableUpdates` | boolean | No | Show SambaStack update banner in the web UI. Defaults to `true`. Set to `false` to hide it for this environment. |
 
 ### Example
