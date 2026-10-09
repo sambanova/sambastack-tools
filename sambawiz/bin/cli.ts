@@ -727,6 +727,8 @@ async function runDataFileStepTracker(
   namespace: string,
   label?: string,
 ): Promise<void> {
+  const nsErr = validateResourceName(namespace);   // spliced into kubectl commands below
+  if (nsErr) { errorMsg(`Invalid namespace "${namespace}": ${nsErr}`); return; }
   const LABEL_W = 26;
   const DOTS    = '  ........  ';
   const FRAMES  = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
@@ -1361,11 +1363,31 @@ async function confirm(rl: any, message: string, defaultTrue = true): Promise<bo
 // ─── addEnvironmentMenu() ────────────────────────────────────────────────────
 
 /** Fetch and print the keycloak-initial-admin secret for an environment, mirroring the UI's "Get API Key" action. */
+/** Environment names become file names (kubeconfigs/kubeconfig-<name>.yaml): no path separators, whitespace or leading dot. */
+export function envNameError(name: string): string | null {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)
+    ? null
+    : `Invalid environment name "${name}": use letters, digits, ".", "_" and "-", starting with a letter or digit.`;
+}
+
+/** Asks for a namespace until it is a legal Kubernetes name (it is spliced into kubectl/helm commands later), or Esc. */
+async function promptNamespace(rl: any, label: string, current: string): Promise<string> {
+  while (true) {
+    const ns = await input(rl, label, current);
+    if (ns === ESC) return ESC;
+    const err = validateResourceName(ns);
+    if (!err) return ns;
+    errorMsg(`${err} Please try again.`);
+  }
+}
+
 async function showKeycloakCredentials(rl: any, envName: string, ec: any) {
   if (!ec?.file) { errorMsg(`Environment "${envName}" has no kubeconfig configured.`); return; }
   const kPath = path.join(PROJECT_ROOT, ec.file);
   if (!existsSync(kPath)) { errorMsg(`Kubeconfig file not found: ${ec.file}`); return; }
   const ns = ec.namespace || 'default';
+  const nsErr = validateResourceName(ns);
+  if (nsErr) { errorMsg(`Invalid namespace "${ns}" for "${envName}": ${nsErr}`); return; }
 
   spinner.start('Fetching keycloak admin credentials...');
   try {
@@ -1409,7 +1431,8 @@ async function addEnvironmentMenu(rl: any) {
     // ── Step 1: Environment name ──────────────────────────────────────────────
     const name = await input(rl, '1/6  Environment name');
     if (!name || name === ESC) return;
-    if (/\s/.test(name)) { errorMsg('Environment name cannot contain spaces.'); return; }
+    const nameErr = envNameError(name);
+    if (nameErr) { errorMsg(nameErr); return; }
     if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
 
     // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
@@ -1418,7 +1441,7 @@ async function addEnvironmentMenu(rl: any) {
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
     // ── Step 3: Namespace ─────────────────────────────────────────────────────
-    const ns = await input(rl, '3/6  Namespace', 'default');
+    const ns = await promptNamespace(rl, '3/6  Namespace', 'default');
     if (ns === ESC) return;
 
     // ── Step 4: UI Domain ─────────────────────────────────────────────────────
@@ -1503,6 +1526,8 @@ async function addEnvironmentMenu(rl: any) {
         const ec    = freshConfig.kubeconfigs[name];
         if (!ec) { errorMsg(`Environment "${name}" not found.`); continue; }
         const envNs = ec.namespace || 'default';
+        const envNsErr = validateResourceName(envNs);
+        if (envNsErr) { errorMsg(`Invalid namespace "${envNs}" for "${name}": ${envNsErr}`); continue; }
         const kPath = path.join(PROJECT_ROOT, ec.file || '');
         if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
         await runValidationChecks(name, ec, envNs);
@@ -1513,7 +1538,7 @@ async function addEnvironmentMenu(rl: any) {
         process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(name)}  (Enter to keep current value)\n\n`));
         const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
         if (file === ESC) continue;
-        const editNs    = await input(rl, 'Namespace',        ec.namespace || 'default');
+        const editNs    = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
         if (editNs === ESC) continue;
         const uiD       = await input(rl, 'UI Domain',        ec.uiDomain  || '');
         if (uiD === ESC) continue;
@@ -1599,7 +1624,7 @@ async function addEnvironmentMenu(rl: any) {
 
       const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
       if (file === ESC) continue;
-      const ns        = await input(rl, 'Namespace',        ec.namespace || 'default');
+      const ns        = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
       if (ns === ESC) continue;
       const uiDomain  = await input(rl, 'UI Domain',        ec.uiDomain  || '');
       if (uiDomain === ESC) continue;
@@ -1883,6 +1908,8 @@ async function startCli() {
 // ─── runValidationChecks() ───────────────────────────────────────────────────
 
 async function runValidationChecks(envName: string, envConfig: any, namespace: string) {
+  const nsErr = validateResourceName(namespace);   // spliced into helm/kubectl commands below
+  if (nsErr) { errorMsg(`Invalid namespace "${namespace}" for "${envName}": ${nsErr}`); return; }
   sectionHeader('Validate Setup & Environment', '🧭');
 
   process.stdout.write('\n');
