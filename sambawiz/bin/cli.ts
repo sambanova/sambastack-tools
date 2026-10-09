@@ -2641,7 +2641,7 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
 
   // ── Restore a previously in-progress session, if any ────────────────────────
   // Mirrors the UI's /api/model-selection-state: saved as models are added and
-  // offered on every entry until explicitly discarded or the bundle validates.
+  // offered on every entry until it is discarded, the bundle validates, or the bundle is saved to a file / skipped.
   let restoredSelections: ModelBundleSelection[] | null = null;
   const savedSession = loadSelectionSession();
   if (savedSession) {
@@ -2886,13 +2886,18 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
         const fnameInput = await input(rl, 'Filename', shortDefault);
         if (fnameInput && fnameInput !== ESC) {
           const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
-          try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+          try {
+            writeFileSync(fname, finalYaml);
+            successMsg(`Saved to ${fnameInput}`);
+            clearSelectionSession();   // the bundle is on disk now (Load from saved_artifacts), so don't also offer to restore the selections
+          } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
         }
       } else if (act === 'validate') {
         activeBundleName = extractBundleName(finalYaml) || bundleName;
         shouldApply = true;
         break;
       } else if (act === 'skip') {
+        clearSelectionSession();   // the user is done with this bundle; don't offer to restore it on the next visit
         process.stdout.write('\n');
         process.stdout.write(chalk.reset(`  ModelBundle is ready.\n`));
         process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Model Deployment  from the main menu to deploy it.\n\n`));
