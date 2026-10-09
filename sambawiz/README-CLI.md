@@ -423,7 +423,7 @@ If saved bundle files exist in `saved_artifacts/`, you are asked how to start:
 
 Only files containing `kind: ModelBundle` are listed (V3-only — no backwards compatibility with old `BundleTemplate`/`Bundle` files). Choosing **📂 Load** lets you pick a saved YAML file, preview it, then edit, save, or apply it directly — skipping the model-selection flow.
 
-An in-progress selection is also remembered in `temp/cli-selection-state.json` (CLI-only — the web UI keeps its own file, since the two use different formats) and offered back the next time you open Model Selection. It shows the cluster it was started on so you can check the environment before applying. The saved selection is deleted once a bundle **validates successfully**, so it isn't offered again on your next visit.
+An in-progress selection is also remembered in `temp/cli-selection-state.json` (CLI-only — the web UI keeps its own file, since the two use different formats) and offered back the next time you open Model Selection. It shows the cluster it was started on so you can check the environment before applying. The saved selection is deleted once a bundle **validates successfully**, or when you **save it to a file** or choose **Skip** at the *What next?* step, so it isn't offered again on your next visit. It is kept if the validation fails or you Cancel.
 
 ---
 
