@@ -52,6 +52,7 @@ import {
   kubectlErrorDetail,
   maskApiKey,
   writePrivateFile,
+  envNameError,
   getOutdatedHelmChartWarning,
 } from './cli';
 
@@ -66,7 +67,8 @@ export function assertName(label: string, name: string): string {
 
 /** Environment names become file names (kubeconfigs/<name>.yaml): no path separators or whitespace. */
 export function assertEnvName(name: string): string {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) ? name : fail(`Invalid environment name "${name}": use letters, digits, ".", "_" and "-", starting with a letter or digit.`);
+  const err = envNameError(name);
+  return err ? fail(err) : name;
 }
 
 export function posInt(label: string, v: unknown): number {

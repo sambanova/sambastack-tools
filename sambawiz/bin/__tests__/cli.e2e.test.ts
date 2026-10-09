@@ -1075,6 +1075,26 @@ try:
         build_to_name(); send('\\r', 1.5)
         expect('What next?', 30); down(3); send('\\r', 1.5); pump(1.5)   # Cancel
         report('session_kept_after_cancel', os.path.exists(cwd + '/temp/cli-selection-state.json'))
+    elif scenario == 'add_env_bad_name':
+        send('\\r', 1.5); expect('Select environment:', 30); send('\\r', 1.5)        # Manage Environments -> Add new environment
+        expect('Environment name', 20); send('../evil', 0.4); send('\\r', 1.5)
+        expect('Invalid environment name', 20); pump(1.0)
+        report('bad_name_refused', True)
+        report('nothing_written_outside', not os.path.exists(os.path.dirname(cwd) + '/kubeconfig-evil.yaml') and not os.path.exists(cwd + '/kubeconfigs/kubeconfig-../evil.yaml'))
+    elif scenario == 'add_env_bad_ns':
+        open(cwd + '/k.yaml', 'w').write('apiVersion: v1\\nclusters: []\\n')
+        send('\\r', 1.5); expect('Select environment:', 30); send('\\r', 1.5)
+        expect('Environment name', 20); send('good-env', 0.4); send('\\r', 1.0)
+        expect('Kubeconfig (base64 or file path)', 20); send(cwd + '/k.yaml', 0.4); send('\\r', 1.0)
+        expect('Namespace', 20)
+        for _ in range(10): send('\\x7f', 0.05)                                        # clear the pre-filled "default"
+        send('a;touch\${IFS}PWN', 0.4); send('\\r', 1.5)
+        expect('Please try again', 20); pump(1.0)
+        send('\\x1b', 1.5); pump(1.0)                                                  # Esc abandons the add
+        cfg = open(cwd + '/app-config.json').read()
+        report('bad_namespace_refused', True)
+        report('no_command_run', not os.path.exists(cwd + '/PWN'))
+        report('env_not_added', 'good-env' not in cfg)
     elif scenario == 'advanced_no':
         down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
         down(1); send('\\r', 1.5); pump(1.5)
@@ -1155,6 +1175,12 @@ describePty('interactive bundle builder (pseudo-terminal)', () => {
   });
   it('session: Cancel keeps the saved selection so it can be resumed', async () => {
     expect(await drive('cancel_keeps')).toEqual({ session_kept_after_cancel: 'PASS' });
+  });
+  it('proactive: the add-environment menu refuses a path-traversal name and nothing is written outside kubeconfigs/', async () => {
+    expect(await drive('add_env_bad_name')).toEqual({ bad_name_refused: 'PASS', nothing_written_outside: 'PASS' });
+  });
+  it('proactive: the add-environment menu refuses a shell-payload namespace (and does not run it or add the env)', async () => {
+    expect(await drive('add_env_bad_ns')).toEqual({ bad_namespace_refused: 'PASS', no_command_run: 'PASS', env_not_added: 'PASS' });
   });
   it('review #7: no per-model Swappable prompt; models stay swappable by default', async () => {
     expect(await drive('advanced_no')).toEqual({ no_per_model_swappable_prompt: 'PASS', default_is_swappable: 'PASS' });
