@@ -1061,6 +1061,20 @@ try:
         expect('What next?', 30); send('\\r', 1.0)           # Apply -> the CLI polls / deletes using the edited name
         pump(8.0)
         report('no_command_injection', not os.path.exists(cwd + '/PWN'))
+    elif scenario == 'save_clears':
+        build_to_name(); send('\\r', 1.5)
+        expect('What next?', 30); down(1); send('\\r', 1.5)             # Save to file
+        expect('Filename', 20); send('\\r', 1.5); expect('Saved to', 20); pump(1.0)
+        report('saved_file_exists', os.path.exists(cwd + '/saved_artifacts/my-bundle.yaml'))
+        report('session_cleared_after_save', not os.path.exists(cwd + '/temp/cli-selection-state.json'))
+    elif scenario == 'skip_clears':
+        build_to_name(); send('\\r', 1.5)
+        expect('What next?', 30); down(2); send('\\r', 1.5); expect('ModelBundle is ready', 20); pump(1.0)   # Skip
+        report('session_cleared_after_skip', not os.path.exists(cwd + '/temp/cli-selection-state.json'))
+    elif scenario == 'cancel_keeps':
+        build_to_name(); send('\\r', 1.5)
+        expect('What next?', 30); down(3); send('\\r', 1.5); pump(1.5)   # Cancel
+        report('session_kept_after_cancel', os.path.exists(cwd + '/temp/cli-selection-state.json'))
     elif scenario == 'advanced_no':
         down(1); send('\\r', 1.5); expect('Model Selection', 40); pump(0.5)
         down(1); send('\\r', 1.5); pump(1.5)
@@ -1130,6 +1144,17 @@ describePty('interactive bundle builder (pseudo-terminal)', () => {
     finally { if (prev === undefined) delete process.env.EDITOR; else process.env.EDITOR = prev; }
     expect(existsSync(path.join(sandbox, 'PWN'))).toBe(false);
     rmSync(path.join(sandbox, 'saved_artifacts'), { recursive: true, force: true });
+  });
+  it('session: saving the bundle to a file clears the saved selection (it is on disk now)', async () => {
+    rmSync(path.join(sandbox, 'saved_artifacts'), { recursive: true, force: true });
+    expect(await drive('save_clears')).toEqual({ saved_file_exists: 'PASS', session_cleared_after_save: 'PASS' });
+    rmSync(path.join(sandbox, 'saved_artifacts'), { recursive: true, force: true });
+  });
+  it('session: choosing Skip clears the saved selection', async () => {
+    expect(await drive('skip_clears')).toEqual({ session_cleared_after_skip: 'PASS' });
+  });
+  it('session: Cancel keeps the saved selection so it can be resumed', async () => {
+    expect(await drive('cancel_keeps')).toEqual({ session_kept_after_cancel: 'PASS' });
   });
   it('review #7: no per-model Swappable prompt; models stay swappable by default', async () => {
     expect(await drive('advanced_no')).toEqual({ no_per_model_swappable_prompt: 'PASS', default_is_swappable: 'PASS' });
