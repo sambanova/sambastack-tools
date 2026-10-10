@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { floatPcmToWav, extractErrorMessage, parseSpeechStream } from '../../utils/speech';
 
 interface KubeconfigEntry {
   file: string;
@@ -21,44 +22,6 @@ interface AppConfig {
   kubeconfigs: Record<string, KubeconfigEntry>;
   // Global fallback for the /v1/audio/speech model id (per-env `ttsModel` wins).
   ttsModel?: string;
-}
-
-/**
- * Build a mono 16-bit PCM WAV file from raw float32 little-endian PCM samples.
- *
- * The TTS endpoint streams float32 PCM (X-Audio-Format: f32le), which browsers
- * can't play directly, so we down-convert to int16 and prepend a WAV header —
- * the most broadly-supported format for an <audio> element.
- */
-function floatPcmToWav(pcm: Buffer, sampleRate: number, channels: number): Buffer {
-  const floatCount = Math.floor(pcm.length / 4);
-  const dataLength = floatCount * 2; // 16-bit samples
-  const buffer = Buffer.alloc(44 + dataLength);
-
-  // RIFF header
-  buffer.write('RIFF', 0);
-  buffer.writeUInt32LE(36 + dataLength, 4);
-  buffer.write('WAVE', 8);
-  // fmt subchunk
-  buffer.write('fmt ', 12);
-  buffer.writeUInt32LE(16, 16); // subchunk1 size
-  buffer.writeUInt16LE(1, 20); // audio format = PCM
-  buffer.writeUInt16LE(channels, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * channels * 2, 28); // byte rate
-  buffer.writeUInt16LE(channels * 2, 32); // block align
-  buffer.writeUInt16LE(16, 34); // bits per sample
-  // data subchunk
-  buffer.write('data', 36);
-  buffer.writeUInt32LE(dataLength, 40);
-
-  for (let i = 0; i < floatCount; i++) {
-    // Clamp [-1, 1] float → int16.
-    const sample = Math.max(-1, Math.min(1, pcm.readFloatLE(i * 4)));
-    buffer.writeInt16LE(Math.round(sample * 32767), 44 + i * 2);
-  }
-
-  return buffer;
 }
 
 /**
@@ -152,36 +115,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Aggregate the SSE stream: one `data:` line per chunk, ending with [DONE].
-    const raw = await response.text();
-    const pcmChunks: Buffer[] = [];
-    let streamError: string | null = null;
-
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice('data:'.length).trim();
-      if (payload === '[DONE]') break;
-
-      let event: {
-        audio_b64?: string;
-        finish_reason?: string | null;
-        error?: { message?: string };
-      };
-      try {
-        event = JSON.parse(payload);
-      } catch {
-        continue; // ignore keep-alives / malformed lines
-      }
-
-      // Mid-stream error event (status is already 200, so it comes as data).
-      if (event.error || event.finish_reason === 'error') {
-        streamError = event.error?.message || 'TTS generation failed mid-stream';
-        break;
-      }
-      if (event.audio_b64) {
-        pcmChunks.push(Buffer.from(event.audio_b64, 'base64'));
-      }
-    }
+    const { pcmChunks, streamError } = parseSpeechStream(await response.text());
 
     if (streamError && pcmChunks.length === 0) {
       return NextResponse.json({ success: false, error: streamError }, { status: 502 });
@@ -207,20 +141,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
-
-/** Pull a human-readable message out of an error body (plain JSON or `data:` SSE line). */
-function extractErrorMessage(body: string): string | null {
-  if (!body) return null;
-  const candidates = [body, ...body.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim())];
-  for (const candidate of candidates) {
-    try {
-      const json = JSON.parse(candidate);
-      if (json?.error?.message) return json.error.message;
-      if (json?.message) return json.message;
-    } catch {
-      // not JSON — try the next candidate
-    }
-  }
-  return null;
 }

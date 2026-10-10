@@ -26,6 +26,7 @@ import {
   draftCandidates,
   bundleValidationOutcome,
   profileHasPromptCachingOnCluster,
+  writePrivateFile,
 } from '../cli';
 
 /**
@@ -510,6 +511,16 @@ describe('bundleValidationOutcome (review: stale "valid" after a re-apply)', () 
   });
 });
 
+describe('kubectlErrorDetail with kubectl\'s escaped-quote err="…" field', () => {
+  it('returns the whole message, not the text up to the first escaped quote', () => {
+    const stderr = 'E1007 memcache.go:381] "Couldn\'t get current server API group list" err="Get \\"https://1.2.3.4:6443/api?timeout=32s\\": tls: failed to verify certificate: x509: certificate signed by unknown authority"';
+    const out = kubectlErrorDetail({ message: 'x', stderr });
+    expect(out).toContain('Get "https://1.2.3.4:6443/api?timeout=32s": tls: failed to verify certificate');
+    expect(out).not.toMatch(/^Get \\\n/);
+    expect(out).toContain('→');  // the CA hint is still appended
+  });
+});
+
 describe('profileHasPromptCachingOnCluster (review class: errors must not be swallowed)', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const childProcess = require('child_process');
@@ -539,5 +550,32 @@ describe('profileHasPromptCachingOnCluster (review class: errors must not be swa
     spy = jest.spyOn(childProcess, 'execFileSync').mockReturnValue('{}');
     profileHasPromptCachingOnCluster('x;touch /tmp/pwned $(id)', 'ns');
     expect(spy).toHaveBeenCalledWith('kubectl', ['get', 'modelprofile.sambanova.ai', 'x;touch /tmp/pwned $(id)', '-n', 'ns', '-o', 'json'], expect.anything());
+  });
+});
+
+describe('writePrivateFile (secrets must not be world-readable)', () => {
+  /* eslint-disable @typescript-eslint/no-require-imports */
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  /* eslint-enable @typescript-eslint/no-require-imports */
+  const mode = (f: string) => fs.statSync(f).mode & 0o777;
+  it('creates the file readable by the owner only', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'priv-'));
+    const f = path.join(dir, 'app-config.json');
+    writePrivateFile(f, '{"apiKey":"k"}');
+    expect(mode(f)).toBe(0o600);
+    expect(fs.readFileSync(f, 'utf-8')).toBe('{"apiKey":"k"}');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  it('also tightens an existing world-readable (even 777) file instead of leaving it as it was', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'priv-'));
+    const f = path.join(dir, 'kubeconfig.yaml');
+    fs.writeFileSync(f, 'old', { mode: 0o644 });
+    fs.chmodSync(f, 0o777);
+    writePrivateFile(f, 'new');
+    expect(mode(f)).toBe(0o600);
+    expect(fs.readFileSync(f, 'utf-8')).toBe('new');
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
