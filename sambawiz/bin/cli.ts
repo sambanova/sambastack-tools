@@ -5,8 +5,8 @@ declare const process: any;
 // Allow self-signed SSL certificates for internal APIs
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-import { execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from 'fs';
+import { execSync, execFileSync } from 'child_process';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import * as readlineModule from 'readline';
@@ -23,10 +23,18 @@ import {
   getEffectiveBatchingConfig,
   getDisplayName,
   isSpecDecodingProfile,
-  generateModelBundleYaml,
+  generateModelBundle,
+  type DroppedSelection,
+  parseTierKey,
+  getBatchingConfigUniverse,
   type ModelBundleSelection,
 } from '../app/utils/bundle-yaml-generator';
 import { parseModelBundleYamlContent } from '../app/utils/parse-bundle-yaml';
+import { inferencePodNames } from '../app/utils/inference-pod-names';
+import { ensureAppDataDir } from '../app/utils/ensure-app-data-dir';
+import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
+import yaml from 'js-yaml';
+const yamlLib = yaml;
 
 // ─── V3 CLI data model ───────────────────────────────────────────────────────
 // V3 replaces the old model→PEF (SS/BS) selection model with a
@@ -61,14 +69,14 @@ function normalizeApiUrl(apiDomain: string): string {
   return base;
 }
 
-function getDeploymentStatus(cachePod: PodInfo | null, defaultPod: PodInfo | null): DeploymentStatus {
+export function getDeploymentStatus(cachePod: PodInfo | null, defaultPod: PodInfo | null): DeploymentStatus {
   if (!cachePod && !defaultPod) return 'Not Deployed';
   const cacheReady   = cachePod   ? cachePod.ready   === cachePod.total   : false;
   const defaultReady = defaultPod ? defaultPod.ready === defaultPod.total : false;
   return cacheReady && defaultReady ? 'Deployed' : 'Deploying';
 }
 
-function parsePodLine(line: string): PodInfo | null {
+export function parsePodLine(line: string): PodInfo | null {
   const parts = line.trim().split(/\s+/);
   if (parts.length < 3) return null;
   const [ready, total] = parts[1].split('/').map(Number);
@@ -82,16 +90,117 @@ function parsePodLine(line: string): PodInfo | null {
   };
 }
 
-function classifyPod(podName: string): 'cache' | 'default' | 'other' {
-  if (podName.includes('-cache-'))       return 'cache';
-  if (podName.includes('-q-default-n-')) return 'default';
-  return 'other';
+/**
+ * Pod-based status for each deployment, like the UI's getBundleDeploymentStatus: a ModelDeployment CR has no
+ * `status.phase`, so readiness comes from its cache + inference pods. One `kubectl get pods` for all of them.
+ */
+export function deploymentStatuses(namespace: string, names: string[]): Record<string, DeploymentStatus> {
+  let lines: string[];
+  try {
+    lines = execSync(`kubectl -n ${namespace} get pods`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim().split('\n');
+  } catch (e: any) {
+    // Not "everything is Not Deployed": that would hide an unreachable cluster or an RBAC denial behind a normal-looking answer.
+    throw new Error(`kubectl get pods failed: ${kubectlErrorDetail(e)}`);
+  }
+  const pods = new Map<string, PodInfo>();
+  for (const l of lines) { const p = parsePodLine(l); if (p) pods.set(p.name, p); }
+  const out: Record<string, DeploymentStatus> = {};
+  for (const n of names) {
+    const { cache, default: def } = inferencePodNames(n);
+    out[n] = getDeploymentStatus(pods.get(cache) ?? null, pods.get(def) ?? null);
+  }
+  return out;
+}
+
+const statusIcon = (st: DeploymentStatus) => (st === 'Deployed' ? chalk.green('●') : st === 'Deploying' ? chalk.yellow('◌') : chalk.red('○'));
+
+
+/** Whether a ModelProfile CR lists the `prompt_caching` feature (same gate as the UI's deploy page). */
+export function profileHasPromptCachingOnCluster(profile: string, namespace: string): boolean {
+  let out: string;
+  try {
+    // The profile name comes from the cluster, so it is passed as an argument (no shell) rather than interpolated.
+    out = execFileSync('kubectl', ['get', 'modelprofile.sambanova.ai', profile, '-n', namespace, '-o', 'json'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e: any) {
+    // A profile that isn't there simply doesn't have the feature; a real failure (RBAC, unreachable cluster) must surface
+    // instead of being reported as "no prompt_caching".
+    if (/NotFound|not found/i.test(String(e?.stderr ?? e?.message ?? ''))) return false;
+    throw new Error(`kubectl get modelprofile ${profile} failed: ${kubectlErrorDetail(e)}`);
+  }
+  return Boolean(JSON.parse(out).spec?.features?.includes('prompt_caching'));
+}
+
+/**
+ * Pins checkpoint versions from app-config.json `checkpoint_overrides` ({ <model display name>: <version> }),
+ * exactly as the UI does when building selections. Applied only at YAML-generation time.
+ */
+export function withCheckpointOverrides(
+  selections: ModelBundleSelection[],
+  overrides: Record<string, string>
+): ModelBundleSelection[] {
+  return selections.map((s) => {
+    const v = overrides[s.model.spec.name];
+    return v ? { ...s, versionOverride: v } : s;
+  });
+}
+
+export function readCheckpointOverrides(): Record<string, string> {
+  try {
+    const o = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))?.checkpoint_overrides;
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Same wording as the UI's "N selected models left this bundle" alert. */
+export function formatDroppedSelections(dropped: DroppedSelection[]): string[] {
+  if (dropped.length === 0) return [];
+  return [
+    `${dropped.length} selected model${dropped.length === 1 ? '' : 's'} left this bundle`,
+    ...dropped.map((d) =>
+      d.reason === 'batching-config-cleared'
+        ? `${d.model}: every batch size is unselected for profile ${d.profile}. Select at least one to deploy it.`
+        : `${d.model}: profile ${d.profile} publishes no batch sizes, so the model cannot be deployed. Pick another profile, or check the profile on the cluster.`
+    ),
+  ];
+}
+
+function warnDropped(dropped: DroppedSelection[]): void {
+  formatDroppedSelections(dropped).forEach((l) => warnMsg(l));
+}
+
+/**
+ * HTTP call that returns `"<body>\n<status>"` — the shape the old `curl -sk -w "\n%{http_code}"` calls produced, so the
+ * parsing at the call sites is unchanged — without putting the API key on a command line (visible to other users via `ps`).
+ * TLS verification is off process-wide (NODE_TLS_REJECT_UNAUTHORIZED, as `curl -k` was). Network failures throw a readable error.
+ */
+export async function curlLike(url: string, opts: { method?: string; apiKey?: string; body?: string; timeoutMs: number }): Promise<string> {
+  try {
+    const res = await fetch(url, {
+      method: opts.method ?? 'GET',
+      headers: { ...(opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {}), ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      ...(opts.body !== undefined ? { body: opts.body } : {}),
+      signal: AbortSignal.timeout(opts.timeoutMs),
+    });
+    return `${opts.method === 'HEAD' ? '' : await res.text()}\n${res.status}`;
+  } catch (e: any) {
+    const reason = e?.name === 'TimeoutError' ? `timed out after ${opts.timeoutMs / 1000}s` : e?.cause?.message || e?.message || 'unknown error';
+    throw new Error(`Cannot reach ${url}: ${reason}`);
+  }
+}
+
+/** Never reveals more than the last 4 characters, and nothing at all for short keys. */
+export function maskApiKey(key: string): string {
+  return key.length >= 16 ? `…${key.slice(-4)}` : '••••';
 }
 
 /** Format Kubernetes validation/legalizer errors the same way for ModelBundle as the UI does. */
-function printValidationErrors(conds: any[]): void {
+export function printValidationErrors(conds: any[], legalizerInfo?: any): void {
   const errCond = conds.find((c: any) => c.reason === 'ValidationFailed' || (c.status === 'False' && c.message));
-  const msg = errCond?.message || conds.map((c: any) => c.message).filter(Boolean).join('\n');
+  // Like the UI: legalizer errors are the actionable text, so prefer them over the condition message.
+  const legalizerErrors: string[] = Array.isArray(legalizerInfo?.errors) ? legalizerInfo.errors : [];
+  const msg = legalizerErrors.length > 0 ? legalizerErrors.join('\n') : errCond?.message || conds.map((c: any) => c.message).filter(Boolean).join('\n');
 
   process.stdout.write(chalk.red.bold('Validation failed with the following errors:\n'));
 
@@ -107,6 +216,33 @@ function printValidationErrors(conds: any[]): void {
 }
 
 /**
+ * Terminal equivalent of the UI's memory-utilization gauge charts: renders DDR, HBM-resident and
+ * host memory utilization from a ModelBundle's `status.legalizerInfo.utilization` as text bars.
+ * Values are fractions (0–1) as strings; shown regardless of validation outcome, same as the UI.
+ */
+export function printMemoryUtilization(legalizerInfo: any): void {
+  const utilization = legalizerInfo?.utilization;
+  if (!utilization) return;
+
+  const bar = (label: string, raw: string | undefined) => {
+    const frac = raw !== undefined ? parseFloat(raw) : NaN;
+    if (isNaN(frac)) return;
+    const pct = Math.min(Math.max(frac, 0), 1);
+    const width = 24;
+    const filled = Math.round(pct * width);
+    const barColor = pct > 0.8 ? chalk.red : chalk.green;
+    const barStr = barColor('█'.repeat(filled)) + chalk.reset('░'.repeat(width - filled));
+    process.stdout.write(`  ${label.padEnd(24)} ${barStr}  ${chalk.bold(`${(pct * 100).toFixed(1)}%`)}\n`);
+  };
+
+  process.stdout.write(chalk.bold('\n  Memory Utilization:\n'));
+  bar('DDR Memory',          utilization.ddr);
+  bar('HBM Resident Memory', utilization.hbm_resident);
+  bar('Host Memory',         utilization.host);
+  process.stdout.write('\n');
+}
+
+/**
  * Reads the `Valid` condition off a ModelBundle's `status.conditions`
  * (confirmed shape, v3plan.md Q5: `{ type: Valid, status, reason, message }`
  * — identical to the V2 `Bundle` status).
@@ -118,6 +254,20 @@ export function readValidCondition(conditions: Array<{ type?: string; status?: s
   if (cond.status === 'True') return 'succeeded';
   if (cond.status === 'False') return 'failed';
   return 'pending';
+}
+
+/**
+ * The Valid outcome of a whole ModelBundle, ignoring a verdict about an OLDER version of it: after a bundle is changed
+ * the previous `Valid=True` can still be on the resource until the controller re-validates, so a condition only counts
+ * once its `observedGeneration` (or `status.observedGeneration`) has caught up with `metadata.generation`.
+ * Without those fields (older controllers) the condition is taken at face value.
+ */
+export function bundleValidationOutcome(bundle: any): ValidationOutcome {
+  const conds: Array<{ type?: string; status?: string; observedGeneration?: number }> = bundle?.status?.conditions ?? [];
+  const generation = bundle?.metadata?.generation;
+  const observed = conds.find((c) => c.type === 'Valid')?.observedGeneration ?? bundle?.status?.observedGeneration;
+  if (typeof generation === 'number' && typeof observed === 'number' && observed < generation) return 'pending';
+  return readValidCondition(conds);
 }
 
 // ─── V3 cache → CR adapters ──────────────────────────────────────────────────
@@ -187,6 +337,19 @@ export function crNameToDisplayName(checkpointMapping: CheckpointMappingV3, crna
   return found?.[0];
 }
 
+/** Metadata the API server owns; left in, re-applying a loaded bundle under a new name is rejected. */
+const SERVER_MANAGED_METADATA = [
+  'annotations', 'labels', 'resourceVersion', 'uid', 'creationTimestamp', 'generation', 'managedFields', 'selfLink', 'deletionTimestamp',
+];
+
+/** Turns a `kubectl get -o yaml` document into an editable definition: no server-managed metadata and no `status`. */
+export function stripServerManagedFields<T = any>(doc: T): T {
+  const d: any = doc;
+  if (d?.metadata) for (const k of SERVER_MANAGED_METADATA) delete d.metadata[k];
+  if (d && 'status' in d) delete d.status;
+  return doc;
+}
+
 /** Extracts a ModelBundle's `metadata.name` from YAML text via the shared V3 parser (returns '' on parse failure). */
 export function extractBundleName(yamlContent: string): string {
   const parsed = parseModelBundleYamlContent(yamlContent);
@@ -200,15 +363,35 @@ export function extractBundleName(yamlContent: string): string {
  * are carried over verbatim from the old `BundleDeployment` builder (Step 5,
  * "Keep all other deployment parameters unchanged").
  */
-export function buildModelDeploymentYaml(bundleName: string): { yaml: string; deploymentName: string } {
-  const deploymentName = `md-${bundleName}`;
-  const yamlText = [
+export interface ModelDeploymentOptions {
+  deploymentName?: string;
+  promptCaching?: boolean;
+  ignoreEos?: boolean;
+}
+
+// Same env vars the UI injects (ModelDeploymentManager.tsx PROMPT_CACHING_ENV_VARS / IGNORE_EOS_ENV_VARS).
+const PROMPT_CACHING_ENV_VARS = ['ENABLE_KV_CACHE_MANAGER', 'KV_CACHE_INCLUDE_STATS_IN_RESPONSE'];
+const IGNORE_EOS_ENV_VARS = ['ENABLE_IGNORE_EOS'];
+
+/** UI default: a `b-` bundle becomes `md-…`, anything else is prefixed `md-` (ModelDeploymentManager.tsx). */
+export function suggestDeploymentName(bundleName: string): string {
+  return bundleName.startsWith('b-') ? bundleName.replace('b-', 'md-') : `md-${bundleName}`;
+}
+
+/** The shared deployment document; `source` is either a bundle reference or an inline model + profile. */
+function buildDeploymentYaml(
+  source: string[],
+  deploymentName: string,
+  opts: ModelDeploymentOptions
+): string {
+  const envVars = [...(opts.promptCaching ? PROMPT_CACHING_ENV_VARS : []), ...(opts.ignoreEos ? IGNORE_EOS_ENV_VARS : [])];
+  return [
     'apiVersion: sambanova.ai/v1alpha1',
     'kind: ModelDeployment',
     'metadata:',
     `  name: ${deploymentName}`,
     'spec:',
-    `  bundle: ${bundleName}`,
+    ...source,
     '  groups:',
     '  - minReplicas: 1',
     '    name: default',
@@ -218,18 +401,43 @@ export function buildModelDeploymentYaml(bundleName: string): { yaml: string; de
     '  secretNames:',
     '  - sambanova-artifact-reader',
     '  engineConfig:',
+    ...(envVars.length ? ['    env_vars:', ...envVars.map((v) => `      ${v}: "true"`)] : []),
     '    startupTimeout: 7200',
   ].join('\n');
-  return { yaml: yamlText, deploymentName };
+}
+
+export function buildModelDeploymentYaml(
+  bundleName: string,
+  opts: ModelDeploymentOptions = {}
+): { yaml: string; deploymentName: string } {
+  const deploymentName = opts.deploymentName || suggestDeploymentName(bundleName);
+  return { yaml: buildDeploymentYaml([`  bundle: ${bundleName}`], deploymentName, opts), deploymentName };
+}
+
+/**
+ * Single-model quick deploy (the UI's "Deploy Model"): inlines `spec.models` instead of referencing a
+ * ModelBundle. `modelRef` is `<crname>[:<arch>][:<version>]` (see formatModelRefLatest); default name `md-<crname>`.
+ */
+export function buildModelBasedDeploymentYaml(
+  modelRef: string,
+  profile: string,
+  opts: ModelDeploymentOptions = {}
+): { yaml: string; deploymentName: string } {
+  const deploymentName = opts.deploymentName || `md-${modelRef.split(':')[0]}`.toLowerCase();
+  const source = ['  models:', '    modelConfigs:', `    - model: ${modelRef}`, `      profile: ${profile}`];
+  return { yaml: buildDeploymentYaml(source, deploymentName, opts), deploymentName };
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 // tsx sets __dirname to '.' — use process.cwd() which always points to the
 // project root when launched via `npm run dev-cli` from sambawiz/
 
-const PROJECT_ROOT = process.cwd();
+export const PROJECT_ROOT = process.cwd();
 const APP_DIR      = path.join(PROJECT_ROOT, 'app');
-const DATA_DIR     = path.join(APP_DIR, 'data');
+export const DATA_DIR     = path.join(APP_DIR, 'data');
+// Deliberately NOT the UI's model-selection-state.json: the two use different schemas, so sharing one
+// file made each interface ignore or overwrite the other's session.
+const SESSION_STATE_PATH = path.join(PROJECT_ROOT, 'temp', 'cli-selection-state.json');
 
 // ─── V3 cache generation ──────────────────────────────────────────────────────
 // Mirrors app/api/generate-checkpoint-mapping/route.ts and
@@ -248,14 +456,26 @@ const ckLog  = (msg: string, verbose = true) => { if (verbose) process.stdout.wr
 const mpLog  = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[Model Profiles] ${msg}\n`)); };
 const pefLog = (msg: string, verbose = true) => { if (verbose) process.stdout.write(chalk.reset(`[PEF Generator] ${msg}\n`)); };
 
-function kubectlErrorDetail(e: any): string {
+/** Extra guidance for failures whose cause isn't obvious from kubectl's own text. */
+export function kubectlHint(raw: string): string {
+  if (/x509: certificate signed by unknown authority|failed to verify certificate/i.test(raw)) {
+    return 'The cluster CA does not match the kubeconfig (its certificate-authority-data is stale — e.g. the cluster was rebuilt). ' +
+      'Get a fresh kubeconfig from the cluster and re-add it (Manage Environments → Add, or `env add <name> --kubeconfig-file <file> --overwrite`).';
+  }
+  if (/Unauthorized|You must be logged in/i.test(raw)) return 'The kubeconfig credentials were rejected — refresh the kubeconfig.';
+  return '';
+}
+
+export function kubectlErrorDetail(e: any): string {
   const raw = e.stderr ? String(e.stderr).trim() : e.message;
   const errField = raw.match(/err="([^"]+)"/);
   const connMsg  = raw.match(/(dial tcp[^\n]+|connection refused[^\n]+|i\/o timeout[^\n]*)/i);
-  return errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
+  const hint = kubectlHint(raw);
+  const detail = errField ? errField[1] : connMsg ? connMsg[0] : raw.split('\n')[0];
+  return hint ? `${detail}\n  → ${hint}` : detail;
 }
 
-async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, verbose = true, chain = true): Promise<{ count: number }> {
+export async function generateCheckpointMapping(kubeconfigPath: string, namespace: string, verbose = true, chain = true): Promise<{ count: number }> {
   ckLog('Running kubectl get models -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
@@ -313,6 +533,7 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
   }
 
   const count = Object.keys(mapping).length;
+  ensureAppDataDir();
   writeFileSync(path.join(DATA_DIR, 'checkpoint_mapping.json'), JSON.stringify(mapping, null, 2) + '\n');
   ckLog(`✓ Generated checkpoint_mapping.json with ${count} models (multi-arch)`, verbose);
 
@@ -336,7 +557,7 @@ async function generateCheckpointMapping(kubeconfigPath: string, namespace: stri
 // New V3 cache (v3plan.md, "New" file inventory): caches `ModelProfile` CRs
 // keyed by `metadata.name`, joined to Models by `model_arch`.
 
-async function generateModelProfiles(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
+export async function generateModelProfiles(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
   mpLog('Running kubectl get modelprofiles -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
@@ -372,6 +593,7 @@ async function generateModelProfiles(kubeconfigPath: string, namespace: string, 
   }
 
   const count = Object.keys(cache).length;
+  ensureAppDataDir();
   writeFileSync(path.join(DATA_DIR, 'model_profiles.json'), JSON.stringify(cache, null, 2) + '\n');
   mpLog(`✓ Generated model_profiles.json with ${count} profiles`, verbose);
   return { count };
@@ -414,7 +636,7 @@ function selectDytSsValues(ssMin: number, ssMax: number, ssStep: number): number
   return selected.filter(ss => ss >= 32768);
 }
 
-async function generatePefConfigs(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
+export async function generatePefConfigs(kubeconfigPath: string, namespace: string, verbose = true): Promise<{ count: number }> {
   pefLog('Running kubectl get pef -o json...', verbose);
 
   const env = { ...process.env, KUBECONFIG: kubeconfigPath };
@@ -448,7 +670,7 @@ async function generatePefConfigs(kubeconfigPath: string, namespace: string, ver
 
     if (isDyt) {
       try {
-        const indOut = execSync(`kubectl -n ${namespace} get pef ${pefName} -o json`, {
+        const indOut = execFileSync('kubectl', ['-n', namespace, 'get', 'pef', pefName, '-o', 'json'], {
           env, encoding: 'utf-8', timeout: 15000,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -489,6 +711,7 @@ async function generatePefConfigs(kubeconfigPath: string, namespace: string, ver
   pefLog(`✓ Processed ${processedCount}/${items.length} PEFs`, verbose);
 
   const pefConfigsPath = path.join(DATA_DIR, 'pef_configs.json');
+  ensureAppDataDir();
   writeFileSync(pefConfigsPath, JSON.stringify(configs, null, 2) + '\n');
 
   pefLog(`✓ Generated pef_configs.json with ${processedCount} entries`, verbose);
@@ -504,6 +727,8 @@ async function runDataFileStepTracker(
   namespace: string,
   label?: string,
 ): Promise<void> {
+  const nsErr = validateResourceName(namespace);   // spliced into kubectl commands below
+  if (nsErr) { errorMsg(`Invalid namespace "${namespace}": ${nsErr}`); return; }
   const LABEL_W = 26;
   const DOTS    = '  ........  ';
   const FRAMES  = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
@@ -598,7 +823,7 @@ async function runDataFileStepTracker(
   process.stdout.write('\n');
 }
 
-const CONFIG_PATH = path.join(PROJECT_ROOT, 'app-config.json');
+export const CONFIG_PATH = path.join(PROJECT_ROOT, 'app-config.json');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -608,7 +833,7 @@ function requireJson(p: string): any {
   catch (err: any) { process.stdout.write(chalk.red(`  Error parsing ${p}: ${err.message}\n`)); return {}; }
 }
 
-function getAppVersion(): string {
+export function getAppVersion(): string {
   const vp = path.join(PROJECT_ROOT, 'VERSION');
   if (!existsSync(vp)) return requireJson(path.join(PROJECT_ROOT, 'package.json')).version || '';
   for (const line of readFileSync(vp, 'utf-8').split('\n')) {
@@ -634,6 +859,39 @@ function compareVersions(a: string, b: string): number {
     if (diff !== 0) return diff;
   }
   return 0;
+}
+
+/**
+ * Silent, best-effort check of the installed SambaStack Helm chart version
+ * against the minimum required version — used to show a persistent banner in
+ * the main menu, mirroring the UI's standing "helm version too old" banner
+ * (the full interactive version lives in runValidationChecks()).
+ */
+export function getOutdatedHelmChartWarning(kPath: string, namespace: string): string | null {
+  try {
+    const minVer = getMinHelmVersion();
+    if (!minVer) return null;
+    const helmEnv = { ...process.env, KUBECONFIG: kPath };
+    let raw = '';
+    try {
+      raw = execSync('helm list -A -o json', { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
+    } catch {
+      for (const ns of [namespace, 'sambastack', 'default'].filter(Boolean)) {
+        try { raw = execSync(`helm list -n ${ns} -o json`, { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }); break; } catch { /* try next */ }
+      }
+    }
+    if (!raw) return null;
+    const releases: any[] = JSON.parse(raw);
+    const release = releases.find((r: any) => typeof r.chart === 'string' && r.chart.toLowerCase().startsWith('sambastack'));
+    if (!release) return null;
+    const chartVer = release.chart.replace(/^sambastack-/i, '');
+    if (compareVersions(chartVer, minVer) < 0) {
+      return `SambaStack Helm chart is outdated (${chartVer} < ${minVer}) — Install/Upgrade SambaStack from the main menu.`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Spinner ─────────────────────────────────────────────────────────────────
@@ -697,6 +955,25 @@ function successMsg(text: string) { process.stdout.write(`\n  ${chalk.green('✅
 function errorMsg(text: string)   { process.stdout.write(`\n  ${chalk.red('❌')} ${chalk.red.bold(text)}\n\n`); }
 function warnMsg(text: string)    { process.stdout.write(`  ${chalk.yellow('⚠')} ${chalk.yellow(text)}\n`); }
 
+/** Opens `text` in $EDITOR/$VISUAL (default vi) and returns the edited text, or null if the editor failed. */
+export function editInEditor(text: string): string | null {
+  const tmp    = path.join(PROJECT_ROOT, `.tmp_edit_${Date.now()}.yaml`);
+  const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+  writeFileSync(tmp, text);
+  try {
+    process.stdout.write(chalk.yellow(`\n  Opening ${editor}...\n`));
+    try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+    execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
+    try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
+    return readFileSync(tmp, 'utf-8');
+  } catch (e: any) {
+    errorMsg(`Editor error: ${e.message}`);
+    return null;
+  } finally {
+    try { rmSync(tmp, { force: true }); } catch {}
+  }
+}
+
 function yamlBox(title: string, content: string) {
   process.stdout.write(chalk.reset.bold(`\n  ${title}:\n`));
   process.stdout.write(chalk.reset('  ' + '─'.repeat(40)) + '\n');
@@ -729,7 +1006,7 @@ interface Choice {
   hint?: string;
 }
 
-async function select(_rl: any, message: string, choices: Choice[], big = false): Promise<any> {
+export async function select(_rl: any, message: string, choices: Choice[], big = false): Promise<any> {
   const [mainLabel, ...extraLines] = message.split('\n');
   process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(mainLabel)}\n`);
   extraLines.forEach(l => process.stdout.write(`${l}\n`));
@@ -839,7 +1116,7 @@ async function select(_rl: any, message: string, choices: Choice[], big = false)
 
 // ─── multiSelect() ───────────────────────────────────────────────────────────
 
-async function multiSelect(_rl: any, message: string, choices: Choice[], preCheckedIndices?: Set<number>): Promise<any[]> {
+export async function multiSelect(_rl: any, message: string, choices: Choice[], preCheckedIndices?: Set<number>, enterSelectsCurrent = false): Promise<any[]> {
   process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(message)}\n`);
   process.stdout.write(chalk.reset('  Space toggle   a select all   Enter confirm   q / Esc to go back\n\n'));
 
@@ -946,6 +1223,9 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
           process.stdout.write('\n');
           resolve([sv]);
         } else {
+          // Opt-in (delete menus): Enter on a highlighted row with nothing toggled selects that row, so a user
+          // who expects Enter to pick the highlighted entry doesn't end up with "0 selected".
+          if (enterSelectsCurrent && checked.size === 0 && regularIndices.includes(selectedIndex)) checked.add(selectedIndex);
           const result = Array.from(checked).filter(i => workChoices[i]?.value !== '__selectAll__').map(i => workChoices[i].value);
           process.stdout.write(`\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(msMainLabel)} ${chalk.reset(`${result.length} selected`)}\n`);
           resolve(result);
@@ -973,7 +1253,7 @@ async function multiSelect(_rl: any, message: string, choices: Choice[], preChec
 const ESC  = '\x1b';
 const EDIT = '\x01EDIT\x01';  // sentinel returned by input() hotkey for 'e'
 
-async function input(_rl: any, message: string, defaultValue = '', hint = 'Esc cancel', hotkeys?: Record<string, string>): Promise<string> {
+export async function input(_rl: any, message: string, defaultValue = '', hint = 'Esc cancel', hotkeys?: Record<string, string>): Promise<string> {
   const hintStr = hint ? `  ${chalk.reset(hint)}` : '';
   const prompt = `\n  ${chalk.hex(BRAND).bold('›')} ${chalk.bold(message)}${hintStr}: `;
   process.stdout.write(prompt);
@@ -1050,8 +1330,8 @@ async function input(_rl: any, message: string, defaultValue = '', hint = 'Esc c
       } else if (code >= 0x20) {                           // Printable character
         const ch = chunk.toString('utf8');
         // Hotkey: intercept single char when buffer is untouched (no echo, returns sentinel)
-        if (hotkeys && buffer === defaultValue && hotkeys[ch] !== undefined) {
-          cleanup(hotkeys[ch]);
+        if (hotkeys && buffer === defaultValue && (hotkeys[ch] ?? hotkeys[ch.toLowerCase()]) !== undefined) {
+          cleanup((hotkeys[ch] ?? hotkeys[ch.toLowerCase()]) as string);
           return;
         }
         buffer = buffer.slice(0, cursor) + ch + buffer.slice(cursor);
@@ -1082,6 +1362,52 @@ async function confirm(rl: any, message: string, defaultTrue = true): Promise<bo
 
 // ─── addEnvironmentMenu() ────────────────────────────────────────────────────
 
+/** Fetch and print the keycloak-initial-admin secret for an environment, mirroring the UI's "Get API Key" action. */
+/** Environment names become file names (kubeconfigs/kubeconfig-<name>.yaml): no path separators, whitespace or leading dot. */
+export function envNameError(name: string): string | null {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)
+    ? null
+    : `Invalid environment name "${name}": use letters, digits, ".", "_" and "-", starting with a letter or digit.`;
+}
+
+/** Asks for a namespace until it is a legal Kubernetes name (it is spliced into kubectl/helm commands later), or Esc. */
+async function promptNamespace(rl: any, label: string, current: string): Promise<string> {
+  while (true) {
+    const ns = await input(rl, label, current);
+    if (ns === ESC) return ESC;
+    const err = validateResourceName(ns);
+    if (!err) return ns;
+    errorMsg(`${err} Please try again.`);
+  }
+}
+
+async function showKeycloakCredentials(rl: any, envName: string, ec: any) {
+  if (!ec?.file) { errorMsg(`Environment "${envName}" has no kubeconfig configured.`); return; }
+  const kPath = path.join(PROJECT_ROOT, ec.file);
+  if (!existsSync(kPath)) { errorMsg(`Kubeconfig file not found: ${ec.file}`); return; }
+  const ns = ec.namespace || 'default';
+  const nsErr = validateResourceName(ns);
+  if (nsErr) { errorMsg(`Invalid namespace "${ns}" for "${envName}": ${nsErr}`); return; }
+
+  spinner.start('Fetching keycloak admin credentials...');
+  try {
+    const out = execSync(
+      `kubectl --kubeconfig="${kPath}" -n ${ns} get secret keycloak-initial-admin -o go-template='username: {{.data.username | base64decode}}{{"\\n"}}password: {{.data.password | base64decode}}{{"\\n"}}'`,
+      { encoding: 'utf-8' }
+    );
+    const username = /username: (.*)/.exec(out)?.[1]?.trim();
+    const password = /password: (.*)/.exec(out)?.[1]?.trim();
+    if (!username || !password) { spinner.fail('Could not parse credentials from kubectl output'); return; }
+    spinner.succeed('Keycloak admin credentials');
+    infoRow('Username', username);
+    infoRow('Password', password);
+    process.stdout.write('\n');
+    await input(rl, chalk.reset('Press Enter to continue'));
+  } catch (e: any) {
+    spinner.fail(`Failed to fetch credentials: ${kubectlErrorDetail(e)}`);
+  }
+}
+
 async function addEnvironmentMenu(rl: any) {
   sectionHeader('Manage Environments', '⚙️');
 
@@ -1105,7 +1431,8 @@ async function addEnvironmentMenu(rl: any) {
     // ── Step 1: Environment name ──────────────────────────────────────────────
     const name = await input(rl, '1/6  Environment name');
     if (!name || name === ESC) return;
-    if (/\s/.test(name)) { errorMsg('Environment name cannot contain spaces.'); return; }
+    const nameErr = envNameError(name);
+    if (nameErr) { errorMsg(nameErr); return; }
     if (appConfig.kubeconfigs?.[name]) { errorMsg(`Environment "${name}" already exists. Use Edit to modify it.`); return; }
 
     // ── Step 2: Kubeconfig ────────────────────────────────────────────────────
@@ -1114,7 +1441,7 @@ async function addEnvironmentMenu(rl: any) {
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
     // ── Step 3: Namespace ─────────────────────────────────────────────────────
-    const ns = await input(rl, '3/6  Namespace', 'default');
+    const ns = await promptNamespace(rl, '3/6  Namespace', 'default');
     if (ns === ESC) return;
 
     // ── Step 4: UI Domain ─────────────────────────────────────────────────────
@@ -1132,7 +1459,7 @@ async function addEnvironmentMenu(rl: any) {
     // ── Save kubeconfig file ──────────────────────────────────────────────────
     const kubeconfigsDir = path.join(PROJECT_ROOT, 'kubeconfigs');
     if (!existsSync(kubeconfigsDir)) {
-      try { execSync(`mkdir -p "${kubeconfigsDir}"`); } catch {}
+      try { mkdirSync(kubeconfigsDir, { recursive: true }); } catch {}
     }
     const destRelative = `kubeconfigs/kubeconfig-${name}.yaml`;
     const destPath     = path.join(PROJECT_ROOT, destRelative);
@@ -1187,6 +1514,7 @@ async function addEnvironmentMenu(rl: any) {
       const freshConfig  = requireJson(CONFIG_PATH);
       const actionChoices: Choice[] = [
         { name: '🔍  Validate',         value: 'validate' },
+        { name: '🔑  Get API Key',      value: 'get_api_key' },
         { name: '✏️   Edit',             value: 'edit' },
         { name: chalk.red('🗑️   Delete'), value: 'delete' },
         { name: chalk.reset('← Back'),   value: 'back' },
@@ -1198,15 +1526,19 @@ async function addEnvironmentMenu(rl: any) {
         const ec    = freshConfig.kubeconfigs[name];
         if (!ec) { errorMsg(`Environment "${name}" not found.`); continue; }
         const envNs = ec.namespace || 'default';
+        const envNsErr = validateResourceName(envNs);
+        if (envNsErr) { errorMsg(`Invalid namespace "${envNs}" for "${name}": ${envNsErr}`); continue; }
         const kPath = path.join(PROJECT_ROOT, ec.file || '');
         if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
         await runValidationChecks(name, ec, envNs);
+      } else if (action === 'get_api_key') {
+        await showKeycloakCredentials(rl, name, freshConfig.kubeconfigs[name]);
       } else if (action === 'edit') {
         const ec = freshConfig.kubeconfigs[name] || {};
         process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(name)}  (Enter to keep current value)\n\n`));
         const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
         if (file === ESC) continue;
-        const editNs    = await input(rl, 'Namespace',        ec.namespace || 'default');
+        const editNs    = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
         if (editNs === ESC) continue;
         const uiD       = await input(rl, 'UI Domain',        ec.uiDomain  || '');
         if (uiD === ESC) continue;
@@ -1251,6 +1583,7 @@ async function addEnvironmentMenu(rl: any) {
     const actionChoices: Choice[] = [];
     if (!isCurrent) actionChoices.push({ name: chalk.yellow('⚡  Activate'), value: 'activate' });
     actionChoices.push({ name: '🔍  Validate',         value: 'validate' });
+    actionChoices.push({ name: '🔑  Get API Key',      value: 'get_api_key' });
     actionChoices.push({ name: '✏️   Edit',             value: 'edit' });
     actionChoices.push({ name: chalk.red('🗑️   Delete'), value: 'delete' });
     actionChoices.push({ name: chalk.reset('← Back'),   value: 'back' });
@@ -1282,13 +1615,16 @@ async function addEnvironmentMenu(rl: any) {
       await runValidationChecks(envName, ec, ns);
       // stay in sub-menu after validate
 
+    } else if (action === 'get_api_key') {
+      await showKeycloakCredentials(rl, envName, freshConfig.kubeconfigs[envName]);
+
     } else if (action === 'edit') {
       const ec = freshConfig.kubeconfigs[envName] || {};
       process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(envName)}  (Enter to keep current value)\n\n`));
 
       const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
       if (file === ESC) continue;
-      const ns        = await input(rl, 'Namespace',        ec.namespace || 'default');
+      const ns        = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
       if (ns === ESC) continue;
       const uiDomain  = await input(rl, 'UI Domain',        ec.uiDomain  || '');
       if (uiDomain === ESC) continue;
@@ -1328,6 +1664,27 @@ async function addEnvironmentMenu(rl: any) {
   }
 }
 
+// ─── viewDocumentationMenu() ─────────────────────────────────────────────────
+
+async function viewDocumentationMenu(rl: any) {
+  const docs: Choice[] = [
+    { name: 'Home / Environment Setup', value: 'home.md' },
+    { name: 'Model Selection',          value: 'model-selection.md' },
+    { name: 'Model Deployment',         value: 'model-deployment.md' },
+    { name: 'Playground',               value: 'playground.md' },
+    { name: chalk.reset('← Back'),      value: 'back' },
+  ];
+  const picked = await select(rl, 'View documentation for:', docs);
+  if (!picked || picked === 'back') return;
+
+  const docPath = path.join(PROJECT_ROOT, 'docs', picked);
+  if (!existsSync(docPath)) { errorMsg(`Documentation file not found: ${docPath}`); return; }
+
+  sectionHeader(picked.replace(/\.md$/, ''), '📖');
+  process.stdout.write(chalk.reset(readFileSync(docPath, 'utf-8')) + '\n');
+  await input(rl, chalk.reset('Press Enter to return to menu'));
+}
+
 // ─── startCli() ──────────────────────────────────────────────────────────────
 
 async function startCli() {
@@ -1359,14 +1716,55 @@ async function startCli() {
   hr();
 
   process.stdout.write(chalk.reset.bold('\n  Prerequisites:\n'));
-  process.stdout.write(chalk.reset('  • kubectl installed and on PATH\n'));
-  process.stdout.write(chalk.reset('  • helm installed and on PATH\n'));
-  process.stdout.write(chalk.reset('  • app-config.json configured with valid kubeconfig paths\n'));
-  process.stdout.write(chalk.reset('  • API domain and key set in app-config.json\n\n'));
+  let kubectlOk = false, helmOk = false;
+  try { execSync('kubectl version --client', { stdio: 'pipe' }); kubectlOk = true; } catch {}
+  try { execSync('helm version', { stdio: 'pipe' }); helmOk = true; } catch {}
+  checkRow(kubectlOk ? chalk.green('✔') : chalk.red('✖'), 'kubectl installed and on PATH');
+  checkRow(helmOk    ? chalk.green('✔') : chalk.red('✖'), 'helm installed and on PATH');
+  process.stdout.write('\n');
+  if (!kubectlOk || !helmOk) {
+    warnMsg('Missing prerequisites above must be installed before deploying models.');
+  }
+
+  const KUBECONFIGS_DIR = path.join(PROJECT_ROOT, 'kubeconfigs');
+  const findLocalKubeconfigFiles = () =>
+    existsSync(KUBECONFIGS_DIR)
+      ? readdirSync(KUBECONFIGS_DIR).filter(f => /\.(yaml|yml)$/.test(f) && f !== 'kubeconfig_example.yaml')
+      : [];
 
   if (!existsSync(CONFIG_PATH)) {
-    errorMsg(`app-config.json not found at ${CONFIG_PATH}`);
-    rl.close(); process.exit(1);
+    // Mirrors POST /api/check-app-config: create a minimal app-config.json,
+    // auto-populating it from any kubeconfig files already on disk.
+    const yamlFiles = findLocalKubeconfigFiles();
+    const newConfig: any = { currentKubeconfig: '', kubeconfigs: {} };
+    for (const file of yamlFiles) {
+      const envName = file.replace(/\.(yaml|yml)$/, '');
+      newConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
+    }
+    if (yamlFiles.length) newConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
+    writeFileSync(CONFIG_PATH, JSON.stringify(newConfig, null, 2) + '\n');
+    successMsg(`Created app-config.json${yamlFiles.length ? ` with ${yamlFiles.length} kubeconfig(s) found in kubeconfigs/` : ''}.`);
+  } else {
+    // Mirrors /api/auto-populate-kubeconfigs: offer to populate an existing
+    // but empty config from any kubeconfig files already on disk.
+    const existingConfig = requireJson(CONFIG_PATH);
+    const isEmpty = !Object.keys(existingConfig.kubeconfigs || {}).length && !existingConfig.currentKubeconfig;
+    if (isEmpty) {
+      const yamlFiles = findLocalKubeconfigFiles();
+      if (yamlFiles.length) {
+        const doPopulate = await confirm(rl, `Found ${yamlFiles.length} kubeconfig(s) in kubeconfigs/ — populate app-config.json with them?`, true);
+        if (doPopulate) {
+          existingConfig.kubeconfigs = {};
+          for (const file of yamlFiles) {
+            const envName = file.replace(/\.(yaml|yml)$/, '');
+            existingConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
+          }
+          existingConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
+          writeFileSync(CONFIG_PATH, JSON.stringify(existingConfig, null, 2) + '\n');
+          successMsg('app-config.json populated.');
+        }
+      }
+    }
   }
 
   function loadEnvConfig() {
@@ -1380,6 +1778,11 @@ async function startCli() {
     const kPath   = path.join(PROJECT_ROOT, envConf.file);
     if (!existsSync(kPath)) {
       return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: `Kubeconfig file not found: ${envConf.file}` };
+    }
+    // The namespace is spliced into kubectl/helm commands throughout the menus, so it must be a legal name.
+    const nsErr = validateResourceName(ns);
+    if (nsErr) {
+      return { appConfig: config, envConfig: null, namespace: 'default', currentEnv: env, error: `Invalid namespace "${ns}" for environment "${env}": ${nsErr}` };
     }
     process.env.KUBECONFIG = kPath;
     return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: null };
@@ -1420,11 +1823,22 @@ async function startCli() {
 
   let { envConfig, namespace, currentEnv } = loaded;
 
+  // Outdated chart blocks the cluster pages (as the UI disables its nav); refreshed after env/install changes.
+  let helmWarning: string | null = null;
+  const refreshHelmWarning = () => {
+    helmWarning = null;
+    if (!envConfig) return;
+    const kp = path.join(PROJECT_ROOT, envConfig.file);
+    if (existsSync(kp)) helmWarning = getOutdatedHelmChartWarning(kp, namespace);
+  };
+
   // ── Startup: step tracker ────────────────────────────────────────────────────
   if (envConfig) {
     const kPath = path.join(PROJECT_ROOT, envConfig.file);
     if (existsSync(kPath)) {
       await runDataFileStepTracker(kPath, namespace, `${currentEnv} / ${namespace}`);
+      refreshHelmWarning();
+      if (helmWarning) warnMsg(helmWarning);
     }
   }
 
@@ -1437,16 +1851,30 @@ async function startCli() {
       { name: `🚀  Model Deployment`,                  value: 'bundle_deploy',  hint: 'Deploy or delete ModelDeployments' },
       { name: `📈  Check Deployment Progress`,         value: 'monitor_deploy', hint: 'Live pod status monitor' },
       { name: `🤖  Playground (Chat Console)`,         value: 'playground',     hint: 'Chat with deployed models' },
+      { name: `📦  Install / Upgrade SambaStack`,      value: 'install_sambastack', hint: 'Run or upgrade the helm install' },
+      { name: `📖  View Documentation`,                 value: 'view_docs',      hint: 'Read the docs for each page' },
       { name: chalk.yellow('⏹️   Exit'),               value: 'exit' },
     ], true);
 
     if (!action) continue;
+
+    // Cluster pages need a valid environment; never fall through to the ambient kube context.
+    const clusterPages = ['bundle_builder', 'bundle_deploy', 'monitor_deploy', 'playground', 'install_sambastack'];
+    if (clusterPages.includes(action) && !(envConfig && existsSync(path.join(PROJECT_ROOT, envConfig.file)))) {
+      errorMsg('No valid environment selected — add or activate one in Manage Environments first.');
+      continue;
+    }
+    if (['bundle_builder', 'bundle_deploy', 'monitor_deploy', 'playground'].includes(action) && helmWarning) {
+      errorMsg(helmWarning);
+      continue;
+    }
 
     switch (action) {
       case 'add_env':
         await addEnvironmentMenu(rl);
         // Reload config in case environment changed
         { const r = loadEnvConfig(); if (!r.error) ({ envConfig, namespace, currentEnv } = r); }
+        refreshHelmWarning();
         break;
       case 'bundle_builder':
         await bundleBuilderMenu(rl, namespace);
@@ -1459,6 +1887,13 @@ async function startCli() {
         break;
       case 'playground':
         await playgroundMenu(rl, envConfig, namespace);
+        break;
+      case 'install_sambastack':
+        await installSambaStackMenu(rl, namespace);
+        refreshHelmWarning();
+        break;
+      case 'view_docs':
+        await viewDocumentationMenu(rl);
         break;
       case 'exit':
         exitLoop = true;
@@ -1473,6 +1908,8 @@ async function startCli() {
 // ─── runValidationChecks() ───────────────────────────────────────────────────
 
 async function runValidationChecks(envName: string, envConfig: any, namespace: string) {
+  const nsErr = validateResourceName(namespace);   // spliced into helm/kubectl commands below
+  if (nsErr) { errorMsg(`Invalid namespace "${namespace}" for "${envName}": ${nsErr}`); return; }
   sectionHeader('Validate Setup & Environment', '🧭');
 
   process.stdout.write('\n');
@@ -1483,6 +1920,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
   process.stdout.write('\n');
 
   let allPassed = true;
+  let warnCount = 0;
 
   // 1. Kubeconfig
   spinner.start('Checking kubeconfig...');
@@ -1533,7 +1971,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     const releases: any[] = JSON.parse(raw);
     const release = releases.find((r: any) => typeof r.chart === 'string' && r.chart.toLowerCase().startsWith('sambastack'));
     if (!release) {
-      spinner.warn('SambaStack release not found in any namespace');
+      warnCount++; spinner.warn('SambaStack release not found in any namespace');
     } else {
       const chartVer = release.chart.replace(/^sambastack-/i, '');
       if (minVer && compareVersions(chartVer, minVer) < 0) {
@@ -1545,7 +1983,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       }
     }
   } catch (e: any) {
-    spinner.warn(`SambaStack version check skipped: ${e.message.split('\n')[0]}`);
+    warnCount++; spinner.warn(`SambaStack version check skipped: ${e.message.split('\n')[0]}`);
   }
 
   // 3. Kubernetes
@@ -1574,7 +2012,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       allPassed = false;
     }
   } else {
-    spinner.warn('Using default namespace');
+    warnCount++; spinner.warn('Using default namespace');
   }
 
   // 5. API
@@ -1590,7 +2028,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     checkRow(chalk.red('✖'), 'API Key', 'not configured');
     allPassed = false;
   } else {
-    const masked = envConfig.apiKey.slice(0, 4) + '••••••••' + envConfig.apiKey.slice(-4);
+    const masked = maskApiKey(envConfig.apiKey);
     infoRow('API Key', masked);
   }
 
@@ -1600,7 +2038,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     spinner.start('Testing /v1/models...');
     let availableModels: string[] = [];
     try {
-      const res   = execSync(`curl -sk -w "\\n%{http_code}" "${baseUrl}v1/models" -H "Authorization: Bearer ${envConfig.apiKey}"`, { encoding: 'utf-8', timeout: 15000 });
+      const res   = await curlLike(`${baseUrl}v1/models`, { apiKey: envConfig.apiKey, timeoutMs: 15000 });
       const parts = res.trimEnd().split('\n');
       const code  = safeParseInt(parts.pop());
       const body  = parts.join('\n');
@@ -1620,7 +2058,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       } else if (code === 404) {
         spinner.succeed('API reachable  (no model list endpoint)');
       } else {
-        spinner.warn(`/v1/models → ${code}`);
+        warnCount++; spinner.warn(`/v1/models → ${code}`);
       }
     } catch (e: any) {
       spinner.fail(`Cannot reach API: ${e.message.split('\n')[0]}`);
@@ -1633,12 +2071,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       try {
         const testModel   = availableModels[0];
         const chatPayload = JSON.stringify({ model: testModel, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1, stream: false });
-        const res = execSync(
-          `curl -sk -w "\\n%{http_code}" -X POST "${baseUrl}v1/chat/completions" ` +
-          `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-          `-d '${chatPayload.replace(/'/g, "'\\''")}'`,
-          { encoding: 'utf-8', timeout: 30000 }
-        );
+        const res = await curlLike(`${baseUrl}v1/chat/completions`, { method: 'POST', apiKey: envConfig.apiKey, body: chatPayload, timeoutMs: 30000 });
         const parts = res.trimEnd().split('\n');
         const code  = safeParseInt(parts.pop());
 
@@ -1646,13 +2079,16 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
           spinner.succeed(`API key valid  ${chalk.reset(`(tested with ${testModel})`)}`);
         } else if (code === 401 || code === 403) {
           // Only fail if /v1/models also didn't confirm auth — here it did, so just warn
-          spinner.warn(`Chat endpoint → ${code}  (model may not be deployed yet)`);
+          warnCount++;
+          spinner.warn(`Chat endpoint → ${code}  (key rejected, or model not deployed — /v1/models is public and doesn't verify the key)`);
         } else if (code === 404 || code === 400 || code === 422 || code === 503) {
           spinner.succeed(`API key valid  ${chalk.reset('(auth passed, model not deployed)')}`);
         } else {
+          warnCount++;
           spinner.warn(`Chat endpoint → ${code}`);
         }
       } catch (e: any) {
+        warnCount++;
         spinner.warn(`Chat endpoint unreachable: ${e.message.split('\n')[0]}`);
       }
     }
@@ -1664,10 +2100,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
     infoRow('UI Domain', envConfig.uiDomain);
     spinner.start('Checking UI Domain...');
     try {
-      const code = safeParseInt(execSync(
-        `curl -sk -o /dev/null -w "%{http_code}" --head "${envConfig.uiDomain}"`,
-        { encoding: 'utf-8', timeout: 10000 }
-      ).trim());
+      const code = safeParseInt((await curlLike(envConfig.uiDomain, { method: 'HEAD', timeoutMs: 10000 })).trim().split('\n').pop());
       if (code === 0) {
         spinner.fail('UI Domain unreachable — no response');
         allPassed = false;
@@ -1683,7 +2116,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
   process.stdout.write('\n');
   hr();
   if (allPassed) {
-    successMsg('All checks passed!');
+    successMsg(warnCount > 0 ? `All checks passed, with ${warnCount} warning${warnCount === 1 ? '' : 's'} (see ⚠ above)` : 'All checks passed!');
     // Regenerate checkpoint mapping, model profiles and PEF configs now that
     // cluster connectivity is confirmed.
     try {
@@ -1724,11 +2157,21 @@ function printProfileCard(profile: ModelProfile, siblings: ModelProfile[]) {
  * a model. Returns `null` when the model has no matching profile (Q4 guard)
  * or the user backs out.
  */
+/**
+ * A profile uses prompt caching when its `spec.features` include `prompt_caching`. Such profiles
+ * can only be deployed on their own (a single-model bundle), so they're hidden once the bundle
+ * already holds another model — mirrors the UI's per-tile disabling in ModelProfileRow.
+ */
+function hasPromptCaching(profile: ModelProfile): boolean {
+  return profile.spec.features?.includes('prompt_caching') ?? false;
+}
+
 async function selectArchAndProfile(
   rl: any,
   displayName: string,
   model: Model,
   modelProfiles: ModelProfilesCache,
+  blockPromptCaching = false,
 ): Promise<{ arch: string; profile: ModelProfile } | null> {
   const archsWithProfiles = getArchsWithProfiles(model.spec.checkpoints, modelProfiles);
   if (archsWithProfiles.length === 0) {
@@ -1751,7 +2194,16 @@ async function selectArchAndProfile(
     arch = chosen;
   }
 
-  const profiles = getProfilesForArch(arch, modelProfiles);
+  const allProfiles = getProfilesForArch(arch, modelProfiles);
+  const profiles = blockPromptCaching ? allProfiles.filter((p) => !hasPromptCaching(p)) : allProfiles;
+  if (profiles.length === 0) {
+    warnMsg(`${displayName} only has prompt-caching profiles — those can only be deployed as a single-model bundle. Remove the other selected models first.`);
+    return null;
+  }
+  if (blockPromptCaching && profiles.length < allProfiles.length) {
+    warnMsg(`${allProfiles.length - profiles.length} prompt-caching profile(s) hidden for ${displayName} — they can only be deployed as a single-model bundle.`);
+  }
+
   let profile: ModelProfile;
   if (profiles.length === 1) {
     profile = profiles[0];
@@ -1776,33 +2228,274 @@ async function selectArchAndProfile(
   return { arch, profile };
 }
 
-/** Step 3: optional bundle-level batching-config override, seeded from the profile's effective default. */
+// Batch sizes offered for a tier whose profile declares '*' (all supported) — mirrors the UI's
+// DEFAULT_BATCH_COLUMNS fallback in BatchingOverrideEditor.
+const DEFAULT_BATCH_COLUMNS = [1, 2, 4, 8, 16, 32, 64];
+
+/**
+ * One-page batching editor, like the UI's grid: a row per context length, a column per batch size.
+ * Arrows move, Space toggles a cell, `r` toggles the row, `c` the column, `a` everything, Enter confirms.
+ * Cells a tier does not support (`allowed`) are shown as "·" and cannot be toggled.
+ * Returns the checked sizes per tier, or null if cancelled.
+ */
+export async function batchGrid(
+  title: string,
+  tiers: string[],
+  columns: number[],
+  allowed: Record<string, number[]>,
+  initial: Record<string, number[]>
+): Promise<Record<string, number[]> | null> {
+  const on = (t: string, c: number) => allowed[t].includes(c);
+  const checked = new Set<string>();
+  tiers.forEach((t) => columns.forEach((c) => { if (on(t, c) && initial[t]?.includes(c)) checked.add(`${t}|${c}`); }));
+  const toggle = (cells: [string, number][]) => {
+    const live = cells.filter(([t, c]) => on(t, c));
+    const all = live.every(([t, c]) => checked.has(`${t}|${c}`));
+    live.forEach(([t, c]) => (all ? checked.delete(`${t}|${c}`) : checked.add(`${t}|${c}`)));
+  };
+
+  process.stdout.write(`\n${chalk.hex(BRAND).bold('  ›')} ${chalk.bold(title)}\n`);
+  process.stdout.write(chalk.reset('  ↑↓←→ move   Space toggle   r row   c column   a all   Enter confirm   Esc cancel\n\n'));
+
+  let row = 0;
+  let col = Math.max(0, columns.findIndex((c) => on(tiers[0], c)));
+  const isRaw = process.stdin.isRaw;
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  ensureKeypressEvents();
+
+  const labelW = Math.max(7, ...tiers.map((t) => t.length)) + 2;
+  let drawn = 0;
+  const draw = () => {
+    const lines = [chalk.reset('  ' + 'context'.padEnd(labelW) + columns.map((c) => String(c).padStart(4)).join(' '))];
+    tiers.forEach((t, ri) => {
+      const cells = columns.map((c, ci) => {
+        const active = ri === row && ci === col;
+        const mark = !on(t, c) ? chalk.reset('  · ') : checked.has(`${t}|${c}`) ? chalk.green('  ◉ ') : chalk.reset('  ○ ');
+        return active ? chalk.bgHex(BRAND).black(mark) : mark;
+      });
+      lines.push(`  ${(ri === row ? chalk.hex(BRAND).bold : chalk.reset)(t.padEnd(labelW))}${cells.join(' ')}`);
+    });
+    drawn = lines.length;
+    lines.forEach((l) => process.stdout.write(l + '\n'));
+  };
+  const redraw = () => { readlineModule.moveCursor(process.stdout, 0, -drawn); readlineModule.clearScreenDown(process.stdout); draw(); };
+  const finish = () => { readlineModule.moveCursor(process.stdout, 0, -(drawn + 4)); readlineModule.clearScreenDown(process.stdout); process.stdin.setRawMode(isRaw); };
+
+  draw();
+  return new Promise((resolve) => {
+    const onKey = (_s: any, key: any) => {
+      if (!key) return;
+      if (key.name === 'up') row = (row - 1 + tiers.length) % tiers.length;
+      else if (key.name === 'down') row = (row + 1) % tiers.length;
+      else if (key.name === 'left') col = (col - 1 + columns.length) % columns.length;
+      else if (key.name === 'right') col = (col + 1) % columns.length;
+      else if (key.name === 'space') toggle([[tiers[row], columns[col]]]);
+      else if (key.name === 'r') toggle(columns.map((c) => [tiers[row], c] as [string, number]));
+      else if (key.name === 'c') toggle(tiers.map((t) => [t, columns[col]] as [string, number]));
+      else if (key.name === 'a') toggle(tiers.flatMap((t) => columns.map((c) => [t, c] as [string, number])));
+      else if (key.name === 'return' || key.name === 'escape' || key.name === 'q' || (key.ctrl && key.name === 'c')) {
+        process.stdin.removeListener('keypress', onKey);
+        finish();
+        if (key.name !== 'return') return resolve(null);
+        const out: Record<string, number[]> = {};
+        tiers.forEach((t) => { out[t] = columns.filter((c) => checked.has(`${t}|${c}`)); });
+        return resolve(out);
+      }
+      redraw();
+    };
+    process.stdin.on('keypress', onKey);
+  });
+}
+
+/** Batch sizes a tier offers in `cfg` (`'*'`/unset means the default columns). */
+function batchSizesOf(cfg: BatchingConfig, tier: string): number[] {
+  const bs = cfg[tier]?.batch_sizes;
+  return bs === '*' || bs === undefined ? [...DEFAULT_BATCH_COLUMNS] : [...bs].sort((x, y) => x - y);
+}
+
+/**
+ * What the override grid starts with: only the recommended sizes are checked. A context length that is in
+ * `all` but not in `recommended` starts EMPTY, so confirming the grid unchanged never switches on a tier the user didn't pick.
+ */
+export function initialBatchChecks(universe: BatchingConfig, effective: BatchingConfig): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const tier of Object.keys(universe)) out[tier] = effective[tier] ? batchSizesOf(effective, tier) : [];
+  return out;
+}
+
+/**
+ * The override written into the bundle from what the user ticked. A tier with nothing ticked is left out;
+ * `'*'` (resolved against the universe by the generator) is used only when the whole universe is ticked.
+ */
+export function batchOverrideFromPicked(allowed: Record<string, number[]>, picked: Record<string, number[]>): BatchingConfig {
+  const override: BatchingConfig = {};
+  for (const tier of Object.keys(allowed)) {
+    const chosen = picked[tier] ?? [];
+    if (chosen.length === 0) continue;
+    override[tier] = { batch_sizes: allowed[tier].every((n) => chosen.includes(n)) ? '*' : chosen };
+  }
+  return override;
+}
+
+/**
+ * Step 3: optional bundle-level batching-config override, seeded from the profile's effective
+ * default. Mirrors the UI's BatchingOverrideEditor: per context-length tier, pick which of the
+ * profile's supported batch sizes stay enabled (all pre-checked); collapses back to '*' when
+ * every supported size is still checked.
+ */
 async function promptBatchingOverride(rl: any, profile: ModelProfile): Promise<BatchingConfig | undefined> {
   const effective = getEffectiveBatchingConfig(profile);
-  const tiers = Object.keys(effective);
+  const universe = getBatchingConfigUniverse(profile);
+  const tiers = Object.keys(universe).sort((a, b) => parseTierKey(b) - parseTierKey(a));
   if (tiers.length === 0) return undefined;
 
   const wantsOverride = await confirm(rl, "Override this profile's batching config for the bundle?", false);
   if (!wantsOverride) return undefined;
 
-  const override: BatchingConfig = {};
-  for (const tier of tiers) {
-    const current = effective[tier].batch_sizes;
-    const defaultStr = Array.isArray(current) ? current.join(',') : current;
-    const raw = await input(rl, `Batch sizes for tier ${tier} (comma-separated, or * for all)`, String(defaultStr));
-    const effectiveRaw = raw === ESC ? String(defaultStr) : (raw || String(defaultStr));
-    override[tier] = { batch_sizes: parseBatchSizesInput(effectiveRaw) };
+  const allowed: Record<string, number[]> = {};
+  for (const tier of tiers) allowed[tier] = batchSizesOf(universe, tier);
+  const initial = initialBatchChecks(universe, effective);
+  const columns = Array.from(new Set(tiers.flatMap((t) => allowed[t]))).sort((a, b) => a - b);
+
+  const picked = await batchGrid("Batching config  (context length × batch size)", tiers, columns, allowed, initial);
+  if (!picked) return undefined; // cancelled → keep the profile's own config
+  return batchOverrideFromPicked(allowed, picked);
+}
+
+/**
+ * Advanced Options, asked ONCE per bundle (not per model): which models stay resident in HBM
+ * (`swappable: false`) instead of being swappable out for other models in the bundle when required
+ * (`swappable: true`, the default — only emitted into the YAML when false, per generateModelBundleYaml).
+ * Answering No (the default) leaves every model swappable, so the common path has no extra prompts.
+ */
+async function promptAdvancedOptions(rl: any, selections: ModelBundleSelection[]): Promise<void> {
+  const current = new Set(selections.map((s, i) => (s.swappable === false ? i : -1)).filter((i) => i >= 0));
+  const wants = await confirm(rl, 'Advanced options — keep some models resident in HBM (non-swappable)?', current.size > 0);
+  if (!wants) return;
+  const choices: Choice[] = selections.map((s, i) => ({ name: `${s.model.spec.name}${s.isDraftFor ? '  (draft)' : ''}`, value: i }));
+  const picked = new Set<number>((await multiSelect(rl, 'Keep resident (non-swappable):', choices, current)) as number[]);
+  selections.forEach((s, i) => { s.swappable = !picked.has(i); });
+}
+
+// ─── In-progress builder session persistence ──────────────────────────────────
+// Mirrors the UI's /api/model-selection-state: a serializable snapshot of the
+// in-progress bundle, saved as models are added and offered back on the next
+// visit until the user explicitly discards it (never auto-cleared on success).
+
+interface SerializedSelection {
+  crname: string;
+  arch: string;
+  profileName: string;
+  batchingConfigOverride?: BatchingConfig;
+  swappable?: boolean;
+  isDraftFor?: string;
+}
+
+interface SavedSelectionSession {
+  selections: SerializedSelection[];
+  bundleName?: string;
+  savedAt?: string;
+  cluster?: { kubeconfig: string; namespace: string };
+}
+
+function currentClusterStamp(): { kubeconfig: string; namespace: string } {
+  try {
+    const config = requireJson(CONFIG_PATH);
+    const name = config.currentKubeconfig ?? '';
+    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || 'default' };
+  } catch {
+    return { kubeconfig: '', namespace: '' };
   }
-  return override;
+}
+
+function saveSelectionSession(selections: ModelBundleSelection[], bundleName?: string): void {
+  try {
+    const dir = path.dirname(SESSION_STATE_PATH);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const state: SavedSelectionSession = {
+      selections: selections.map((s) => ({
+        crname: s.model.metadata.name,
+        arch: s.arch,
+        profileName: s.profile.metadata.name,
+        batchingConfigOverride: s.batchingConfigOverride,
+        swappable: s.swappable,
+        isDraftFor: s.isDraftFor,
+      })),
+      bundleName,
+      savedAt: new Date().toISOString(),
+      cluster: currentClusterStamp(),
+    };
+    writeFileSync(SESSION_STATE_PATH, JSON.stringify(state, null, 2));
+  } catch {
+    // best-effort — a failed save shouldn't interrupt the builder
+  }
+}
+
+function loadSelectionSession(): SavedSelectionSession | null {
+  if (!existsSync(SESSION_STATE_PATH)) return null;
+  try {
+    const state = JSON.parse(readFileSync(SESSION_STATE_PATH, 'utf-8'));
+    return state?.selections?.length ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearSelectionSession(): void {
+  try { if (existsSync(SESSION_STATE_PATH)) rmSync(SESSION_STATE_PATH, { force: true }); } catch {}
+}
+
+/** Re-resolves a saved session's crname/arch/profileName references against the current caches. */
+function resolveSelectionSession(
+  session: SavedSelectionSession,
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache
+): ModelBundleSelection[] | null {
+  const selections: ModelBundleSelection[] = [];
+  for (const s of session.selections) {
+    const displayName = crNameToDisplayName(checkpointMapping, s.crname);
+    if (!displayName) return null;
+    const model = toModelCR(displayName, checkpointMapping[displayName]);
+    const profile = getProfilesForArch(s.arch, modelProfiles).find((p) => p.metadata.name === s.profileName);
+    if (!profile) return null;
+    selections.push({
+      model,
+      arch: s.arch,
+      profile,
+      batchingConfigOverride: s.batchingConfigOverride,
+      swappable: s.swappable,
+      isDraftFor: s.isDraftFor,
+    });
+  }
+  return selections;
+}
+
+/**
+ * Models offered as a draft: they need a matching profile, and must not already be in the bundle
+ * (as a top-level model or another model's draft), or the bundle would contain the same model twice.
+ */
+export function draftCandidates(
+  displayNames: string[],
+  checkpointMapping: CheckpointMappingV3,
+  modelProfiles: ModelProfilesCache,
+  selections: ModelBundleSelection[]
+): string[] {
+  const inBundle = new Set(selections.map((s) => s.model.metadata.name));
+  return displayNames.filter((n) => {
+    const entry = checkpointMapping[n];
+    return !inBundle.has(entry.resource_name) && getArchsWithProfiles(entry.checkpoints, modelProfiles).length > 0;
+  });
 }
 
 /** Steps 1–3 combined: interactively builds the full `ModelBundleSelection[]` list, including spec-decoding drafts. */
 async function collectModelSelections(
   rl: any,
   checkpointMapping: CheckpointMappingV3,
-  modelProfiles: ModelProfilesCache
+  modelProfiles: ModelProfilesCache,
+  initial: ModelBundleSelection[] = []   // pre-populated selections, e.g. when going back after a failed validation
 ): Promise<ModelBundleSelection[]> {
-  const selections: ModelBundleSelection[] = [];
+  const selections: ModelBundleSelection[] = [...initial];
   const displayNames = Object.keys(checkpointMapping).sort();
 
   let adding = true;
@@ -1834,7 +2527,7 @@ async function collectModelSelections(
 
     // Re-selecting an already-added model removes it (and its draft, if any)
     // so the user can redo the flow — mirrors the old "edit by re-selecting" UX.
-    const existingIdx = selections.findIndex((s) => s.model.metadata.name === entry.resource_name && !s.isDraftFor);
+    const existingIdx = selections.findIndex((s) => s.model.metadata.name === entry.resource_name); // incl. drafts, so no duplicate modelConfigs
     if (existingIdx >= 0) {
       const removedCrname = selections[existingIdx].model.metadata.name;
       for (let i = selections.length - 1; i >= 0; i--) {
@@ -1842,18 +2535,25 @@ async function collectModelSelections(
           selections.splice(i, 1);
         }
       }
+      if (selections.length > 0) saveSelectionSession(selections); else clearSelectionSession();   // keep the saved session in step
       successMsg(`Removed ${chosenName} — re-select to add it back`);
       continue;
     }
 
-    const picked = await selectArchAndProfile(rl, chosenName, model, modelProfiles);
+    // Prompt caching is single-model only (same rule as the UI): an already-selected prompt_caching model blocks adding more.
+    if (selections.some((s) => hasPromptCaching(s.profile))) {
+      warnMsg('A selected profile uses prompt caching, which can only be deployed as a single-model bundle. Remove it (re-select it) before adding another model.');
+      continue;
+    }
+
+    const picked = await selectArchAndProfile(rl, chosenName, model, modelProfiles, selections.length > 0);
     if (!picked) continue;
     const { arch, profile } = picked;
 
     const batchingConfigOverride = await promptBatchingOverride(rl, profile);
-
-    selections.push({ model, arch, profile, batchingConfigOverride });
+    selections.push({ model, arch, profile, batchingConfigOverride, swappable: true });
     successMsg(`Added ${chosenName}  (${getDisplayName(profile, getProfilesForArch(arch, modelProfiles))})`);
+    saveSelectionSession(selections);
 
     // Spec-decoding draft model (Q12: experts always omitted; drives specDecodingPairs)
     if (isSpecDecodingProfile(profile)) {
@@ -1862,14 +2562,15 @@ async function collectModelSelections(
 
       const draftChoices: Choice[] = [
         { name: chalk.reset('↩  Skip (no draft model)'), value: 'skip' },
-        ...displayNames.filter((n) => n !== chosenName).map((n) => ({ name: n, value: n })),
+        // like the UI, only models that have a matching profile can be drafts, and not ones already in the bundle
+        ...draftCandidates(displayNames, checkpointMapping, modelProfiles, selections).map((n) => ({ name: n, value: n })),
         { name: chalk.reset('← Back'), value: 'back' },
       ];
       const draftName = await select(rl, `Draft model for ${chosenName}:`, draftChoices);
       if (draftName && draftName !== 'skip' && draftName !== 'back') {
         const draftEntry = checkpointMapping[draftName];
         const draftModel = toModelCR(draftName, draftEntry);
-        const draftPicked = await selectArchAndProfile(rl, draftName, draftModel, modelProfiles);
+        const draftPicked = await selectArchAndProfile(rl, draftName, draftModel, modelProfiles, true);
         if (draftPicked) {
           const draftOverride = await promptBatchingOverride(rl, draftPicked.profile);
           selections.push({
@@ -1877,14 +2578,21 @@ async function collectModelSelections(
             arch: draftPicked.arch,
             profile: draftPicked.profile,
             batchingConfigOverride: draftOverride,
+            swappable: true,
             isDraftFor: entry.resource_name,
           });
           successMsg(`Auto-added draft model ${draftName} for ${chosenName}`);
+          saveSelectionSession(selections);
         } else {
           warnMsg(`Draft model ${draftName} has no matching profile — skipped`);
         }
       }
     }
+  }
+
+  if (selections.length > 0) {
+    await promptAdvancedOptions(rl, selections);   // one question for the whole bundle, default No
+    saveSelectionSession(selections);
   }
 
   return selections;
@@ -1905,6 +2613,31 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     return;
   }
 
+  // ── Restore a previously in-progress session, if any ────────────────────────
+  // Mirrors the UI's /api/model-selection-state: saved as models are added and
+  // offered on every entry until it is discarded, the bundle validates, or the bundle is saved to a file / skipped.
+  let restoredSelections: ModelBundleSelection[] | null = null;
+  const savedSession = loadSelectionSession();
+  if (savedSession) {
+    const savedAtStr = savedSession.savedAt ? new Date(savedSession.savedAt).toLocaleString() : '';
+    const clusterStr = savedSession.cluster?.kubeconfig ? `built against ${savedSession.cluster.kubeconfig}/${savedSession.cluster.namespace}` : '';
+    warnMsg(`A previous session is saved${savedSession.bundleName ? ` for bundle "${savedSession.bundleName}"` : ''} — ${[`${savedSession.selections.length} model(s)`, clusterStr, savedAtStr ? `saved ${savedAtStr}` : ''].filter(Boolean).join(', ')}.`);
+    const sessionChoice = await select(rl, 'Restore this session?', [
+      { name: chalk.green('↩  Restore'),        value: 'restore' },
+      { name: chalk.reset('Start fresh (discard it)'), value: 'discard' },
+      { name: chalk.reset('Ignore for now'),    value: 'ignore' },
+    ]);
+    if (sessionChoice === 'restore') {
+      restoredSelections = resolveSelectionSession(savedSession, checkpointMapping, modelProfiles);
+      if (!restoredSelections || restoredSelections.length === 0) {
+        errorMsg('Could not restore the saved session against the current caches — models or profiles referenced may no longer exist.');
+        restoredSelections = null;
+      }
+    } else if (sessionChoice === 'discard') {
+      clearSelectionSession();
+    }
+  }
+
   // ── Load saved bundle shortcut ──────────────────────────────────────────────
   const artifactsDir  = path.join(PROJECT_ROOT, 'saved_artifacts');
   const savedArtifacts = existsSync(artifactsDir)
@@ -1913,25 +2646,62 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
         .filter(f => readFileSync(path.join(artifactsDir, f), 'utf-8').includes('kind: ModelBundle'))
     : [];
 
-  if (savedArtifacts.length > 0) {
+  if (!restoredSelections && savedArtifacts.length > 0) {
     const loadChoice = await select(rl, 'Model Selection — start from:', [
       { name: chalk.green.bold('🆕  Build new bundle'),       value: 'new'  },
       { name: '📂  Load from saved_artifacts/',               value: 'load' },
+      { name: '☁️   Load from cluster (Remote Environment)',   value: 'load_remote' },
       { name: chalk.red('✕  Cancel'),                         value: 'cancel' },
     ]);
     if (!loadChoice || loadChoice === 'cancel') return;
 
-    if (loadChoice === 'load') {
-      const fileChoices: Choice[] = [
-        ...savedArtifacts.map(f => ({ name: f, value: f })),
-        { name: chalk.reset('← Back'), value: 'back' },
-      ];
-      const chosenFile = await select(rl, 'Select saved bundle:', fileChoices);
-      if (!chosenFile || chosenFile === 'back') return;
+    if (loadChoice === 'load' || loadChoice === 'load_remote') {
+      let loadedYaml: string;
+      let loadedBName: string;
 
-      const loadedYaml  = readFileSync(path.join(artifactsDir, chosenFile), 'utf-8');
-      const loadedBName = extractBundleName(loadedYaml) || chosenFile.replace(/\.ya?ml$/i, '');
-      yamlBox(`Loaded: ${chosenFile}`, loadedYaml);
+      if (loadChoice === 'load') {
+        const fileChoices: Choice[] = [
+          ...savedArtifacts.map(f => ({ name: f, value: f })),
+          { name: chalk.reset('← Back'), value: 'back' },
+        ];
+        const chosenFile = await select(rl, 'Select saved bundle:', fileChoices);
+        if (!chosenFile || chosenFile === 'back') return;
+
+        loadedYaml  = readFileSync(path.join(artifactsDir, chosenFile), 'utf-8');
+        loadedBName = extractBundleName(loadedYaml) || chosenFile.replace(/\.ya?ml$/i, '');
+        yamlBox(`Loaded: ${chosenFile}`, loadedYaml);
+      } else {
+        let bundleNames: string[] = [];
+        try {
+          const list = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai -n ${namespace} -o json`, { encoding: 'utf-8' }));
+          bundleNames = (list.items || []).map((it: any) => it.metadata.name);
+        } catch (e: any) {
+          errorMsg(`Failed to list deployed bundles: ${kubectlErrorDetail(e)}`);
+          return;
+        }
+        if (bundleNames.length === 0) {
+          warnMsg('No deployed ModelBundles found in the current namespace.');
+          return;
+        }
+        const bundleChoices: Choice[] = [
+          ...bundleNames.map((n) => ({ name: n, value: n })),
+          { name: chalk.reset('← Back'), value: 'back' },
+        ];
+        const chosenBundle = await select(rl, 'Select deployed bundle:', bundleChoices);
+        if (!chosenBundle || chosenBundle === 'back') return;
+
+        try {
+          const rawYaml = execFileSync('kubectl', ['-n', namespace, 'get', 'modelbundle.sambanova.ai', chosenBundle, '-o', 'yaml'], { encoding: 'utf-8' });
+          // Strip everything the API server manages before treating this as an editable bundle definition,
+          // so renaming and re-applying it isn't rejected (resourceVersion/uid) or in conflict.
+          loadedYaml  = yaml.dump(stripServerManagedFields(yaml.load(rawYaml)));
+          loadedBName = extractBundleName(loadedYaml) || chosenBundle;
+          yamlBox(`Loaded from cluster: ${chosenBundle}`, loadedYaml);
+        } catch (e: any) {
+          errorMsg(`Failed to load deployed bundle "${chosenBundle}": ${kubectlErrorDetail(e)}`);
+          return;
+        }
+      }
 
       let finalYaml    = loadedYaml;
       let activeBundleName  = loadedBName;
@@ -1957,11 +2727,11 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
             execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
             try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
             finalYaml = readFileSync(tmp, 'utf-8');
-            try { execSync(`rm "${tmp}"`); } catch {}
+            try { rmSync(tmp, { force: true }); } catch {}
             yamlBox('Updated YAML', finalYaml);
           } catch (e: any) {
             errorMsg(`Editor error: ${e.message}`);
-            try { execSync(`rm "${tmp}"`); } catch {}
+            try { rmSync(tmp, { force: true }); } catch {}
           }
         } else if (act === 'save') {
           const saveDir = path.join(PROJECT_ROOT, 'saved_artifacts');
@@ -1992,8 +2762,10 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
   }
   // ────────────────────────────────────────────────────────────────────────────
 
+  let carriedSelections: ModelBundleSelection[] = [];   // selections handed back by "Go back" after a failed validation
   builderLoop: while (true) {   // outer loop — allows "Go Back" after validation failure to re-enter model selection
-    const selections = await collectModelSelections(rl, checkpointMapping, modelProfiles);
+    const selections = restoredSelections ?? await collectModelSelections(rl, checkpointMapping, modelProfiles, carriedSelections);
+    restoredSelections = null; // only consume the restored session on the first pass
     if (selections.length === 0) return;
 
     // Summary
@@ -2008,7 +2780,9 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     process.stdout.write('\n');
     hr();
 
-    const previewYaml = generateModelBundleYaml('my-bundle', selections);
+    const preview = generateModelBundle('my-bundle', withCheckpointOverrides(selections, readCheckpointOverrides()));
+    const previewYaml = preview.yaml;
+    warnDropped(preview.dropped);
     let workingYaml = previewYaml;
     yamlBox('YAML Preview  (my-bundle = placeholder)', workingYaml);
 
@@ -2022,7 +2796,7 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     while (true) {
       const nameInput = await input(rl, chalk.yellow.bold('Review the bundle and enter a name to continue, or press e to edit  Esc to previous menu'), suggestedName, '', { e: EDIT });
 
-      if (!nameInput || nameInput === ESC) continue builderLoop;
+      if (!nameInput || nameInput === ESC) { carriedSelections = selections; continue builderLoop; }   // Esc keeps the selections, as the prompt says
 
       if (nameInput === EDIT) {
         const tmp    = path.join(PROJECT_ROOT, `.tmp_bundle_${Date.now()}.yaml`);
@@ -2034,30 +2808,34 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
           execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
           try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           workingYaml = readFileSync(tmp, 'utf-8');
-          try { execSync(`rm "${tmp}"`); } catch {}
+          try { rmSync(tmp, { force: true }); } catch {}
           suggestedName = extractBundleName(workingYaml) || suggestedName;
           yamlBox('Updated YAML', workingYaml);
         } catch (e: any) {
           errorMsg(`Editor error: ${e.message}`);
-          try { execSync(`rm "${tmp}"`); } catch {}
+          try { rmSync(tmp, { force: true }); } catch {}
         }
         continue;
       }
 
-      if (!/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/.test(nameInput)) {
-        errorMsg('Name must be lowercase letters, numbers and hyphens only, 2–63 chars, and start/end with a letter or digit. Please try again.');
+      const nameErr = validateResourceName(nameInput);
+      if (nameErr) {
+        errorMsg(`${nameErr} Please try again.`);
         continue;
       }
+      const lenWarn = bundleNameLengthWarning(nameInput);
+      if (lenWarn) warnMsg(lenWarn);
       bundleName = nameInput;
       break;
     }
+    saveSelectionSession(selections, bundleName);
 
     // Build final YAML — if user edited the preview, substitute the placeholder name; otherwise rebuild cleanly
     let finalYaml = '';
     if (workingYaml !== previewYaml) {
       finalYaml = workingYaml.replace(/my-bundle/g, bundleName);
     } else {
-      finalYaml = generateModelBundleYaml(bundleName, selections);
+      finalYaml = generateModelBundle(bundleName, withCheckpointOverrides(selections, readCheckpointOverrides())).yaml;
     }
 
     yamlBox(`Final YAML  (${bundleName})`, finalYaml);
@@ -2082,13 +2860,18 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
         const fnameInput = await input(rl, 'Filename', shortDefault);
         if (fnameInput && fnameInput !== ESC) {
           const fname = path.isAbsolute(fnameInput) ? fnameInput : path.join(PROJECT_ROOT, fnameInput);
-          try { writeFileSync(fname, finalYaml); successMsg(`Saved to ${fnameInput}`); } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
+          try {
+            writeFileSync(fname, finalYaml);
+            successMsg(`Saved to ${fnameInput}`);
+            clearSelectionSession();   // the bundle is on disk now (Load from saved_artifacts), so don't also offer to restore the selections
+          } catch (e: any) { errorMsg(`Save failed: ${e.message}`); }
         }
       } else if (act === 'validate') {
         activeBundleName = extractBundleName(finalYaml) || bundleName;
         shouldApply = true;
         break;
       } else if (act === 'skip') {
+        clearSelectionSession();   // the user is done with this bundle; don't offer to restore it on the next visit
         process.stdout.write('\n');
         process.stdout.write(chalk.reset(`  ModelBundle is ready.\n`));
         process.stdout.write(chalk.hex(BRAND).bold(`  → Go to  🚀 Model Deployment  from the main menu to deploy it.\n\n`));
@@ -2099,7 +2882,8 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
     if (!shouldApply) break builderLoop;
 
     const result = await applyModelBundle(rl, namespace, finalYaml, activeBundleName);
-    if (result === 'restart') continue builderLoop;
+    if (result === 'restart') { carriedSelections = selections; continue builderLoop; }   // keep what was selected
+    if (result === 'validated') clearSelectionSession();   // the work is done — don't offer to restore it on the next visit
     break builderLoop;
   }  // end builderLoop
 
@@ -2111,17 +2895,20 @@ async function bundleBuilderMenu(rl: any, namespace: string) {
 /**
  * Applies a `ModelBundle` YAML document to the cluster and polls
  * `status.conditions` (Q5 — `{ type: Valid, status, reason, message }`) until
- * it resolves. Returns `'restart'` when the user chooses to go back to
- * Model Selection after a validation failure (so the caller can re-loop).
+ * it resolves. Returns `'validated'` when validation succeeded (the caller clears the
+ * saved session), and `'restart'` when the user chooses to go back to Model Selection
+ * after a validation failure (so the caller can re-loop with the same selections).
  */
-async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'done' | 'restart'> {
+async function applyModelBundle(rl: any, namespace: string, finalYaml: string, bundleName: string): Promise<'validated' | 'done' | 'restart'> {
+  const nameErr = validateResourceName(bundleName);   // the name may come from a loaded / edited YAML file
+  if (nameErr) { errorMsg(`Invalid bundle name "${bundleName}": ${nameErr} Not applying.`); return 'done'; }
   const tempPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
   let activeBundleName = bundleName;
   try {
     writeFileSync(tempPath, finalYaml);
     spinner.start('Applying bundle to cluster...');
     await tick();
-    const applyOut = execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const applyOut = execSync(`kubectl apply -f "${tempPath}" -n ${namespace}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     spinner.succeed('Bundle applied — polling for validation status...');
     if (applyOut?.trim()) {
       process.stdout.write(chalk.reset('\nkubectl apply output:\n'));
@@ -2158,10 +2945,10 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
       const spin       = chalk.magenta(spinFrames[spinIdx++ % spinFrames.length]);
 
       try {
-        const st    = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+        const st    = JSON.parse(execFileSync('kubectl', ['get', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace, '-o', 'json'], { encoding: 'utf-8' }));
         const conds = st.status?.conditions || [];
         const phase = st.status?.phase || 'Pending';
-        const outcome = readValidCondition(conds);
+        const outcome = bundleValidationOutcome(st);
 
         if (conds.length > 0) {
           const latest = conds[conds.length - 1];
@@ -2170,10 +2957,12 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
           if (outcome === 'succeeded') {
             process.stdout.write('\n');
             successMsg('Bundle Validation Succeeded!');
+            printMemoryUtilization(st.status?.legalizerInfo);
             validated = true; break;
           } else if (outcome === 'failed') {
             process.stdout.write('\n');
-            printValidationErrors(conds);
+            printValidationErrors(conds, st.status?.legalizerInfo);
+            printMemoryUtilization(st.status?.legalizerInfo);
             validated = true; validationFailed = true; break;
           }
         } else {
@@ -2192,6 +2981,8 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
       warnMsg('Still validating — check status with:');
       process.stdout.write(chalk.reset(`  kubectl get modelbundle.sambanova.ai ${activeBundleName} -n ${namespace} -o yaml\n\n`));
     }
+
+    if (validated && !validationFailed) return 'validated';
 
     // ── Recovery menu after validation failure ────────────────────────────────
     if (validationFailed) {
@@ -2213,39 +3004,43 @@ async function applyModelBundle(rl: any, namespace: string, finalYaml: string, b
           execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
           try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
           finalYaml = readFileSync(tmp, 'utf-8');
-          try { execSync(`rm "${tmp}"`); } catch {}
-        } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { execSync(`rm "${tmp}"`); } catch {} }
+          try { rmSync(tmp, { force: true }); } catch {}
+        } catch (e: any) { errorMsg(`Editor error: ${e.message}`); try { rmSync(tmp, { force: true }); } catch {} }
 
-        activeBundleName = extractBundleName(finalYaml) || activeBundleName;
+        // The name now comes from text the user just edited: it must be a legal resource name before it is used anywhere.
+        const editedName = extractBundleName(finalYaml) || activeBundleName;
+        const editedNameErr = validateResourceName(editedName);
+        if (editedNameErr) { errorMsg(`Invalid bundle name "${editedName}": ${editedNameErr} Not re-applying.`); return 'done'; }
+        activeBundleName = editedName;
 
         const reApplyPath = path.join(PROJECT_ROOT, `temp_bundle_${Date.now()}.yaml`);
         try {
           writeFileSync(reApplyPath, finalYaml);
           spinner.start('Re-applying bundle...');
           await tick();
-          execSync(`kubectl apply -f ${reApplyPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          execSync(`kubectl apply -f "${reApplyPath}" -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
           spinner.succeed('Bundle re-applied — check 📈 Check Deployment Progress for status');
         } catch (e: any) { spinner.fail(`Re-apply failed: ${e.message.split('\n')[0]}`); }
-        finally { try { execSync(`rm "${reApplyPath}"`); } catch {} }
+        finally { try { rmSync(reApplyPath, { force: true }); } catch {} }
 
       } else if (fix === 'builder') {
-        try { execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] }); } catch {}
+        try { execFileSync('kubectl', ['delete', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace], { stdio: ['pipe','pipe','pipe'] }); } catch {}
         return 'restart';
 
       } else if (fix === 'delete') {
         spinner.start(`Deleting ${activeBundleName}...`);
         await tick();
         try {
-          execSync(`kubectl delete modelbundle.sambanova.ai ${activeBundleName} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+          execFileSync('kubectl', ['delete', 'modelbundle.sambanova.ai', activeBundleName, '-n', namespace], { stdio: ['pipe','pipe','pipe'] });
           spinner.succeed(`Deleted ${activeBundleName} from cluster`);
         } catch (e: any) { spinner.fail(`Delete failed: ${e.message.split('\n')[0]}`); }
       }
       return 'done';
     }
   } catch (e: any) {
-    errorMsg(`Error applying bundle: ${e.message}`);
+    errorMsg(`Error applying bundle: ${kubectlErrorDetail(e)}`);
   } finally {
-    try { execSync(`rm "${tempPath}"`); } catch {}
+    try { rmSync(tempPath, { force: true }); } catch {}
   }
 
   return 'done';
@@ -2264,17 +3059,17 @@ async function bundleDeploymentMenu(rl: any, namespace: string) {
       const items: any[] = list.items || [];
       if (items.length > 0) {
         process.stdout.write(chalk.reset.bold('  Current Deployments:\n'));
+        const statuses = deploymentStatuses(namespace, items.map((i: any) => i.metadata.name));
         items.forEach((i: any) => {
-          const phase = i.status?.phase || '';
-          const icon  = phase === 'Running' || phase === 'Deployed' ? chalk.green('●') : phase === 'Pending' ? chalk.yellow('◌') : chalk.red('○');
-          process.stdout.write(`  ${icon}  ${chalk.reset(i.metadata.name)}${phase ? `  ${chalk.reset(phase)}` : ''}\n`);
+          const st = statuses[i.metadata.name];
+          process.stdout.write(`  ${statusIcon(st)}  ${chalk.reset(i.metadata.name)}  ${chalk.reset(st)}\n`);
         });
         process.stdout.write('\n');
       } else {
         process.stdout.write(chalk.reset('  No deployments found.\n\n'));
       }
-    } catch {
-      process.stdout.write(chalk.reset('  (Could not fetch deployments)\n\n'));
+    } catch (e: any) {
+      process.stdout.write(chalk.reset(`  (Could not fetch deployments: ${String(e?.message ?? e).split('\n')[0]})\n\n`));
     }
 
     const action = await select(rl, 'Model Deployment:', [
@@ -2297,45 +3092,74 @@ async function bundleDeployAction(rl: any, namespace: string) {
 
     if (!list.items?.length) { warnMsg('No bundles found in this namespace.'); return; }
 
-    const bundles = list.items.map((i: any) => ({
-      name:  i.metadata.name,
-      valid: readValidCondition(i.status?.conditions || []) === 'succeeded',
-    }));
-
-    process.stdout.write('\n');
-    bundles.forEach((b: any) => {
-      const badge = b.valid ? chalk.green('✔ valid') : chalk.yellow('⚠ unvalidated');
-      process.stdout.write(`  ${chalk.reset('·')} ${chalk.reset(b.name)}  ${badge}\n`);
-    });
-    process.stdout.write('\n');
+    // Like the UI, only validated bundles can be deployed.
+    const bundles = list.items
+      .filter((i: any) => bundleValidationOutcome(i) === 'succeeded')
+      .map((i: any) => ({ name: i.metadata.name, modelConfigs: i.spec?.modelConfigs || [] }));
+    const hidden = list.items.length - bundles.length;
+    if (hidden > 0) warnMsg(`${hidden} unvalidated bundle(s) hidden — validate them first (Bundle Builder).`);
+    if (!bundles.length) { warnMsg('No validated bundles to deploy.'); return; }
 
     const choices: Choice[] = [
-      ...bundles.map((b: any) => ({
-        name: `${b.valid ? chalk.green('●') : chalk.yellow('○')} ${b.name}`,
-        value: b.name,
-        hint: b.valid ? 'validated' : 'unvalidated',
-      })),
+      ...bundles.map((b: any) => ({ name: `${chalk.green('●')} ${b.name}`, value: b.name, hint: 'validated' })),
       { name: chalk.reset('← Back'), value: 'back' },
     ];
 
     const bundleToDeploy = await select(rl, 'Select bundle to deploy:', choices);
     if (!bundleToDeploy || bundleToDeploy === 'back') return;
 
-    const { yaml, deploymentName: depName } = buildModelDeploymentYaml(bundleToDeploy);
+    // Same rule as the UI: prompt caching only for a single-model bundle whose profile has the feature.
+    const picked = bundles.find((b: any) => b.name === bundleToDeploy);
+    let promptCaching = false;
+    if (picked.modelConfigs.length === 1 && profileHasPromptCachingOnCluster(picked.modelConfigs[0].profile, namespace)) {
+      promptCaching = await confirm(rl, 'Enable prompt caching?', false);
+    }
+    const ignoreEos = await confirm(rl, 'Ignore EOS token (benchmarking only)?', false);
+    const depNameInput = await input(rl, 'Deployment name', suggestDeploymentName(bundleToDeploy));
+    const nameErr = validateResourceName(depNameInput);
+    if (nameErr) { errorMsg(nameErr); return; }
 
-    yamlBox('Deployment YAML', yaml);
+    const built = buildModelDeploymentYaml(bundleToDeploy, {
+      deploymentName: depNameInput, promptCaching, ignoreEos,
+    });
+    let yaml = built.yaml;
+    let depName = built.deploymentName;
 
-    if (!await confirm(rl, `Deploy ${chalk.bold(depName)}?`)) return;
+    // Review step: the YAML can be edited before applying (e.g. to add the `storage:` block an air-gapped
+    // cluster needs), like the UI's editable deployment YAML.
+    while (true) {
+      yamlBox('Deployment YAML', yaml);
+      const act = await select(rl, `Deploy ${chalk.bold(depName)}?`, [
+        { name: '🚀  Deploy',                          value: 'deploy' },
+        { name: '✏️   Edit YAML in editor first',      value: 'edit' },
+        { name: chalk.reset('← Cancel'),                value: 'cancel' },
+      ]);
+      if (!act || act === 'cancel') return;
+      if (act === 'deploy') break;
+
+      const edited = editInEditor(yaml);
+      if (edited === null) continue;
+      try {
+        const doc: any = yamlLib.load(edited);
+        if (doc?.kind !== 'ModelDeployment' || !doc?.metadata?.name) { errorMsg('YAML must be a ModelDeployment with metadata.name.'); continue; }
+        const nameErr = validateResourceName(doc.metadata.name);
+        if (nameErr) { errorMsg(nameErr); continue; }
+        yaml = edited;
+        depName = doc.metadata.name;
+      } catch (e: any) {
+        errorMsg(`Invalid YAML: ${e.message.split('\n')[0]}`);
+      }
+    }
 
     const tempPath = path.join(PROJECT_ROOT, `temp_dep_${Date.now()}.yaml`);
     try {
       writeFileSync(tempPath, yaml);
       spinner.start('Deploying...');
       await tick();
-      execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+      execSync(`kubectl apply -f "${tempPath}" -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
       spinner.succeed(`Deployment ${depName} initiated`);
     } finally {
-      try { execSync(`rm "${tempPath}"`); } catch {}
+      try { rmSync(tempPath, { force: true }); } catch {}
     }
 
     if (await confirm(rl, 'Monitor progress now?')) await monitorDeployment(rl, namespace, depName);
@@ -2372,8 +3196,9 @@ async function bundleDeleteAction(rl: any, namespace: string) {
     });
     items.push({ name: chalk.reset('← Back'), value: 'back' });
 
-    const selected = await multiSelect(rl, `Select ${res.label}(s) to delete:`, items);
-    if (!selected || selected.includes('back') || selected.length === 0) return;
+    const selected = await multiSelect(rl, `Select ${res.label}(s) to delete:`, items, undefined, true);
+    if (!selected || selected.includes('back')) return;
+    if (selected.length === 0) { warnMsg('Nothing selected — move to an entry and press Space to toggle it, then Enter.'); return; }
 
     process.stdout.write('\n');
     process.stdout.write(chalk.red.bold(`  ⚠  The following will be permanently deleted:\n\n`));
@@ -2390,7 +3215,7 @@ async function bundleDeleteAction(rl: any, namespace: string) {
       spinner.start(`Deleting ${name}...`);
       await tick();
       try {
-        execSync(`kubectl delete ${res.kind} ${name} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+        execFileSync('kubectl', ['delete', res.kind, name, '-n', namespace], { stdio: ['pipe','pipe','pipe'] });
         spinner.succeed(`Deleted ${name}`);
       } catch (e: any) {
         spinner.fail(`Failed to delete ${name}: ${e.message.split('\n')[0]}`);
@@ -2412,10 +3237,10 @@ async function monitorMenu(rl: any, namespace: string) {
 
     if (!list.items?.length) { warnMsg('No deployments found.'); return; }
 
+    const statuses = deploymentStatuses(namespace, list.items.map((i: any) => i.metadata.name));
     const choices: Choice[] = list.items.map((i: any) => {
-      const phase = i.status?.phase || '';
-      const icon  = phase === 'Running' || phase === 'Deployed' ? chalk.green('●') : phase ? chalk.yellow('◌') : chalk.red('○');
-      return { name: `${icon} ${i.metadata.name}`, value: i.metadata.name, hint: phase || undefined };
+      const st = statuses[i.metadata.name];
+      return { name: `${statusIcon(st)} ${i.metadata.name}`, value: i.metadata.name, hint: st };
     });
     choices.push({ name: chalk.reset('← Back'), value: 'back' });
 
@@ -2462,17 +3287,20 @@ async function monitorDeployment(_rl: any, namespace: string, depName: string) {
       const elapsed = Math.round((Date.now() - startTime) / 1000);
       let cachePod: any   = null;
       let defaultPod: any = null;
+      let podListError = '';
 
       try {
-        const po = execSync(`kubectl -n ${namespace} get pods 2>/dev/null | grep "^inf-${depName}-"`, { encoding: 'utf-8' });
+        const { cache: cacheName, default: defaultName } = inferencePodNames(depName);
+        const po = execSync(`kubectl -n ${namespace} get pods`, { encoding: 'utf-8' });
         for (const line of po.trim().split('\n').filter((l: string) => l.trim())) {
           const pod = parsePodLine(line);
           if (!pod) continue;
-          const kind = classifyPod(pod.name);
-          if (kind === 'cache')        cachePod   = pod;
-          else if (kind === 'default') defaultPod = pod;
+          if (pod.name === cacheName)        cachePod   = pod;
+          else if (pod.name === defaultName) defaultPod = pod;
         }
-      } catch {}
+      } catch (e: any) {
+        podListError = kubectlErrorDetail(e);
+      }
 
       const deployStatus = getDeploymentStatus(cachePod, defaultPod);
       const statusColor  = deployStatus === 'Deployed' ? chalk.green : deployStatus === 'Deploying' ? chalk.yellow : chalk.red;
@@ -2483,10 +3311,12 @@ async function monitorDeployment(_rl: any, namespace: string, depName: string) {
       wline(statusColor.bold(`  ${statusIcon}  ${deployStatus}`) + chalk.reset(`    elapsed: ${elapsed}s`));
       wline(chalk.reset('  ' + '─'.repeat(40)));
 
+      if (podListError) wline(chalk.red(`  ✖ kubectl error: ${podListError.split('\n')[0].slice(0, 100)}`));
+
       const podRow = (label: string, pod: any) => {
         if (pod) {
           const ic = pod.ready === pod.total ? chalk.green('✔') : chalk.yellow('…');
-          wline(chalk.reset(`  ${label.padEnd(16)}`) + ` ${ic} ` + chalk.reset(`${pod.ready}/${pod.total}`) + `  ` + chalk.reset(pod.status.padEnd(12)) + `  ` + chalk.reset(`age: ${pod.age}`));
+          wline(chalk.reset(`  ${label.padEnd(16)}`) + ` ${ic} ` + chalk.reset(`${pod.ready}/${pod.total}`) + `  ` + (/CrashLoopBackOff|ImagePullBackOff|ErrImagePull|Error|OOMKilled/i.test(pod.status) ? chalk.red : chalk.reset)(pod.status.padEnd(12)) + `  ` + chalk.reset(`age: ${pod.age}`));
         } else {
           wline(chalk.reset(`  ${label.padEnd(16)}`) + chalk.yellow(' ⏳ waiting for pod...'));
         }
@@ -2566,25 +3396,9 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       modelName = await input(rl, 'Model name (leave empty to go back)');
       if (modelName === ESC) return;
     } else {
-      const allDeps: any[] = [];
-      for (const item of list.items) {
-        const dn = item.metadata.name;
-        const bn = item.spec.bundle;
-        let status = 'Not Deployed';
-        try {
-          const po = execSync(`kubectl -n ${namespace} get pods 2>/dev/null | grep "^inf-${dn}-"`, { encoding: 'utf-8' });
-          let cache: PodInfo | null = null, dflt: PodInfo | null = null;
-          for (const line of po.trim().split('\n').filter((l: string) => l.trim())) {
-            const pod = parsePodLine(line);
-            if (!pod) continue;
-            const kind = classifyPod(pod.name);
-            if (kind === 'cache')        cache = pod;
-            else if (kind === 'default') dflt  = pod;
-          }
-          status = getDeploymentStatus(cache, dflt);
-        } catch { status = 'Not Deployed'; }
-        allDeps.push({ name: dn, bundle: bn, status });
-      }
+      // One pods read for all deployments (and a failure of it surfaces, rather than every deployment showing "Not Deployed").
+      const statuses = deploymentStatuses(namespace, list.items.map((i: any) => i.metadata.name));
+      const allDeps: any[] = list.items.map((item: any) => ({ name: item.metadata.name, bundle: item.spec.bundle, status: statuses[item.metadata.name] }));
 
       const deployed = allDeps.filter(d => d.status === 'Deployed');
 
@@ -2616,7 +3430,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           const bn = depItem?.bundle ?? '';
           const checkpointMapping: CheckpointMappingV3 = requireJson(path.join(DATA_DIR, 'checkpoint_mapping.json'));
           try {
-            const bundle = JSON.parse(execSync(`kubectl get modelbundle.sambanova.ai ${bn} -n ${namespace} -o json`, { encoding: 'utf-8' }));
+            const bundle = JSON.parse(execFileSync('kubectl', ['get', 'modelbundle.sambanova.ai', bn, '-n', namespace, '-o', 'json'], { encoding: 'utf-8' }));
             const modelConfigs: any[] = bundle.spec?.modelConfigs || [];
             const models = Array.from(new Set(
               modelConfigs
@@ -2684,17 +3498,10 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       }
       if (!userInput.trim()) continue;
 
-      const tmpPayload = path.join(PROJECT_ROOT, `.tmp_embed_${Date.now()}.json`);
       try {
         const payload = JSON.stringify({ input: userInput, model: modelName });
-        writeFileSync(tmpPayload, payload);
         process.stdout.write(chalk.reset('\n  ◌  Generating embedding...\r'));
-        const res = execSync(
-          `curl -sk -w "\\n%{http_code}" -X POST "${base}v1/embeddings" ` +
-          `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-          `-d @"${tmpPayload}"`,
-          { encoding: 'utf-8', timeout: 30000 }
-        );
+        const res = await curlLike(`${base}v1/embeddings`, { method: 'POST', apiKey: envConfig.apiKey, body: payload, timeoutMs: 30000 });
         process.stdout.write('\r\x1b[K');
         const resParts   = res.trimEnd().split('\n');
         const httpCode   = safeParseInt(resParts.pop());
@@ -2718,8 +3525,6 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       } catch (e: any) {
         process.stdout.write('\r\x1b[K');
         errorMsg(`Connection error: ${e.message.split('\n')[0]}`);
-      } finally {
-        try { execSync(`rm "${tmpPayload}"`); } catch {}
       }
     }
     return;
@@ -2750,22 +3555,14 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
 
     messages.push({ role: 'user', content: userInput });
 
-    const tmpPayload = path.join(PROJECT_ROOT, `.tmp_chat_${Date.now()}.json`);
     try {
       const apiUrl  = `${base}v1/chat/completions`;
       const payload = JSON.stringify({ model: modelName, messages, stream: false });
 
-      writeFileSync(tmpPayload, payload);
-
       process.stdout.write(chalk.reset('\n  ◌  Thinking...\r'));
 
       const t0  = Date.now();
-      const res = execSync(
-        `curl -sk -w "\\n%{http_code}" -X POST "${apiUrl}" ` +
-        `-H "Content-Type: application/json" -H "Authorization: Bearer ${envConfig.apiKey}" ` +
-        `-d @"${tmpPayload}"`,
-        { encoding: 'utf-8', timeout: 120000 }
-      );
+      const res = await curlLike(apiUrl, { method: 'POST', apiKey: envConfig.apiKey, body: payload, timeoutMs: 120000 });
       const totalMs = Date.now() - t0;
 
       const parts    = res.trimEnd().split('\n');
@@ -2811,7 +3608,7 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
           shownCodeExamples = true;
           const showCode = await confirm(rl, 'View API code examples?', false);
           if (showCode) {
-            const maskedKey = envConfig.apiKey.slice(0, 4) + '••••••••' + envConfig.apiKey.slice(-4);
+            const maskedKey = maskApiKey(envConfig.apiKey);
             process.stdout.write('\n');
             process.stdout.write(chalk.reset.bold('  cURL\n'));
             process.stdout.write(chalk.reset('  ' + '─'.repeat(40)) + '\n');
@@ -2842,7 +3639,10 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
         if (httpCode === 401 || httpCode === 403) {
           // Don't print the server body — it may reference cloud.sambanova.ai which is irrelevant
           const apiBase = envConfig.uiDomain || envConfig.apiDomain || '';
-          warnMsg(`API key invalid or expired — update in app-config.json`);
+          let code = '';
+          try { code = JSON.parse(body).error?.code || ''; } catch { /* non-JSON body */ }
+          warnMsg(`API key rejected by the server${code ? ` (${code})` : ''} — key in use: ${maskApiKey(envConfig.apiKey)}. Update it in app-config.json.`);
+          process.stdout.write(chalk.reset('  Note: /v1/models is public, so listing models working does not prove the key is valid.\n'));
           if (apiBase) process.stdout.write(chalk.reset(`  Get a new key from: ${apiBase}\n\n`));
         } else {
           try {
@@ -2857,15 +3657,12 @@ async function playgroundMenu(rl: any, envConfig: any, namespace: string) {
       process.stdout.write('\r\x1b[K');
       errorMsg(`Connection error: ${e.message.split('\n')[0]}`);
       messages.pop();
-    } finally {
-      try { execSync(`rm "${tmpPayload}"`); } catch {}
     }
   }
 }
 
 // ─── installSambaStackMenu() ──────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function installSambaStackMenu(rl: any, namespace: string) {
   sectionHeader('Install SambaStack', '🔧');
 
@@ -2897,11 +3694,11 @@ async function installSambaStackMenu(rl: any, namespace: string) {
       execSync(`${editor} "${tmp}"`, { stdio: 'inherit' });
       try { execSync('stty sane', { stdio: 'inherit' }); } catch {}
       installYaml = readFileSync(tmp, 'utf-8');
-      try { execSync(`rm "${tmp}"`); } catch {}
+      try { rmSync(tmp, { force: true }); } catch {}
       yamlBox('Updated YAML', installYaml);
     } catch (e: any) {
       errorMsg(`Editor error: ${e.message}`);
-      try { execSync(`rm "${tmp}"`); } catch {}
+      try { rmSync(tmp, { force: true }); } catch {}
       return;
     }
   }
@@ -2914,15 +3711,15 @@ async function installSambaStackMenu(rl: any, namespace: string) {
     writeFileSync(tempPath, installYaml);
     spinner.start('Applying installation ConfigMap...');
     await tick();
-    execSync(`kubectl apply -f ${tempPath} -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
+    execSync(`kubectl apply -f "${tempPath}" -n ${namespace}`, { stdio: ['pipe','pipe','pipe'] });
     spinner.succeed('Installation ConfigMap applied — streaming logs...');
     process.stdout.write(chalk.reset('  Press q or Esc to stop watching logs\n\n'));
   } catch (e: any) {
     spinner.fail(`Apply failed: ${e.message.split('\n')[0]}`);
-    try { execSync(`rm "${tempPath}"`); } catch {}
+    try { rmSync(tempPath, { force: true }); } catch {}
     return;
   }
-  try { execSync(`rm "${tempPath}"`); } catch {}
+  try { rmSync(tempPath, { force: true }); } catch {}
 
   // ── Stream installer logs ──
   let done     = false;

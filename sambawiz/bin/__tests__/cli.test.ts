@@ -1,4 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import type { CheckpointMappingV3, ModelProfilesCache } from '../../app/types/bundle';
+import yaml from 'js-yaml';
 import { generateModelBundleYaml, type ModelBundleSelection } from '../../app/utils/bundle-yaml-generator';
 import {
   toModelCR,
@@ -10,6 +12,20 @@ import {
   extractBundleName,
   buildModelDeploymentYaml,
   readValidCondition,
+  buildModelBasedDeploymentYaml,
+  suggestDeploymentName,
+  formatDroppedSelections,
+  withCheckpointOverrides,
+  printValidationErrors,
+  kubectlErrorDetail,
+  kubectlHint,
+  maskApiKey,
+  initialBatchChecks,
+  batchOverrideFromPicked,
+  stripServerManagedFields,
+  draftCandidates,
+  bundleValidationOutcome,
+  profileHasPromptCachingOnCluster,
 } from '../cli';
 
 /**
@@ -313,5 +329,215 @@ describe('CLI selections → generateModelBundleYaml (shared generator integrati
     expect(yamlText).toContain('specDecodingPairs');
     expect(yamlText).toContain('draft: draft-model');
     expect(yamlText).toContain('target: llama-3-8b-instruct');
+  });
+});
+
+// ─── Parity with the UI (deploy knobs, dropped models, overrides, legalizer errors) ──
+
+describe('buildModelDeploymentYaml options', () => {
+  it('injects the same env vars as the UI, and a custom name', () => {
+    const { yaml, deploymentName } = buildModelDeploymentYaml('b', { deploymentName: 'md-x', promptCaching: true, ignoreEos: true });
+    expect(deploymentName).toBe('md-x');
+    expect(yaml).toContain('ENABLE_KV_CACHE_MANAGER: "true"');
+    expect(yaml).toContain('KV_CACHE_INCLUDE_STATS_IN_RESPONSE: "true"');
+    expect(yaml).toContain('ENABLE_IGNORE_EOS: "true"');
+  });
+  it('omits env_vars by default', () => {
+    expect(buildModelDeploymentYaml('b').yaml).not.toContain('env_vars');
+  });
+});
+
+describe('formatDroppedSelections', () => {
+  it('is empty when nothing dropped and mirrors the UI wording otherwise', () => {
+    expect(formatDroppedSelections([])).toEqual([]);
+    const out = formatDroppedSelections([{ model: 'm', profile: 'p', reason: 'batching-config-cleared' }]);
+    expect(out[0]).toBe('1 selected model left this bundle');
+    expect(out[1]).toContain('every batch size is unselected');
+  });
+});
+
+describe('withCheckpointOverrides', () => {
+  it('pins versionOverride by model display name only', () => {
+    const sels: any[] = [{ model: { spec: { name: 'A' } } }, { model: { spec: { name: 'B' } } }];
+    const out = withCheckpointOverrides(sels, { A: '3' });
+    expect(out[0].versionOverride).toBe('3');
+    expect(out[1].versionOverride).toBeUndefined();
+  });
+});
+
+describe('printValidationErrors', () => {
+  it('prefers legalizer errors over the condition message', () => {
+    const writes: string[] = [];
+    const spy = jest.spyOn(process.stdout, 'write').mockImplementation((c: any) => (writes.push(String(c)), true));
+    printValidationErrors([{ type: 'Valid', status: 'False', message: 'generic' }], { errors: ['legalizer says no'] });
+    spy.mockRestore();
+    const text = writes.join('');
+    expect(text).toContain('legalizer says no');
+    expect(text).not.toContain('generic');
+  });
+});
+
+describe('quick deploy + naming', () => {
+  it('inlines spec.models for a single model + profile', () => {
+    const { yaml, deploymentName } = buildModelBasedDeploymentYaml('llama:a1', 'p1', { promptCaching: true });
+    expect(deploymentName).toBe('md-llama');
+    expect(yaml).toContain('models:');
+    expect(yaml).toContain('- model: llama:a1');
+    expect(yaml).toContain('profile: p1');
+    expect(yaml).not.toContain('bundle:');
+    expect(yaml).toContain('ENABLE_KV_CACHE_MANAGER: "true"');
+  });
+  it('uses the UI naming: b- becomes md-, else md- prefix', () => {
+    expect(suggestDeploymentName('b-x')).toBe('md-x');
+    expect(suggestDeploymentName('x')).toBe('md-x');
+  });
+});
+
+describe('kubectl error hints', () => {
+  const x509 = { message: 'Command failed', stderr: 'error: error validating "f.yaml": failed to download openapi: Get "https://1.2.3.4:6443/openapi/v2": tls: failed to verify certificate: x509: certificate signed by unknown authority' };
+  it('explains a stale kubeconfig CA instead of dumping the raw error', () => {
+    const out = kubectlErrorDetail(x509);
+    expect(out).toMatch(/certificate signed by unknown authority/);
+    expect(out).toMatch(/kubeconfig.*stale|re-add it/);
+  });
+  it('adds no hint for unrelated errors', () => {
+    expect(kubectlHint('connection refused')).toBe('');
+    expect(kubectlErrorDetail({ message: 'x', stderr: 'dial tcp 1.2.3.4:6443: i/o timeout' })).not.toContain('→');
+  });
+  it('flags rejected credentials', () => {
+    expect(kubectlHint('error: You must be logged in to the server (Unauthorized)')).toMatch(/credentials were rejected/);
+  });
+});
+
+describe('maskApiKey', () => {
+  it('shows only the last 4 characters of a long key and nothing of a short one', () => {
+    expect(maskApiKey('0123456789abcdef0123')).toBe('…0123');
+    expect(maskApiKey('0123456789abcdef0123')).not.toContain('0123456');
+    expect(maskApiKey('short')).toBe('••••');
+    expect(maskApiKey('')).toBe('••••');
+    expect(maskApiKey('123456789012345')).toBe('••••'); // 15 chars: still hidden
+  });
+});
+
+describe('batching override grid (review: tiers the user never chose)', () => {
+  const universe = { '32k': { batch_sizes: [1, 2, 4] }, '8k': { batch_sizes: [1, 2] }, '128k': { batch_sizes: [1] } };
+  const recommended = { '32k': { batch_sizes: [1] }, '8k': { batch_sizes: [1, 2] } };
+  it('starts only the recommended sizes checked; a tier that is in `all` but not `recommended` starts empty', () => {
+    expect(initialBatchChecks(universe, recommended)).toEqual({ '32k': [1], '8k': [1, 2], '128k': [] });
+  });
+  it('confirming the grid unchanged never turns on a tier the user did not pick', () => {
+    const allowed = { '32k': [1, 2, 4], '8k': [1, 2], '128k': [1] };
+    const override = batchOverrideFromPicked(allowed, initialBatchChecks(universe, recommended));
+    expect(Object.keys(override).sort()).toEqual(['32k', '8k']);       // 128k is left out
+    expect(override['32k']).toEqual({ batch_sizes: [1] });             // not widened to '*'
+    expect(override['8k']).toEqual({ batch_sizes: '*' });              // whole universe ticked -> '*'
+  });
+  it('ticking a tier that was empty adds it; ticking everything collapses to *', () => {
+    const allowed = { '128k': [1], '32k': [1, 2, 4] };
+    expect(batchOverrideFromPicked(allowed, { '128k': [1], '32k': [1, 2, 4] })).toEqual({ '128k': { batch_sizes: '*' }, '32k': { batch_sizes: '*' } });
+    expect(batchOverrideFromPicked(allowed, { '128k': [], '32k': [2] })).toEqual({ '32k': { batch_sizes: [2] } });
+  });
+});
+
+describe('stripServerManagedFields (review: Load from cluster)', () => {
+  const live = `
+apiVersion: sambanova.ai/v1alpha1
+kind: ModelBundle
+metadata:
+  name: my-bundle
+  namespace: sambastack
+  annotations: { kopf.zalando.org/last-handled-configuration: x }
+  labels: { a: b }
+  resourceVersion: "123"
+  uid: abc-def
+  creationTimestamp: "2026-09-01T00:00:00Z"
+  generation: 4
+  managedFields: [ { manager: kopf } ]
+spec:
+  modelConfigs: [ { model: "m:1", profile: p } ]
+status:
+  conditions: [ { type: Valid, status: "True" } ]
+`;
+  it('removes every field the server manages, and status, but keeps the definition', () => {
+    const doc: any = stripServerManagedFields(yaml.load(live));
+    expect(Object.keys(doc.metadata).sort()).toEqual(['name', 'namespace']);
+    expect(doc.status).toBeUndefined();
+    expect(doc.spec.modelConfigs).toHaveLength(1);
+    expect(doc.kind).toBe('ModelBundle');
+  });
+  it('tolerates documents without metadata or status', () => {
+    expect(stripServerManagedFields({ kind: 'X' })).toEqual({ kind: 'X' });
+    expect(stripServerManagedFields(null)).toBeNull();
+  });
+});
+
+describe('draftCandidates (review: a model added again as a draft)', () => {
+  const mapping: any = {
+    Target: { resource_name: 'target', capabilities: [], checkpoints: { a3: { versions: {} } } },
+    Small: { resource_name: 'small', capabilities: [], checkpoints: { a1: { versions: {} } } },
+    Other: { resource_name: 'other', capabilities: [], checkpoints: { a1: { versions: {} } } },
+    NoProfile: { resource_name: 'noprofile', capabilities: [], checkpoints: { zz: { versions: {} } } },
+  };
+  const profiles: any = { p1: { model_arch: 'a1', features: [], batchingConfig: {}, pefs: [] }, sd: { model_arch: 'a3', features: [], batchingConfig: {}, pefs: [] } };
+  const sel = (display: string, crname: string): any => ({ model: { metadata: { name: crname }, spec: { name: display, checkpoints: {} } } });
+  const names = Object.keys(mapping);
+  it('offers only models with a profile that are not already in the bundle', () => {
+    expect(draftCandidates(names, mapping, profiles, [sel('Target', 'target')])).toEqual(['Small', 'Other']);
+  });
+  it('hides a model the user already added on its own, and one already used as a draft', () => {
+    expect(draftCandidates(names, mapping, profiles, [sel('Target', 'target'), sel('Small', 'small')])).toEqual(['Other']);
+  });
+});
+
+describe('bundleValidationOutcome (review: stale "valid" after a re-apply)', () => {
+  const valid = (observedGeneration?: number) => ({ type: 'Valid', status: 'True', ...(observedGeneration === undefined ? {} : { observedGeneration }) });
+  it('ignores a Valid=True that belongs to an older generation of the bundle', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [valid(1)] } })).toBe('pending');
+    expect(bundleValidationOutcome({ metadata: { generation: 3 }, status: { observedGeneration: 2, conditions: [valid()] } })).toBe('pending');
+  });
+  it('accepts it once the controller has caught up (equal or newer generation)', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [valid(2)] } })).toBe('succeeded');
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { observedGeneration: 2, conditions: [valid()] } })).toBe('succeeded');
+  });
+  it('a stale Valid=False is not reported as a failure either', () => {
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [{ type: 'Valid', status: 'False', observedGeneration: 1 }] } })).toBe('pending');
+    expect(bundleValidationOutcome({ metadata: { generation: 2 }, status: { conditions: [{ type: 'Valid', status: 'False', observedGeneration: 2 }] } })).toBe('failed');
+  });
+  it('falls back to the plain condition when the controller reports no generations', () => {
+    expect(bundleValidationOutcome({ metadata: {}, status: { conditions: [valid()] } })).toBe('succeeded');
+    expect(bundleValidationOutcome({ status: { conditions: [] } })).toBe('pending');
+    expect(bundleValidationOutcome(null)).toBe('pending');
+  });
+});
+
+describe('profileHasPromptCachingOnCluster (review class: errors must not be swallowed)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const childProcess = require('child_process');
+  let spy: jest.SpyInstance;
+  afterEach(() => spy?.mockRestore());
+  const kubectlFails = (stderr: string) => spy.mockImplementation(() => { throw Object.assign(new Error('Command failed'), { stderr }); });
+
+  it('true / false from the profile\'s features', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync').mockReturnValue('{"spec":{"features":["prompt_caching"]}}');
+    expect(profileHasPromptCachingOnCluster('p', 'ns')).toBe(true);
+    spy.mockReturnValue('{"spec":{"features":[]}}');
+    expect(profileHasPromptCachingOnCluster('p', 'ns')).toBe(false);
+  });
+  it('a profile that is not there has no such feature', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync');
+    kubectlFails('Error from server (NotFound): modelprofiles.sambanova.ai "ghost" not found');
+    expect(profileHasPromptCachingOnCluster('ghost', 'ns')).toBe(false);
+  });
+  it('a real failure (RBAC denial, unreachable cluster) surfaces instead of being reported as "no prompt_caching"', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync');
+    kubectlFails('Error from server (Forbidden): cannot get resource "modelprofiles"');
+    expect(() => profileHasPromptCachingOnCluster('p', 'ns')).toThrow(/kubectl get modelprofile p failed: .*Forbidden/);
+    kubectlFails('Unable to connect to the server: dial tcp 1.2.3.4:6443: connect: connection refused');
+    expect(() => profileHasPromptCachingOnCluster('p', 'ns')).toThrow(/connection refused/);
+  });
+  it('the name is passed to kubectl as ONE argument (no shell is involved), whatever it contains', () => {
+    spy = jest.spyOn(childProcess, 'execFileSync').mockReturnValue('{}');
+    profileHasPromptCachingOnCluster('x;touch /tmp/pwned $(id)', 'ns');
+    expect(spy).toHaveBeenCalledWith('kubectl', ['get', 'modelprofile.sambanova.ai', 'x;touch /tmp/pwned $(id)', '-n', 'ns', '-o', 'json'], expect.anything());
   });
 });
