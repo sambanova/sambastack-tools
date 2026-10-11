@@ -212,7 +212,7 @@ The remaining steps apply to the **bundle route** — used for multiple models, 
 *Override batching configuration per sequence-length tier and set swappable behavior*
 
 - **Validation**: Apply the bundle to the cluster and read back the legalizer result — pass/fail, errors/warnings, and DDR/host memory utilization gauges.
-- **Save**: Save the generated YAML to the `saved_artifacts/` directory.
+- **Save**: Save the generated YAML to the artifacts directory (`saved_artifacts/` unless `artifactsDir` in `app-config.json` names another one). Saved files are what **Load Existing Bundle** lists.
 - **Create Deployment**: Jump straight to the Model Deployment page after a successful validation.
 
 ![Model Selection - validation and save](images/model-selection-validation.png)
@@ -277,7 +277,7 @@ sambawiz/
 ├── docs/                             # Feature documentation (source)
 ├── public/docs/                      # Feature documentation served in-app
 ├── kubeconfigs/                      # Kubeconfig files (gitignored except example)
-├── saved_artifacts/                  # Saved bundle/deployment YAML (gitignored)
+├── saved_artifacts/                  # Default artifacts directory, overridable with artifactsDir (gitignored)
 ├── temp/                             # Temporary YAML files (gitignored)
 ├── app-config.json                   # Local configuration (gitignored)
 ├── app-config.example.json           # Configuration template

@@ -33,7 +33,7 @@ bundle's `spec.modelConfigs` list.
 6. **YAML Generation**: A single `ModelBundle` YAML document is generated automatically as
    selections change.
 7. **Validation**: Validate the bundle by applying it to your cluster.
-8. **Save**: Save the generated YAML to the `saved_artifacts/` directory.
+8. **Save**: Save the generated YAML to the artifacts directory (`saved_artifacts/` unless `artifactsDir` in `app-config.json` names another one). Saved files are what **Load Existing Bundle** lists.
 9. **Create Deployment**: Navigate directly to the Model Deployment page after a successful
    validation.
 
