@@ -257,14 +257,14 @@ describe('buildModelDeploymentYaml', () => {
   it('emits no spec.storage when the environment has none (online install)', () => {
     const { yaml } = buildModelDeploymentYaml('my-bundle');
     expect(yaml).not.toContain('storage:');
-    expect(buildModelDeploymentYaml('my-bundle', null).yaml).toBe(yaml);
+    expect(buildModelDeploymentYaml('my-bundle', { storage: null }).yaml).toBe(yaml);
   });
 
   it('appends spec.storage for an air-gapped environment (CUSTEI-1560)', () => {
     const storage = {
       hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }],
     };
-    const { yaml } = buildModelDeploymentYaml('my-bundle', storage);
+    const { yaml } = buildModelDeploymentYaml('my-bundle', { storage });
     expect(yaml).toContain('bundle: my-bundle');
     expect(yaml).toContain('sambanova-artifact-reader');
     expect(yaml).toMatch(
