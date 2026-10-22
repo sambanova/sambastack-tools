@@ -678,6 +678,19 @@ describe('deploy', () => {
     for (const v of ['ENABLE_KV_CACHE_MANAGER', 'KV_CACHE_INCLUDE_STATS_IN_RESPONSE', 'ENABLE_IGNORE_EOS']) expect(r.out).toContain(`${v}: "true"`);
     expect(r.out).toContain('name: my-dep');
   });
+  it('create adds spec.storage for an air-gapped environment, only for that environment (CUSTEI-1560)', async () => {
+    const storage = { hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }] };
+    expect(ok(await run(['deploy', 'create', '--bundle', 'bg', '--dry-run'])).out).not.toContain('storage:');
+    const cfg = readConfig();
+    cfg.kubeconfigs.lab.storage = storage;
+    writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify(cfg));
+    const r = ok(await run(['deploy', 'create', '--bundle', 'bg', '--dry-run']));
+    expect(r.out).toMatch(/startupTimeout: 7200\n  storage:\n    hostPath:\n      - name: nfs\n        mountPath: \/nfsdata\n        path: \/data\/sambastack-ml-data/);
+    expect(r.err).toContain('air-gapped checkpoint storage');
+    ok(await run(['deploy', 'create', '--bundle', 'bg']));
+    expect(applied()[0]).toContain('  storage:');
+    expect(ok(await run(['deploy', 'create', '--bundle', 'bg', '--env', 'other', '--dry-run'])).out).not.toContain('storage:');
+  });
   it('create enforces the UI rules: validated bundles only, caching only for a single caching model, valid names', async () => {
     failed(await run(['deploy', 'create', '--bundle', 'bp']), /not validated/);
     failed(await run(['deploy', 'create', '--bundle', 'ghost']), /NotFound|not found/);

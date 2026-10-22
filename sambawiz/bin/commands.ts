@@ -26,6 +26,7 @@ import { formatModelRefLatest } from '../app/utils/bundle-yaml-generator';
 import { floatPcmToWav, extractErrorMessage, parseSpeechStream } from '../app/utils/speech';
 import { inferencePodNames } from '../app/utils/inference-pod-names';
 import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
+import { readEnvironmentStorage } from '../app/utils/deployment-storage';
 import {
   CONFIG_PATH,
   DATA_DIR,
@@ -590,6 +591,10 @@ export function buildProgram(): Command {
       if (!o.bundle === !o.model) fail('Give exactly one of --bundle or --model.');
       if (o.bundle) assertName('bundle name', o.bundle);
       const ctx = resolveCtx(o);
+      // Air-gapped environments mount checkpoints from local storage (spec.storage), same as the interactive menu.
+      const storage = readEnvironmentStorage(ctx.ec);
+      if (storage) process.stderr.write('Including air-gapped checkpoint storage (spec.storage) from app-config.json\n');
+      const opts = { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos, storage };
       let built: { yaml: string; deploymentName: string };
       let cachingProfile: string | undefined;
       if (o.bundle) {
@@ -597,14 +602,14 @@ export function buildProgram(): Command {
         if (bundleValidationOutcome(b) !== 'succeeded') fail(`Bundle "${o.bundle}" is not validated; run \`bundle validate ${o.bundle}\`.`);
         const mc = b.spec?.modelConfigs || [];
         cachingProfile = mc.length === 1 ? mc[0].profile : undefined;
-        built = buildModelDeploymentYaml(o.bundle, { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos });
+        built = buildModelDeploymentYaml(o.bundle, opts);
       } else {
         const { mapping, profiles } = readCache();
         assertCacheMatches(ctx);
         const [sel] = buildSelections({ models: [o.model] }, mapping, profiles);
         const ref = formatModelRefLatest(sel.model, sel.arch, readCheckpointOverrides()[sel.model.spec.name]);
         cachingProfile = sel.profile.metadata.name;
-        built = buildModelBasedDeploymentYaml(ref, sel.profile.metadata.name, { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos });
+        built = buildModelBasedDeploymentYaml(ref, sel.profile.metadata.name, opts);
       }
       const nameErr = validateResourceName(built.deploymentName);
       if (nameErr) fail(nameErr);
