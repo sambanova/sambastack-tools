@@ -18,7 +18,10 @@ import yaml from 'js-yaml';
 export interface HostPathMount {
   /** Volume name (a Kubernetes volume name: lowercase RFC 1123 label). */
   name: string;
-  /** Where the volume is mounted inside the pod. Must match the `local://` prefix in models.yaml. */
+  /**
+   * Where the volume is mounted inside the pod. Must match the `local://` substitution target in the
+   * install's `models-values.yaml` (`global.substitutions`) — site-specific, so never defaulted.
+   */
   mountPath: string;
   /** Directory on the node that holds the checkpoints. Cluster-specific — never defaulted. */
   path: string;
@@ -29,11 +32,8 @@ export interface DeploymentStorage {
   hostPath: HostPathMount[];
 }
 
-/** Volume name pre-filled in the settings form. */
+/** Volume name pre-filled in the settings form (the name is arbitrary, unlike the two paths). */
 export const DEFAULT_STORAGE_VOLUME_NAME = 'nfs';
-
-/** Mount path pre-filled in the settings form (the SambaStack air-gapped convention). */
-export const DEFAULT_STORAGE_MOUNT_PATH = '/nfsdata';
 
 /** Kubernetes volume names are RFC 1123 labels: lowercase alphanumerics and '-', at most 63 chars. */
 const RFC_1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
@@ -105,12 +105,24 @@ export function validateDeploymentStorage(
 
 /**
  * The storage configured for an environment entry, or `null` when it has none
- * or what is there is invalid (an invalid block is never emitted).
+ * or what is there is invalid (an invalid block is never emitted). Callers that
+ * generate deployments check `environmentStorageError` first, so an invalid
+ * block is reported instead of silently producing a deployment without it.
  */
 export function readEnvironmentStorage(entry: { storage?: unknown } | undefined | null): DeploymentStorage | null {
   if (!entry || entry.storage === undefined || entry.storage === null) return null;
   const result = validateDeploymentStorage(entry.storage);
   return result.valid ? result.storage : null;
+}
+
+/**
+ * Why the storage saved for an environment can't be used, or `null` when there
+ * is none or it is valid.
+ */
+export function environmentStorageError(entry: { storage?: unknown } | undefined | null): string | null {
+  if (!entry || entry.storage === undefined || entry.storage === null) return null;
+  const result = validateDeploymentStorage(entry.storage);
+  return result.valid ? null : result.error;
 }
 
 /**

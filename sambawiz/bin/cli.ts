@@ -32,6 +32,7 @@ import {
 import { parseModelBundleYamlContent } from '../app/utils/parse-bundle-yaml';
 import {
   applyDeploymentStorage,
+  environmentStorageError,
   readEnvironmentStorage,
   type DeploymentStorage,
 } from '../app/utils/deployment-storage';
@@ -3186,7 +3187,10 @@ async function bundleDeployAction(rl: any, namespace: string) {
 
     // Air-gapped environments mount checkpoints from local storage (spec.storage).
     const appConfig = requireJson(CONFIG_PATH);
-    const storage = readEnvironmentStorage(appConfig.kubeconfigs?.[appConfig.currentKubeconfig]);
+    const envEntry = appConfig.kubeconfigs?.[appConfig.currentKubeconfig];
+    const storageErr = environmentStorageError(envEntry);
+    if (storageErr) { errorMsg(`Air-gapped storage in app-config.json is invalid: ${storageErr}`); return; }
+    const storage = readEnvironmentStorage(envEntry);
     if (storage) {
       process.stdout.write(chalk.reset(`  Including air-gapped checkpoint storage (spec.storage) from app-config.json\n`));
     }

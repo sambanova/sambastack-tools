@@ -4,6 +4,7 @@ import {
   formatStorageYaml,
   getDeploymentStorage,
   readEnvironmentStorage,
+  environmentStorageError,
   validateDeploymentStorage,
   validateHostPathMount,
   type DeploymentStorage,
@@ -87,6 +88,21 @@ describe('readEnvironmentStorage', () => {
 
   it('returns the configured storage', () => {
     expect(readEnvironmentStorage({ storage })).toEqual(storage);
+  });
+});
+
+describe('environmentStorageError', () => {
+  it('is null when there is no storage or it is valid', () => {
+    expect(environmentStorageError(undefined)).toBeNull();
+    expect(environmentStorageError({})).toBeNull();
+    expect(environmentStorageError({ storage: null })).toBeNull();
+    expect(environmentStorageError({ storage })).toBeNull();
+  });
+
+  it('explains an invalid block instead of letting it be silently dropped', () => {
+    expect(environmentStorageError({ storage: { hostPath: [{ name: 'nfs', path: '/data' }] } })).toMatch(/Mount path is required/);
+    // A volume type other than hostPath (e.g. a direct NFS mount) is not supported.
+    expect(environmentStorageError({ storage: { nfs: { server: 'nfs.local', path: '/export' } } })).toMatch(/hostPath/);
   });
 });
 

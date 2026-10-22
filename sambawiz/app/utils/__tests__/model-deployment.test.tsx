@@ -831,7 +831,7 @@ describe('Model Deployment Manager', () => {
     };
 
     // Route fetches by URL; `/api/environments` returns the current env's storage (if any).
-    const mockFetchWithStorage = (envStorage: typeof storage | undefined) => {
+    const mockFetchWithStorage = (envStorage: unknown) => {
       (global.fetch as jest.Mock).mockImplementation((url: string) => {
         if (url === '/api/environments') {
           return Promise.resolve({
@@ -870,6 +870,22 @@ describe('Model Deployment Manager', () => {
         return Promise.resolve({ ok: true, json: async () => ({ success: true, bundleDeployments: [] }) });
       });
     };
+
+    it('reports invalid saved storage instead of silently generating YAML without it', async () => {
+      jest.useRealTimers();
+      mockNav.params = { modelPath: 'gpt-oss-120b:gpt-oss:1', profileName: 'gpt-oss-120b-p' };
+      mockFetchWithStorage({ hostPath: [{ name: 'nfs', path: '/data/ckpts' }] });
+
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = (await screen.findByDisplayValue(/kind: ModelDeployment/)) as HTMLTextAreaElement;
+      expect(yamlField.value).not.toContain('storage:');
+      expect(await screen.findByText(/air-gapped storage saved for this environment is invalid \(Mount path is required\./)).toBeInTheDocument();
+      expect(screen.queryByRole('checkbox', { name: 'Mount air-gapped checkpoint storage' })).not.toBeInTheDocument();
+      jest.useFakeTimers();
+    });
 
     it('emits spec.storage for a model deployment when the environment is air-gapped, and lets the user toggle it', async () => {
       jest.useRealTimers();

@@ -117,15 +117,19 @@ An air-gapped cluster has no artifact registry to pull checkpoints from, so the 
   "namespace": "default",
   "storage": {
     "hostPath": [
-      { "name": "nfs", "mountPath": "/nfsdata", "path": "/data/sambastack-ml-data" }
+      { "name": "nfs", "mountPath": "/mnt/models", "path": "/path/to/checkpoints" }
     ]
   }
 }
 ```
 
-- `name`: Volume name (lowercase letters, digits and `-`). Defaults to `nfs` in the UI.
-- `mountPath`: Where the checkpoints are mounted inside the pod. Must match the `local://` prefix used in your `models.yaml`. Defaults to `/nfsdata` in the UI.
-- `path`: Directory on the cluster nodes that holds the checkpoints. Cluster-specific, so there is no default.
+The paths above are placeholders. Both come from the decision the installer already made when writing the install's `models-values.yaml`, so neither has a default:
+
+- `name`: Volume name (lowercase letters, digits and `-`). Arbitrary; defaults to `nfs` in the UI.
+- `mountPath`: Where the checkpoints are mounted inside the pod. **Must match the `local://` substitution target in `global.substitutions` of the install's `models-values.yaml`** (e.g. a target of `local:///mnt/models` means `mountPath: /mnt/models`). If it doesn't, the volume mounts and the deployment is accepted, but the model is still not found.
+- `path`: Directory on the cluster nodes where the checkpoints are staged. Site-specific.
+
+Only `hostPath` mounts are supported. If the `storage` saved for an environment is invalid, the web UI shows an error and the CLI refuses to deploy, rather than generating a deployment without it.
 
 When `storage` is set, both the web UI and the CLI add it to every generated `ModelDeployment` as `spec.storage`. Environments without `storage` (online installs) generate exactly the same YAML as before.
 

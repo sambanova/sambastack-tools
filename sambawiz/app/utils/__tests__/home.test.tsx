@@ -36,7 +36,7 @@ describe('Home Page', () => {
 
     // `/api/environments` returns one env (with or without storage); everything
     // after update-config fails fast so the test never reaches the page reload.
-    const mockFetch = (envStorage?: typeof storage) => {
+    const mockFetch = (envStorage?: unknown) => {
       (global.fetch as jest.Mock).mockImplementation((url: string) => {
         if (url === '/api/environments') {
           return Promise.resolve({
@@ -85,7 +85,7 @@ describe('Home Page', () => {
       expect(updateConfigBody().storage).toEqual(storage);
     });
 
-    it('defaults the volume name and mount path, and blocks saving without a host path', async () => {
+    it('defaults only the volume name: both paths start empty and are required', async () => {
       mockFetch(undefined);
       const user = userEvent.setup();
       await act(async () => {
@@ -97,9 +97,16 @@ describe('Home Page', () => {
       await user.click(toggle);
 
       expect(screen.getByLabelText('Volume name')).toHaveValue('nfs');
-      expect(screen.getByLabelText('Mount path in pod')).toHaveValue('/nfsdata');
-      expect(screen.getAllByText('Host path is required.').length).toBeGreaterThan(0);
+      // The mount path has to match the install's local:// substitution target, so it is never guessed.
+      expect(screen.getByLabelText(/Mount path in pod/)).toHaveValue('');
+      expect(screen.getByLabelText(/Host path on node/)).toHaveValue('');
+      expect(screen.getAllByText('Mount path is required.').length).toBeGreaterThan(0);
 
+      await user.click(screen.getByRole('button', { name: 'Apply Configuration' }));
+      expect(await screen.findByText('Air-gapped storage: Mount path is required.')).toBeInTheDocument();
+      expect(updateConfigBody()).toBeUndefined();
+
+      await user.type(screen.getByLabelText(/Mount path in pod/), '/mnt/models');
       await user.click(screen.getByRole('button', { name: 'Apply Configuration' }));
       expect(await screen.findByText('Air-gapped storage: Host path is required.')).toBeInTheDocument();
       expect(updateConfigBody()).toBeUndefined();
@@ -108,8 +115,20 @@ describe('Home Page', () => {
       await user.click(screen.getByRole('button', { name: 'Apply Configuration' }));
       await waitFor(() => expect(updateConfigBody()).toBeDefined());
       expect(updateConfigBody().storage).toEqual({
-        hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/mnt/ckpts' }],
+        hostPath: [{ name: 'nfs', mountPath: '/mnt/models', path: '/mnt/ckpts' }],
       });
+    });
+
+    it('shows an invalid saved block (instead of hiding it) so it can be fixed', async () => {
+      mockFetch({ hostPath: [{ name: 'nfs', path: '/data/ckpts' }] });
+      await act(async () => {
+        renderWithProviders(<Home />);
+      });
+
+      expect(await storageSwitch()).toBeChecked();
+      expect(await screen.findByText(/saved in app-config.json for this environment is invalid/)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Host path on node/)).toHaveValue('/data/ckpts');
+      expect(screen.getByLabelText(/Mount path in pod/)).toHaveValue('');
     });
 
     it('sends storage: null (removing it) when the switch is turned off', async () => {

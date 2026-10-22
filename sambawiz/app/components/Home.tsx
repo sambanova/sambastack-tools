@@ -33,8 +33,8 @@ import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
 import {
-  DEFAULT_STORAGE_MOUNT_PATH,
   DEFAULT_STORAGE_VOLUME_NAME,
+  environmentStorageError,
   formatStorageYaml,
   readEnvironmentStorage,
   validateHostPathMount,
@@ -63,21 +63,41 @@ interface StorageFormState {
   mountPath: string;
   path: string;
   extraMounts: HostPathMount[];
+  /** Why the storage saved in app-config.json is invalid (shown until it is fixed and saved). */
+  savedError: string | null;
 }
 
 function storageFormFromEntry(entry: KubeconfigEntry | undefined): StorageFormState {
+  // An invalid saved block is shown (switch on, fields as written) rather than
+  // hidden, so saving never silently drops it and its error is visible.
+  const savedError = environmentStorageError(entry);
+  if (savedError) {
+    const raw = (entry?.storage as { hostPath?: unknown } | undefined)?.hostPath;
+    const [first, ...rest] = Array.isArray(raw) ? raw : [];
+    const field = (key: string) => (typeof first?.[key] === 'string' ? first[key] : '');
+    return {
+      enabled: true,
+      name: field('name'),
+      mountPath: field('mountPath'),
+      path: field('path'),
+      extraMounts: rest,
+      savedError,
+    };
+  }
   const storage = readEnvironmentStorage(entry);
   if (!storage) {
+    // Only the volume name has a default: both paths are site-specific (CUSTEI-1560).
     return {
       enabled: false,
       name: DEFAULT_STORAGE_VOLUME_NAME,
-      mountPath: DEFAULT_STORAGE_MOUNT_PATH,
+      mountPath: '',
       path: '',
       extraMounts: [],
+      savedError: null,
     };
   }
   const [first, ...rest] = storage.hostPath;
-  return { enabled: true, ...first, extraMounts: rest };
+  return { enabled: true, ...first, extraMounts: rest, savedError: null };
 }
 
 function storageFromForm(form: StorageFormState): DeploymentStorage {
@@ -1339,6 +1359,12 @@ data:
           </Typography>
           <Collapse in={storageForm.enabled}>
             <Box sx={{ pt: 2 }}>
+              {storageForm.savedError && (
+                <Alert severity="error" sx={{ mb: 2 }}>
+                  The air-gapped storage saved in app-config.json for this environment is invalid
+                  ({storageForm.savedError}) and is not added to deployments. Fix it below and apply.
+                </Alert>
+              )}
               <TextField
                 id="home-storage-volume-name"
                 fullWidth
@@ -1351,10 +1377,12 @@ data:
               <TextField
                 id="home-storage-mount-path"
                 fullWidth
+                required
                 label="Mount path in pod"
+                placeholder="/mnt/models"
                 value={storageForm.mountPath}
                 onChange={(e) => handleStorageFormChange({ mountPath: e.target.value })}
-                helperText={`Must match the local:// prefix used in your models.yaml (usually ${DEFAULT_STORAGE_MOUNT_PATH}).`}
+                helperText="Must match the local:// substitution target in global.substitutions of this install's models-values.yaml."
                 variant="outlined"
                 sx={{ mb: 2 }}
               />
@@ -1363,10 +1391,10 @@ data:
                 fullWidth
                 required
                 label="Host path on node"
-                placeholder="/data/sambastack-ml-data"
+                placeholder="/path/to/checkpoints"
                 value={storageForm.path}
                 onChange={(e) => handleStorageFormChange({ path: e.target.value })}
-                helperText="Directory on the cluster nodes that holds the model checkpoints."
+                helperText="Directory on the cluster nodes where the checkpoints are staged."
                 variant="outlined"
                 sx={{ mb: 2 }}
               />

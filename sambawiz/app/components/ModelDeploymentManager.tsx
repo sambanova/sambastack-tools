@@ -48,6 +48,7 @@ import DocumentationPanel from './DocumentationPanel';
 import { arePodNamesShortened } from '../utils/pod-name-limits';
 import {
   applyDeploymentStorage,
+  environmentStorageError,
   getDeploymentStorage,
   readEnvironmentStorage,
   type DeploymentStorage,
@@ -247,6 +248,8 @@ export default function ModelDeploymentManager() {
   // the first YAML shown already carries the block.
   const [envStorage, setEnvStorage] = useState<DeploymentStorage | null>(null);
   const [envStorageLoaded, setEnvStorageLoaded] = useState<boolean>(false);
+  // Why the environment's saved storage is invalid (it is then left out of the YAML, so say so).
+  const [envStorageError, setEnvStorageError] = useState<string | null>(null);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -696,14 +699,17 @@ export default function ModelDeploymentManager() {
   };
 
   // Fetch the current environment's air-gapped storage from app-config.json.
-  // A failed fetch or a missing/invalid block just means "no storage" — the
-  // YAML then stays exactly as on an online install.
+  // A failed fetch or a missing block just means "no storage" — the YAML then
+  // stays exactly as on an online install. An invalid block is left out too,
+  // but reported, since an air-gapped deployment without it never becomes ready.
   const fetchEnvironmentStorage = async () => {
     try {
       const response = await fetch('/api/environments');
       const data = await response.json();
       if (data.success && data.defaultEnvironment && data.kubeconfigs) {
-        setEnvStorage(readEnvironmentStorage(data.kubeconfigs[data.defaultEnvironment]));
+        const entry = data.kubeconfigs[data.defaultEnvironment];
+        setEnvStorage(readEnvironmentStorage(entry));
+        setEnvStorageError(environmentStorageError(entry));
       }
     } catch (err) {
       console.error('Failed to fetch environment storage:', err);
@@ -1386,6 +1392,21 @@ export default function ModelDeploymentManager() {
             Edit storage settings
           </Button>
         </Box>
+      )}
+      {envStorageError && (
+        <Alert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => router.push('/home')} sx={{ textTransform: 'none' }}>
+              Edit storage settings
+            </Button>
+          }
+        >
+          The air-gapped storage saved for this environment is invalid ({envStorageError}), so the YAML
+          below has no <code>spec.storage</code> block. On an air-gapped cluster the deployment will never
+          become ready until it is fixed.
+        </Alert>
       )}
       {envStorage && deploymentYaml && !yamlHasStorage && (
         <Alert severity="warning" sx={{ mb: 2 }}>

@@ -26,7 +26,7 @@ import { formatModelRefLatest } from '../app/utils/bundle-yaml-generator';
 import { floatPcmToWav, extractErrorMessage, parseSpeechStream } from '../app/utils/speech';
 import { inferencePodNames } from '../app/utils/inference-pod-names';
 import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
-import { readEnvironmentStorage } from '../app/utils/deployment-storage';
+import { environmentStorageError, readEnvironmentStorage } from '../app/utils/deployment-storage';
 import {
   CONFIG_PATH,
   DATA_DIR,
@@ -592,6 +592,8 @@ export function buildProgram(): Command {
       if (o.bundle) assertName('bundle name', o.bundle);
       const ctx = resolveCtx(o);
       // Air-gapped environments mount checkpoints from local storage (spec.storage), same as the interactive menu.
+      const storageErr = environmentStorageError(ctx.ec);
+      if (storageErr) fail(`Air-gapped storage for environment "${ctx.env}" in app-config.json is invalid: ${storageErr}`);
       const storage = readEnvironmentStorage(ctx.ec);
       if (storage) process.stderr.write('Including air-gapped checkpoint storage (spec.storage) from app-config.json\n');
       const opts = { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos, storage };

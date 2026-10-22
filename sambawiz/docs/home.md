@@ -42,4 +42,4 @@ All configuration changes are saved to `app-config.json` in the root directory w
   - `apiKey`: API key for model inference
   - `apiDomain`: API endpoint domain
   - `uiDomain`: UI dashboard domain
-  - `storage` *(air-gapped only)*: `hostPath` mount(s) added as `spec.storage` to generated deployments. Each mount has a volume `name` (default `nfs`), a `mountPath` inside the pod (default `/nfsdata`, must match the `local://` prefix in `models.yaml`) and the `path` on the node that holds the checkpoints. Turning the switch off removes it.
+  - `storage` *(air-gapped only)*: `hostPath` mount(s) added as `spec.storage` to generated deployments. Each mount has a volume `name` (default `nfs`), a `mountPath` inside the pod (no default: it must match the `local://` substitution target in `global.substitutions` of the install's `models-values.yaml`) and the `path` on the node where the checkpoints are staged (no default). Turning the switch off removes it.

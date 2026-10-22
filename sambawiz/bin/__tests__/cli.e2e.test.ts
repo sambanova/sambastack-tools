@@ -691,6 +691,14 @@ describe('deploy', () => {
     expect(applied()[0]).toContain('  storage:');
     expect(ok(await run(['deploy', 'create', '--bundle', 'bg', '--env', 'other', '--dry-run'])).out).not.toContain('storage:');
   });
+  it('create refuses an invalid saved storage block instead of deploying without it', async () => {
+    const cfg = readConfig();
+    cfg.kubeconfigs.lab.storage = { hostPath: [{ name: 'nfs', path: '/data/ckpts' }] };
+    writeFileSync(path.join(sandbox, 'app-config.json'), JSON.stringify(cfg));
+    failed(await run(['deploy', 'create', '--bundle', 'bg', '--dry-run']), /Air-gapped storage for environment "lab" in app-config.json is invalid: Mount path is required/);
+    failed(await run(['deploy', 'create', '--bundle', 'bg']), /is invalid/);
+    expect(applied()).toHaveLength(0);
+  });
   it('create enforces the UI rules: validated bundles only, caching only for a single caching model, valid names', async () => {
     failed(await run(['deploy', 'create', '--bundle', 'bp']), /not validated/);
     failed(await run(['deploy', 'create', '--bundle', 'ghost']), /NotFound|not found/);

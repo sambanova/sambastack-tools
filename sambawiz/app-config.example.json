@@ -26,8 +26,8 @@
         "hostPath": [
           {
             "name": "nfs",
-            "mountPath": "/nfsdata",
-            "path": "/data/sambastack-ml-data"
+            "mountPath": "/mnt/models",
+            "path": "/path/to/checkpoints"
           }
         ]
       }
