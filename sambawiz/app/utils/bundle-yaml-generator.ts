@@ -412,8 +412,8 @@ export function buildModelBundle(
     if (selection.isDraftFor) {
       modelSettings.routable = false;
     }
-    if (selection.swappable === false) {
-      modelSettings.swappable = false;
+    if (selection.swappable !== undefined) {
+      modelSettings.swappable = selection.swappable;
     }
     if (Object.keys(modelSettings).length > 0) {
       entry.modelSettings = modelSettings;

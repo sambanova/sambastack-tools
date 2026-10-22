@@ -716,16 +716,20 @@ describe('bundle-yaml-generator', () => {
       expect(targetEntry?.modelSettings).toBeUndefined();
     });
 
-    it('omits modelSettings when swappable is true, undefined, or unset (the operator default)', () => {
-      const cases: ModelBundleSelection[] = [
+    it('omits modelSettings when swappable is undefined or unset, and emits swappable:true when explicitly true', () => {
+      const unsetCases: ModelBundleSelection[] = [
         { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile },
-        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: true },
         { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: undefined },
       ];
-      cases.forEach((selection) => {
+      unsetCases.forEach((selection) => {
         const bundle = buildModelBundleObject('swap-default-bundle', [selection]);
         expect(bundle.spec.modelConfigs[0].modelSettings).toBeUndefined();
       });
+
+      const trueBundle = buildModelBundleObject('swap-true-bundle', [
+        { model: mockSingleArchModel, arch: 'e5-mistral', profile: mockHighInteractivityProfile, swappable: true },
+      ]);
+      expect(trueBundle.spec.modelConfigs[0].modelSettings).toEqual({ swappable: true });
     });
 
     it('emits modelSettings.swappable:false only when swappable is explicitly false', () => {
