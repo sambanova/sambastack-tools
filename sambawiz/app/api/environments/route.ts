@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import type { DeploymentStorage } from '../../utils/deployment-storage';
 
 interface KubeconfigEntry {
   file: string;
@@ -9,6 +10,7 @@ interface KubeconfigEntry {
   apiDomain?: string;
   uiDomain?: string;
   enableUpdates?: boolean;
+  storage?: DeploymentStorage;
 }
 
 interface AppConfig {

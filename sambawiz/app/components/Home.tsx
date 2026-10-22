@@ -24,11 +24,23 @@ import {
   DialogContentText,
   DialogActions,
   Tooltip,
+  Switch,
+  FormControlLabel,
+  Collapse,
 } from '@mui/material';
 import { Visibility, VisibilityOff, ContentCopy, Close, Warning } from '@mui/icons-material';
 import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
+import {
+  DEFAULT_STORAGE_VOLUME_NAME,
+  environmentStorageError,
+  formatStorageYaml,
+  readEnvironmentStorage,
+  validateHostPathMount,
+  type DeploymentStorage,
+  type HostPathMount,
+} from '../utils/deployment-storage';
 
 interface KubeconfigEntry {
   file: string;
@@ -37,6 +49,64 @@ interface KubeconfigEntry {
   apiDomain?: string;
   apiKey?: string;
   enableUpdates?: boolean;
+  storage?: DeploymentStorage;
+}
+
+/**
+ * The air-gapped storage form state for one environment. The form edits the
+ * first `hostPath` mount; any further mounts hand-written in app-config.json
+ * are kept as-is (`extraMounts`) so saving from the UI never drops them.
+ */
+interface StorageFormState {
+  enabled: boolean;
+  name: string;
+  mountPath: string;
+  path: string;
+  extraMounts: HostPathMount[];
+  /** Why the storage saved in app-config.json is invalid (shown until it is fixed and saved). */
+  savedError: string | null;
+}
+
+function storageFormFromEntry(entry: KubeconfigEntry | undefined): StorageFormState {
+  // An invalid saved block is shown (switch on, fields as written) rather than
+  // hidden, so saving never silently drops it and its error is visible.
+  const savedError = environmentStorageError(entry);
+  if (savedError) {
+    const raw = (entry?.storage as { hostPath?: unknown } | undefined)?.hostPath;
+    const [first, ...rest] = Array.isArray(raw) ? raw : [];
+    const field = (key: string) => (typeof first?.[key] === 'string' ? first[key] : '');
+    return {
+      enabled: true,
+      name: field('name'),
+      mountPath: field('mountPath'),
+      path: field('path'),
+      extraMounts: rest,
+      savedError,
+    };
+  }
+  const storage = readEnvironmentStorage(entry);
+  if (!storage) {
+    // Only the volume name has a default: both paths are site-specific (CUSTEI-1560).
+    return {
+      enabled: false,
+      name: DEFAULT_STORAGE_VOLUME_NAME,
+      mountPath: '',
+      path: '',
+      extraMounts: [],
+      savedError: null,
+    };
+  }
+  const [first, ...rest] = storage.hostPath;
+  return { enabled: true, ...first, extraMounts: rest, savedError: null };
+}
+
+function storageFromForm(form: StorageFormState): DeploymentStorage {
+  return {
+    hostPath: [
+      { name: form.name.trim(), mountPath: form.mountPath.trim(), path: form.path.trim() },
+      ...form.extraMounts,
+    ],
+  };
 }
 
 function incrementVersion(version: string): string {
@@ -112,6 +182,7 @@ export default function Home() {
   const [installerLogs, setInstallerLogs] = useState<string>('');
   const [showInstallerLogs, setShowInstallerLogs] = useState<boolean>(false);
   const [enableUpdates, setEnableUpdates] = useState<boolean>(true);
+  const [storageForm, setStorageForm] = useState<StorageFormState>(() => storageFormFromEntry(undefined));
   const [installationComplete, setInstallationComplete] = useState<boolean>(false);
   const [yamlModifiedAfterInstall, setYamlModifiedAfterInstall] = useState<boolean>(false);
 
@@ -228,6 +299,10 @@ export default function Home() {
             const enableUpdatesValue = data.kubeconfigs[data.defaultEnvironment].enableUpdates;
             setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
           }
+          // Set air-gapped storage from app-config.json
+          if (data.defaultEnvironment) {
+            setStorageForm(storageFormFromEntry(data.kubeconfigs?.[data.defaultEnvironment]));
+          }
         }
       } catch (error) {
         console.error('Failed to fetch environments:', error);
@@ -315,7 +390,17 @@ export default function Home() {
       setUiDomain('');
       setEnableUpdates(true); // Default to true for empty selection
     }
+    setStorageForm(storageFormFromEntry(kubeconfigs[envName]));
   };
+
+  const handleStorageFormChange = (changes: Partial<StorageFormState>) => {
+    setStorageForm((current) => ({ ...current, ...changes }));
+    setSaveSuccess(false);
+    setSaveError(null);
+  };
+
+  // Field-level error for the air-gapped storage mount (null when valid or disabled).
+  const storageError = storageForm.enabled ? validateHostPathMount(storageForm) : null;
 
   const handleNamespaceChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setNamespace(event.target.value);
@@ -423,6 +508,11 @@ export default function Home() {
       }
     }
 
+    if (storageError) {
+      setSaveError(`Air-gapped storage: ${storageError}`);
+      return;
+    }
+
     setSaving(true);
     setSaveSuccess(false);
     setSaveError(null);
@@ -440,6 +530,8 @@ export default function Home() {
           apiKey: apiKey,
           apiDomain: apiDomain,
           uiDomain: uiDomain,
+          // null removes any saved storage (online install)
+          storage: storageForm.enabled ? storageFromForm(storageForm) : null,
         }),
       });
 
@@ -1238,6 +1330,105 @@ data:
               },
             }}
           />
+        </Box>
+
+        {/* Air-gapped checkpoint storage (advanced) — emitted as spec.storage
+            in every ModelDeployment generated for this environment. */}
+        <Box
+          sx={{
+            mb: 3,
+            p: 2,
+            border: '1px solid',
+            borderColor: 'divider',
+            borderRadius: 1,
+          }}
+        >
+          <FormControlLabel
+            control={
+              <Switch
+                checked={storageForm.enabled}
+                onChange={(e) => handleStorageFormChange({ enabled: e.target.checked })}
+              />
+            }
+            label="Air-gapped environment (mount model checkpoints from local/NFS storage)"
+          />
+          <Typography variant="body2" sx={{ color: 'text.secondary', mt: 0.5 }}>
+            Turn this on only for clusters without access to an artifact registry. Model deployments
+            generated for this environment will include a <code>spec.storage</code> block that mounts
+            the checkpoints from the node.
+          </Typography>
+          <Collapse in={storageForm.enabled}>
+            <Box sx={{ pt: 2 }}>
+              {storageForm.savedError && (
+                <Alert severity="error" sx={{ mb: 2 }}>
+                  The air-gapped storage saved in app-config.json for this environment is invalid
+                  ({storageForm.savedError}) and is not added to deployments. Fix it below and apply.
+                </Alert>
+              )}
+              <TextField
+                id="home-storage-volume-name"
+                fullWidth
+                label="Volume name"
+                value={storageForm.name}
+                onChange={(e) => handleStorageFormChange({ name: e.target.value })}
+                variant="outlined"
+                sx={{ mb: 2 }}
+              />
+              <TextField
+                id="home-storage-mount-path"
+                fullWidth
+                required
+                label="Mount path in pod"
+                placeholder="/mnt/models"
+                value={storageForm.mountPath}
+                onChange={(e) => handleStorageFormChange({ mountPath: e.target.value })}
+                helperText="Must match the local:// substitution target in global.substitutions of this install's models-values.yaml."
+                variant="outlined"
+                sx={{ mb: 2 }}
+              />
+              <TextField
+                id="home-storage-host-path"
+                fullWidth
+                required
+                label="Host path on node"
+                placeholder="/path/to/checkpoints"
+                value={storageForm.path}
+                onChange={(e) => handleStorageFormChange({ path: e.target.value })}
+                helperText="Directory on the cluster nodes where the checkpoints are staged."
+                variant="outlined"
+                sx={{ mb: 2 }}
+              />
+              {storageForm.extraMounts.length > 0 && (
+                <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+                  {storageForm.extraMounts.length} additional mount(s) from app-config.json will be kept.
+                </Typography>
+              )}
+              {storageError ? (
+                <Alert severity="error">{storageError}</Alert>
+              ) : (
+                <>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
+                    Added to each generated deployment under <code>spec</code>:
+                  </Typography>
+                  <Box
+                    component="pre"
+                    data-testid="home-storage-preview"
+                    sx={{
+                      m: 0,
+                      p: 1.5,
+                      bgcolor: 'action.hover',
+                      borderRadius: 1,
+                      fontSize: '0.75rem',
+                      fontFamily: 'monospace',
+                      overflow: 'auto',
+                    }}
+                  >
+                    {formatStorageYaml(storageFromForm(storageForm))}
+                  </Box>
+                </>
+              )}
+            </Box>
+          </Collapse>
         </Box>
 
         {/* Success/Error Messages */}

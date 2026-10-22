@@ -789,7 +789,7 @@ Prompt caching adds `ENABLE_KV_CACHE_MANAGER` and `KV_CACHE_INCLUDE_STATS_IN_RES
      ← Cancel
 ```
 
-**✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't, for example the `storage:` block an air-gapped cluster needs. The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
+**✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't. (On an air-gapped environment the `storage:` block is added for you from `app-config.json`; see the main README's *Air-gapped clusters* section.) The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
 
 `spec.bundle` references the `ModelBundle` **by name**. For a single model without a bundle, use `deploy create --model` (see [Non-interactive commands](#non-interactive-commands)).
 
