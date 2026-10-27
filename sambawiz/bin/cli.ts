@@ -30,10 +30,17 @@ import {
   type ModelBundleSelection,
 } from '../app/utils/bundle-yaml-generator';
 import { parseModelBundleYamlContent } from '../app/utils/parse-bundle-yaml';
+import {
+  applyDeploymentStorage,
+  environmentStorageError,
+  readEnvironmentStorage,
+  type DeploymentStorage,
+} from '../app/utils/deployment-storage';
 import { inferencePodNames } from '../app/utils/inference-pod-names';
 import { ensureAppDataDir } from '../app/utils/ensure-app-data-dir';
 import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
 import yaml from 'js-yaml';
+import { DEFAULT_NAMESPACE } from '../app/utils/namespace';
 const yamlLib = yaml;
 
 // ─── V3 CLI data model ───────────────────────────────────────────────────────
@@ -371,11 +378,17 @@ export function extractBundleName(yamlContent: string): string {
  * deployment knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.)
  * are carried over verbatim from the old `BundleDeployment` builder (Step 5,
  * "Keep all other deployment parameters unchanged").
+ *
+ * `storage` is the current environment's air-gapped checkpoint mount
+ * (app-config.json `kubeconfigs.<env>.storage`); when set it is appended as
+ * `spec.storage`, otherwise the YAML is unchanged.
  */
 export interface ModelDeploymentOptions {
   deploymentName?: string;
   promptCaching?: boolean;
   ignoreEos?: boolean;
+  /** Air-gapped checkpoint mount (app-config.json `kubeconfigs.<env>.storage`); appended as `spec.storage`. */
+  storage?: DeploymentStorage | null;
 }
 
 // Same env vars the UI injects (ModelDeploymentManager.tsx PROMPT_CACHING_ENV_VARS / IGNORE_EOS_ENV_VARS).
@@ -394,7 +407,7 @@ function buildDeploymentYaml(
   opts: ModelDeploymentOptions
 ): string {
   const envVars = [...(opts.promptCaching ? PROMPT_CACHING_ENV_VARS : []), ...(opts.ignoreEos ? IGNORE_EOS_ENV_VARS : [])];
-  return [
+  const yamlText = [
     'apiVersion: sambanova.ai/v1alpha1',
     'kind: ModelDeployment',
     'metadata:',
@@ -413,6 +426,7 @@ function buildDeploymentYaml(
     ...(envVars.length ? ['    env_vars:', ...envVars.map((v) => `      ${v}: "true"`)] : []),
     '    startupTimeout: 7200',
   ].join('\n');
+  return opts.storage ? applyDeploymentStorage(yamlText, opts.storage) : yamlText;
 }
 
 export function buildModelDeploymentYaml(
@@ -929,7 +943,7 @@ export function getOutdatedHelmChartWarning(kPath: string, namespace: string): s
     try {
       raw = execSync('helm list -A -o json', { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
     } catch {
-      for (const ns of [namespace, 'sambastack', 'default'].filter(Boolean)) {
+      for (const ns of [...new Set([namespace, DEFAULT_NAMESPACE])].filter(Boolean)) {
         try { raw = execSync(`helm list -n ${ns} -o json`, { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 }); break; } catch { /* try next */ }
       }
     }
@@ -1438,7 +1452,7 @@ async function showKeycloakCredentials(rl: any, envName: string, ec: any) {
   if (!ec?.file) { errorMsg(`Environment "${envName}" has no kubeconfig configured.`); return; }
   const kPath = path.join(PROJECT_ROOT, ec.file);
   if (!existsSync(kPath)) { errorMsg(`Kubeconfig file not found: ${ec.file}`); return; }
-  const ns = ec.namespace || 'default';
+  const ns = ec.namespace || DEFAULT_NAMESPACE;
   const nsErr = validateResourceName(ns);
   if (nsErr) { errorMsg(`Invalid namespace "${ns}" for "${envName}": ${nsErr}`); return; }
 
@@ -1494,7 +1508,7 @@ async function addEnvironmentMenu(rl: any) {
     if (!kubeconfigInput || kubeconfigInput === ESC) return;
 
     // ── Step 3: Namespace ─────────────────────────────────────────────────────
-    const ns = await promptNamespace(rl, '3/6  Namespace', 'default');
+    const ns = await promptNamespace(rl, '3/6  Namespace', DEFAULT_NAMESPACE);
     if (ns === ESC) return;
 
     // ── Step 4: UI Domain ─────────────────────────────────────────────────────
@@ -1543,7 +1557,7 @@ async function addEnvironmentMenu(rl: any) {
     appConfig.kubeconfigs = appConfig.kubeconfigs || {};
     appConfig.kubeconfigs[name] = {
       file:          destRelative,
-      namespace:     ns || 'default',
+      namespace:     ns || DEFAULT_NAMESPACE,
       uiDomain:      uiDomain  || '',
       apiDomain:     apiDomain || '',
       apiKey:        apiKey    || '',
@@ -1559,7 +1573,7 @@ async function addEnvironmentMenu(rl: any) {
     process.stdout.write('\n');
 
     // ── Auto-generate checkpoint mapping + model profiles + PEF configs ──────
-    await runDataFileStepTracker(destPath, ns || 'default');
+    await runDataFileStepTracker(destPath, ns || DEFAULT_NAMESPACE);
 
     // ── Stay in sub-menu for the new environment ───────────────────────────────
     process.stdout.write('\n');
@@ -1578,7 +1592,7 @@ async function addEnvironmentMenu(rl: any) {
       if (action === 'validate') {
         const ec    = freshConfig.kubeconfigs[name];
         if (!ec) { errorMsg(`Environment "${name}" not found.`); continue; }
-        const envNs = ec.namespace || 'default';
+        const envNs = ec.namespace || DEFAULT_NAMESPACE;
         const envNsErr = validateResourceName(envNs);
         if (envNsErr) { errorMsg(`Invalid namespace "${envNs}" for "${name}": ${envNsErr}`); continue; }
         const kPath = path.join(PROJECT_ROOT, ec.file || '');
@@ -1591,7 +1605,7 @@ async function addEnvironmentMenu(rl: any) {
         process.stdout.write(chalk.reset(`\n  Editing: ${chalk.bold(name)}  (Enter to keep current value)\n\n`));
         const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
         if (file === ESC) continue;
-        const editNs    = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
+        const editNs    = await promptNamespace(rl, 'Namespace', ec.namespace || DEFAULT_NAMESPACE);
         if (editNs === ESC) continue;
         const uiD       = await input(rl, 'UI Domain',        ec.uiDomain  || '');
         if (uiD === ESC) continue;
@@ -1655,14 +1669,14 @@ async function addEnvironmentMenu(rl: any) {
       writePrivateFile(CONFIG_PATH, JSON.stringify(freshConfig, null, 2) + '\n');
       successMsg(`"${envName}" is now the active environment.`);
       const kPath  = path.join(PROJECT_ROOT, kFile);
-      const ns     = ec.namespace || 'default';
+      const ns     = ec.namespace || DEFAULT_NAMESPACE;
       await runDataFileStepTracker(kPath, ns);
       break; // leave sub-menu after activate
 
     } else if (action === 'validate') {
       const ec    = freshConfig.kubeconfigs[envName];
       if (!ec) { errorMsg(`Environment "${envName}" not found.`); continue; }
-      const ns    = ec.namespace || 'default';
+      const ns    = ec.namespace || DEFAULT_NAMESPACE;
       const kPath = path.join(PROJECT_ROOT, ec.file || '');
       if (ec.file && existsSync(kPath)) process.env.KUBECONFIG = kPath;
       await runValidationChecks(envName, ec, ns);
@@ -1677,7 +1691,7 @@ async function addEnvironmentMenu(rl: any) {
 
       const file      = await input(rl, 'Kubeconfig file', ec.file      || '');
       if (file === ESC) continue;
-      const ns        = await promptNamespace(rl, 'Namespace', ec.namespace || 'default');
+      const ns        = await promptNamespace(rl, 'Namespace', ec.namespace || DEFAULT_NAMESPACE);
       if (ns === ESC) continue;
       const uiDomain  = await input(rl, 'UI Domain',        ec.uiDomain  || '');
       if (uiDomain === ESC) continue;
@@ -1792,7 +1806,7 @@ async function startCli() {
     const newConfig: any = { currentKubeconfig: '', kubeconfigs: {} };
     for (const file of yamlFiles) {
       const envName = file.replace(/\.(yaml|yml)$/, '');
-      newConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
+      newConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: DEFAULT_NAMESPACE };
     }
     if (yamlFiles.length) newConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
     writePrivateFile(CONFIG_PATH, JSON.stringify(newConfig, null, 2) + '\n');
@@ -1810,7 +1824,7 @@ async function startCli() {
           existingConfig.kubeconfigs = {};
           for (const file of yamlFiles) {
             const envName = file.replace(/\.(yaml|yml)$/, '');
-            existingConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: 'default' };
+            existingConfig.kubeconfigs[envName] = { file: `kubeconfigs/${file}`, namespace: DEFAULT_NAMESPACE };
           }
           existingConfig.currentKubeconfig = yamlFiles[0].replace(/\.(yaml|yml)$/, '');
           writePrivateFile(CONFIG_PATH, JSON.stringify(existingConfig, null, 2) + '\n');
@@ -1824,10 +1838,10 @@ async function startCli() {
     const config = requireJson(CONFIG_PATH);
     const env = config.currentKubeconfig;
     if (!env || !config.kubeconfigs?.[env]) {
-      return { appConfig: config, envConfig: null, namespace: 'default', currentEnv: env, error: 'Environment not configured in app-config.json.' };
+      return { appConfig: config, envConfig: null, namespace: DEFAULT_NAMESPACE, currentEnv: env, error: 'Environment not configured in app-config.json.' };
     }
     const envConf = config.kubeconfigs[env];
-    const ns      = envConf.namespace || 'default';
+    const ns      = envConf.namespace || DEFAULT_NAMESPACE;
     const kPath   = path.join(PROJECT_ROOT, envConf.file);
     if (!existsSync(kPath)) {
       return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: `Kubeconfig file not found: ${envConf.file}` };
@@ -1835,7 +1849,7 @@ async function startCli() {
     // The namespace is spliced into kubectl/helm commands throughout the menus, so it must be a legal name.
     const nsErr = validateResourceName(ns);
     if (nsErr) {
-      return { appConfig: config, envConfig: null, namespace: 'default', currentEnv: env, error: `Invalid namespace "${ns}" for environment "${env}": ${nsErr}` };
+      return { appConfig: config, envConfig: null, namespace: DEFAULT_NAMESPACE, currentEnv: env, error: `Invalid namespace "${ns}" for environment "${env}": ${nsErr}` };
     }
     process.env.KUBECONFIG = kPath;
     return { appConfig: config, envConfig: envConf, namespace: ns, currentEnv: env, error: null };
@@ -2011,7 +2025,7 @@ async function runValidationChecks(envName: string, envConfig: any, namespace: s
       raw = execSync('helm list -A -o json', { env: helmEnv, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 });
     } catch {
       // -A may be forbidden — try known namespaces directly
-      const tryNs = [namespace, 'sambastack', 'default'].filter(Boolean);
+      const tryNs = [...new Set([namespace, DEFAULT_NAMESPACE])].filter(Boolean);
       let found = false;
       for (const ns of tryNs) {
         try {
@@ -2456,7 +2470,7 @@ function currentClusterStamp(): { kubeconfig: string; namespace: string } {
   try {
     const config = requireJson(CONFIG_PATH);
     const name = config.currentKubeconfig ?? '';
-    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || 'default' };
+    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || DEFAULT_NAMESPACE };
   } catch {
     return { kubeconfig: '', namespace: '' };
   }
@@ -3172,8 +3186,18 @@ async function bundleDeployAction(rl: any, namespace: string) {
     const nameErr = validateResourceName(depNameInput);
     if (nameErr) { errorMsg(nameErr); return; }
 
+    // Air-gapped environments mount checkpoints from local storage (spec.storage).
+    const appConfig = requireJson(CONFIG_PATH);
+    const envEntry = appConfig.kubeconfigs?.[appConfig.currentKubeconfig];
+    const storageErr = environmentStorageError(envEntry);
+    if (storageErr) { errorMsg(`Air-gapped storage in app-config.json is invalid: ${storageErr}`); return; }
+    const storage = readEnvironmentStorage(envEntry);
+    if (storage) {
+      process.stdout.write(chalk.reset(`  Including air-gapped checkpoint storage (spec.storage) from app-config.json\n`));
+    }
+
     const built = buildModelDeploymentYaml(bundleToDeploy, {
-      deploymentName: depNameInput, promptCaching, ignoreEos,
+      deploymentName: depNameInput, promptCaching, ignoreEos, storage,
     });
     let yaml = built.yaml;
     let depName = built.deploymentName;

@@ -3,7 +3,7 @@
   "kubeconfigs": {
     "your-environment-name": {
       "file": "kubeconfigs/kubeconfig_example.yaml",
-      "namespace": "default",
+      "namespace": "sambastack",
       "uiDomain": "https://ui-your-environment.example.com/",
       "apiDomain": "https://api-your-environment.example.com/",
       "apiKey": "your-api-key-here",
@@ -11,10 +11,26 @@
     },
     "another-environment": {
       "file": "kubeconfigs/another-kubeconfig_example.yaml",
-      "namespace": "default",
+      "namespace": "sambastack",
       "uiDomain": "https://ui-another-environment.example.com/",
       "apiDomain": "https://api-another-environment.example.com/",
       "apiKey": "another-api-key-here"
+    },
+    "airgapped-environment": {
+      "file": "kubeconfigs/airgapped-kubeconfig_example.yaml",
+      "namespace": "sambastack",
+      "uiDomain": "https://ui-airgapped-environment.example.com/",
+      "apiDomain": "https://api-airgapped-environment.example.com/",
+      "apiKey": "airgapped-api-key-here",
+      "storage": {
+        "hostPath": [
+          {
+            "name": "nfs",
+            "mountPath": "/mnt/models",
+            "path": "/path/to/checkpoints"
+          }
+        ]
+      }
     }
   },
   "checkpoint_overrides": {

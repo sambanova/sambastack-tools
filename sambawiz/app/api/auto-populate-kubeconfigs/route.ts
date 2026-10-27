@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -68,7 +69,7 @@ export async function POST() {
       const envName = file.replace(/\.(yaml|yml)$/, '');
       config.kubeconfigs[envName] = {
         file: `kubeconfigs/${file}`,
-        namespace: 'default',
+        namespace: DEFAULT_NAMESPACE,
       };
     });
 

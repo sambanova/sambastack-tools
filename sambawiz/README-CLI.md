@@ -240,7 +240,7 @@ A 6-step guided flow. Press `Esc` at any step to cancel without saving.
 
   2/6  Kubeconfig (base64 or file path)  Esc cancel: LS0tCmFwaVZlcnNpb...
 
-  3/6  Namespace  Esc cancel: default
+  3/6  Namespace  Esc cancel: sambastack
 
   4/6  UI Domain (optional)  Esc cancel: https://ui.my-env.example.com/
 
@@ -253,7 +253,7 @@ A 6-step guided flow. Press `Esc` at any step to cancel without saving.
 |---|---|---|
 | Environment name | Yes | No spaces allowed. Must be unique. |
 | Kubeconfig | Yes | Base64 string **or** file path. Saved as `kubeconfigs/kubeconfig-<name>.yaml` |
-| Namespace | Yes | Defaults to `default` |
+| Namespace | Yes | Defaults to `sambastack` |
 | UI Domain | No | SambaStack UI URL |
 | API Domain | No | Required for Playground |
 | API Key | No | Required for Playground |
@@ -309,14 +309,14 @@ Runs a full connectivity and configuration check. If all checks pass, `checkpoin
   ╰──────────────────────────────────────────────────────────╯
 
   Environment    my-env
-  Namespace      default
+  Namespace      sambastack
   ──────────────────────────────────────────────────────────
 
   ✔  Kubeconfig         kubeconfigs/kubeconfig-my-env.yaml
   ✔  Helm               v4.0.1+g12500dd
   ✔  SambaStack         2.1.1  (min: 2.0.0)
   ✔  Kubernetes         connection OK
-  ⚠  Namespace          using default
+  ✔  Namespace          sambastack exists
 
   API Domain     https://api.my-env.example.com/
   API Key        abcd••••••••1234
@@ -373,7 +373,7 @@ All fields are pre-populated with current values — use `←` `→` to navigate
 
   › Kubeconfig file  Esc cancel: kubeconfigs/kubeconfig-my-env.yaml
 
-  › Namespace  Esc cancel: default
+  › Namespace  Esc cancel: sambastack
 
   › UI Domain  Esc cancel: https://ui.my-env.example.com/
 
@@ -789,7 +789,7 @@ Prompt caching adds `ENABLE_KV_CACHE_MANAGER` and `KV_CACHE_INCLUDE_STATS_IN_RES
      ← Cancel
 ```
 
-**✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't, for example the `storage:` block an air-gapped cluster needs. The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
+**✏️ Edit YAML in editor first** opens the YAML in `$EDITOR` (fallback `vi`) — use it to add anything the generator doesn't. (On an air-gapped environment the `storage:` block is added for you from `app-config.json`; see the main README's *Air-gapped clusters* section.) The edited YAML must still be a `ModelDeployment` with a valid `metadata.name` (otherwise you're told and it stays as it was); you can edit as many times as you like before deploying.
 
 `spec.bundle` references the `ModelBundle` **by name**. For a single model without a bundle, use `deploy create --model` (see [Non-interactive commands](#non-interactive-commands)).
 
@@ -1114,7 +1114,7 @@ The end-to-end suite (`bin/__tests__/cli.e2e.test.ts`) spawns the real CLI for e
   "kubeconfigs": {
     "my-env": {
       "file": "kubeconfigs/kubeconfig-my-env.yaml",
-      "namespace": "default",
+      "namespace": "sambastack",
       "uiDomain": "https://ui.my-env.example.com/",
       "apiDomain": "https://api.my-env.example.com/",
       "apiKey": "your-api-key-here",
@@ -1171,7 +1171,7 @@ Ensure you are on the correct network or VPN. The CLI times out kubectl calls af
 
 **SambaStack version check skipped**
 
-The CLI tries `helm list -A` first, then falls back to `helm list -n <namespace>`, `sambastack`, and `default` if RBAC denies cluster-wide list.
+The CLI tries `helm list -A` first, then falls back to `helm list -n <namespace>` and `sambastack` if RBAC denies cluster-wide list.
 
 ```bash
 helm list -A --kubeconfig ./kubeconfigs/kubeconfig-my-env.yaml

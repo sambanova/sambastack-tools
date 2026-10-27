@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import path from 'path';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -71,7 +72,7 @@ export async function GET() {
     }
 
     const kubeconfigFile = config.kubeconfigs[currentEnv].file;
-    const namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+    const namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
 
     const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
     if (!existsSync(kubeconfigPath)) {
@@ -220,7 +221,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     const kubeconfigFile = config.kubeconfigs[currentEnv].file;
-    const namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+    const namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
 
     const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
     if (!existsSync(kubeconfigPath)) {

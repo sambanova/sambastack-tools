@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface BundleBuilderState {
   selectedModels: string[];
@@ -40,7 +41,7 @@ function currentCluster(): { kubeconfig: string; namespace: string } {
       readFileSync(path.join(process.cwd(), 'app-config.json'), 'utf-8')
     );
     const name = config.currentKubeconfig ?? '';
-    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || 'default' };
+    return { kubeconfig: name, namespace: config.kubeconfigs?.[name]?.namespace || DEFAULT_NAMESPACE };
   } catch {
     return { kubeconfig: '', namespace: '' };
   }

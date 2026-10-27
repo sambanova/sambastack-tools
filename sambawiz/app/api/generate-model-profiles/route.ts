@@ -4,6 +4,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import type { BatchingConfig, ModelProfilesCache, NamedBatchingConfigs } from '../../types/bundle';
 import { ensureAppDataDir } from '../../utils/ensure-app-data-dir';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 /**
  * Mirrors `generate-checkpoint-mapping/route.ts`'s app-config.json ->
@@ -46,7 +47,7 @@ export async function POST() {
     // Read app-config.json to get current environment configuration
     const configPath = path.join(process.cwd(), 'app-config.json');
     let kubeconfigFile = '';
-    let namespace = 'default';
+    let namespace = DEFAULT_NAMESPACE;
 
     const configContent = await fs.readFile(configPath, 'utf-8');
     const config: AppConfig = JSON.parse(configContent);
@@ -54,7 +55,7 @@ export async function POST() {
     const currentEnv = config.currentKubeconfig;
     if (currentEnv && config.kubeconfigs[currentEnv]) {
       kubeconfigFile = config.kubeconfigs[currentEnv].file;
-      namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+      namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
     }
 
     if (!kubeconfigFile) {

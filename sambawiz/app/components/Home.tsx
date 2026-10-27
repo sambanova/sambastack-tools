@@ -29,6 +29,7 @@ import { Visibility, VisibilityOff, ContentCopy, Close, Warning } from '@mui/ico
 import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
+import { DEFAULT_NAMESPACE } from '../utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -91,7 +92,8 @@ export default function Home() {
   const [environments, setEnvironments] = useState<string[]>([]);
   const [kubeconfigs, setKubeconfigs] = useState<Record<string, KubeconfigEntry>>({});
   const [saving, setSaving] = useState<boolean>(false);
-  const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  // Success message for the last Apply; stays up until the form is edited again.
+  const [saveSuccess, setSaveSuccess] = useState<string | false>(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [prerequisiteWarning, setPrerequisiteWarning] = useState<string | null>(null);
   const [showPrerequisiteDialog, setShowPrerequisiteDialog] = useState<boolean>(false);
@@ -103,7 +105,12 @@ export default function Home() {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [loadingCredentials, setLoadingCredentials] = useState<boolean>(false);
   const [credentialsError, setCredentialsError] = useState<string | null>(null);
-  const { fullVersion: fullHelmVersion, helmVersionError: helmVersionTooOld, minimumVersion: minimumHelmVersion } = useAppContext();
+  const {
+    fullVersion: fullHelmVersion,
+    helmVersionError: helmVersionTooOld,
+    minimumVersion: minimumHelmVersion,
+    refetch: refetchAppContext,
+  } = useAppContext();
   const [showInstallDialog, setShowInstallDialog] = useState<boolean>(false);
   const [installYaml, setInstallYaml] = useState<string>('');
   const [installing, setInstalling] = useState<boolean>(false);
@@ -302,14 +309,14 @@ export default function Home() {
 
     // Auto-populate namespace, API key, and domains from kubeconfigs
     if (envName && kubeconfigs[envName]) {
-      setNamespace(kubeconfigs[envName].namespace || 'default');
+      setNamespace(kubeconfigs[envName].namespace || DEFAULT_NAMESPACE);
       setApiKey(kubeconfigs[envName].apiKey || '');
       setApiDomain(kubeconfigs[envName].apiDomain || '');
       setUiDomain(kubeconfigs[envName].uiDomain || '');
       const enableUpdatesValue = kubeconfigs[envName].enableUpdates;
       setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
     } else {
-      setNamespace('default');
+      setNamespace(DEFAULT_NAMESPACE);
       setApiKey('');
       setApiDomain('');
       setUiDomain('');
@@ -491,13 +498,25 @@ export default function Home() {
         return;
       }
 
-      setSaveSuccess(true);
+      setSaveSuccess(
+        `Environment "${selectedEnvironment}" applied: ${generateData.count ?? 0} models and ` +
+        `${profilesData.count} model profiles loaded from the cluster.`
+      );
       // Clear playground state so it re-fetches against the new environment
       fetch('/api/playground-state', { method: 'DELETE' }).catch(() => {});
-      // Reload the page after a short delay to refresh the navbar and all app state
-      setTimeout(() => {
-        window.location.reload();
-      }, 1000);
+      // Refresh the navbar (environment, Helm version) in place rather than
+      // reloading the page, so the success message stays visible. Other pages
+      // fetch their data on mount, so they pick up the new environment anyway.
+      refetchAppContext();
+      // Refresh the saved per-environment settings the environment picker
+      // repopulates the form from. The form itself already shows what was saved.
+      try {
+        const envResponse = await fetch('/api/environments');
+        const envData = await envResponse.json();
+        if (envData.success) setKubeconfigs(envData.kubeconfigs || {});
+      } catch (error) {
+        console.error('Failed to refresh environments:', error);
+      }
     } catch (error) {
       console.error('Error saving configuration:', error);
       setSaveError('Failed to save configuration');
@@ -1240,10 +1259,19 @@ data:
           />
         </Box>
 
+        {/* Air-gapped storage is set on the Model Deployment page
+            (spec.storage); a default per environment lives in app-config.json,
+            which this page does not edit. */}
+        <Alert severity="info" sx={{ mb: 3 }}>
+          <strong>Air-gapped environment?</strong> Check <strong>Air-gapped deployment</strong> on the{' '}
+          <strong>Model Deployment</strong> page, or set <code>storage</code> for this environment in{' '}
+          <code>app-config.json</code> to use it everywhere.
+        </Alert>
+
         {/* Success/Error Messages */}
         {saveSuccess && (
           <Alert severity="success" sx={{ mb: 3 }}>
-            Configuration saved successfully!
+            {saveSuccess}
           </Alert>
         )}
         {saveError && (

@@ -81,7 +81,7 @@ Example `app-config.json`:
   "kubeconfigs": {
     "your-environment-name": {
       "file": "kubeconfigs/your-environment.yaml",
-      "namespace": "default",
+      "namespace": "sambastack",
       "uiDomain": "https://ui-your-environment.example.com/",
       "apiDomain": "https://api-your-environment.example.com/",
       "apiKey": "your-api-key-here"
@@ -98,13 +98,44 @@ Example `app-config.json`:
   - `uiDomain` *(optional)*: SambaStack UI domain, used to help generate an API key.
   - `apiDomain` *(optional)*: OpenAI-compatible API domain — **required for Playground** chat/embeddings.
   - `apiKey` *(optional)*: API key for inference — **required for Playground**.
+  - `storage` *(optional, air-gapped clusters only, CLI only)*: Local/NFS checkpoint mount added as `spec.storage` to the `ModelDeployment`s generated for this environment, by the CLI and by the web UI (as the default for bundles and models with no block of their own). See [Air-gapped clusters](#air-gapped-clusters).
 - `checkpoint_overrides` *(optional)*: Map of model name → checkpoint version, to pin a specific checkpoint version when a model exposes more than one.
 
 **Notes:**
 - `app-config.json` is **gitignored** to keep credentials out of version control. Use `app-config.example.json` (safe to commit) as a template.
 - You can configure multiple environments and switch between them from the Home page.
 - Configuration can also be edited through the Home page UI.
-- Unlike SambaWiz 1.x, there is **no `checkpointsDir` setting** — checkpoints are resolved from each model's `Model` custom resource in the cluster, not from a storage path you configure.
+- Unlike SambaWiz 1.x, there is **no `checkpointsDir` setting** — checkpoints are resolved from each model's `Model` custom resource in the cluster. The only exception is the local/NFS checkpoint mount on air-gapped clusters (below).
+
+#### Air-gapped clusters
+
+An air-gapped cluster has no artifact registry to pull checkpoints from, so the inference pods must mount them from a local/NFS path on the nodes. Without that mount the operator rejects the deployment (`Valid=False`, `ValidationFailed`: *uses local:// artifact sources but no storage configuration with HostPath volumes is defined*) and no pods are created.
+
+**Web UI:** set the mount per deployment on the Model Deployment page. Check **Air-gapped deployment** and a `spec.storage` block with placeholder paths is added to the YAML; replace them with your paths (Deploy stays disabled until you do). The block you deploy a bundle or model with is remembered for that bundle or model in the current environment, and restored (box checked) the next time you select it. If the environment has `storage` in `app-config.json` (below), bundles and models with nothing remembered start with that block instead of placeholders. If it has none, the first deploy with a storage block offers **Save for environment**, which writes that block there.
+
+**CLI (and web UI default):** configure the mount once per environment in `app-config.json`:
+
+```json
+"your-airgapped-environment": {
+  "file": "kubeconfigs/your-airgapped-environment.yaml",
+  "namespace": "sambastack",
+  "storage": {
+    "hostPath": [
+      { "name": "nfs", "mountPath": "/mnt/models", "path": "/path/to/checkpoints" }
+    ]
+  }
+}
+```
+
+The paths above are placeholders. Both come from the decision the installer already made when writing the install's `models-values.yaml`, so neither has a default:
+
+- `name`: Volume name (lowercase letters, digits and `-`). Arbitrary; the UI uses `nfs`.
+- `mountPath`: Where the checkpoints are mounted inside the pod. **Must match the `local://` substitution target in `global.substitutions` of the install's `models-values.yaml`** (e.g. a target of `local:///mnt/models` means `mountPath: /mnt/models`). If it doesn't, the volume mounts and the deployment is accepted, but the model is still not found.
+- `path`: Directory on the cluster nodes where the checkpoints are staged. Site-specific.
+
+Only `hostPath` mounts are supported. If the `storage` saved for an environment is invalid, the CLI refuses to deploy rather than generating a deployment without it.
+
+When `storage` is set, the CLI adds it to every generated `ModelDeployment` as `spec.storage`. Environments without `storage` (online installs) generate exactly the same YAML as before.
 
 ### 3. Configure Kubernetes Access
 

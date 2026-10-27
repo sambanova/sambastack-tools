@@ -26,6 +26,8 @@ import { formatModelRefLatest } from '../app/utils/bundle-yaml-generator';
 import { floatPcmToWav, extractErrorMessage, parseSpeechStream } from '../app/utils/speech';
 import { inferencePodNames } from '../app/utils/inference-pod-names';
 import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
+import { environmentStorageError, readEnvironmentStorage } from '../app/utils/deployment-storage';
+import { DEFAULT_NAMESPACE } from '../app/utils/namespace';
 import {
   CONFIG_PATH,
   DATA_DIR,
@@ -220,7 +222,7 @@ function resolveCtx(opts: any): Ctx {
   const kubeconfig = path.isAbsolute(ec.file) ? ec.file : path.join(PROJECT_ROOT, ec.file);
   if (!existsSync(kubeconfig)) fail(`Kubeconfig not found: ${kubeconfig}`);
   process.env.KUBECONFIG = kubeconfig;
-  const namespace = assertName('namespace', opts.namespace || ec.namespace || 'default');
+  const namespace = assertName('namespace', opts.namespace || ec.namespace || DEFAULT_NAMESPACE);
   return { env, kubeconfig, namespace, json: Boolean(opts.json), ec };
 }
 
@@ -435,7 +437,7 @@ export function buildProgram(): Command {
   env.command('list').description('List configured environments').option('--json', 'JSON output').action((o) => {
     const cfg = loadAppConfig();
     const rows = Object.entries<any>(cfg.kubeconfigs || {}).map(([name, e]) => ({
-      name, current: name === cfg.currentKubeconfig, kubeconfig: e.file, namespace: e.namespace || 'default',
+      name, current: name === cfg.currentKubeconfig, kubeconfig: e.file, namespace: e.namespace || DEFAULT_NAMESPACE,
     }));
     print(o, rows, () => rows.forEach((r) => say(`${r.current ? '*' : ' '} ${r.name}  ns=${r.namespace}  ${r.kubeconfig}`)));
   });
@@ -590,6 +592,12 @@ export function buildProgram(): Command {
       if (!o.bundle === !o.model) fail('Give exactly one of --bundle or --model.');
       if (o.bundle) assertName('bundle name', o.bundle);
       const ctx = resolveCtx(o);
+      // Air-gapped environments mount checkpoints from local storage (spec.storage), same as the interactive menu.
+      const storageErr = environmentStorageError(ctx.ec);
+      if (storageErr) fail(`Air-gapped storage for environment "${ctx.env}" in app-config.json is invalid: ${storageErr}`);
+      const storage = readEnvironmentStorage(ctx.ec);
+      if (storage) process.stderr.write('Including air-gapped checkpoint storage (spec.storage) from app-config.json\n');
+      const opts = { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos, storage };
       let built: { yaml: string; deploymentName: string };
       let cachingProfile: string | undefined;
       if (o.bundle) {
@@ -597,14 +605,14 @@ export function buildProgram(): Command {
         if (bundleValidationOutcome(b) !== 'succeeded') fail(`Bundle "${o.bundle}" is not validated; run \`bundle validate ${o.bundle}\`.`);
         const mc = b.spec?.modelConfigs || [];
         cachingProfile = mc.length === 1 ? mc[0].profile : undefined;
-        built = buildModelDeploymentYaml(o.bundle, { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos });
+        built = buildModelDeploymentYaml(o.bundle, opts);
       } else {
         const { mapping, profiles } = readCache();
         assertCacheMatches(ctx);
         const [sel] = buildSelections({ models: [o.model] }, mapping, profiles);
         const ref = formatModelRefLatest(sel.model, sel.arch, readCheckpointOverrides()[sel.model.spec.name]);
         cachingProfile = sel.profile.metadata.name;
-        built = buildModelBasedDeploymentYaml(ref, sel.profile.metadata.name, { deploymentName: o.name, promptCaching: o.promptCaching, ignoreEos: o.ignoreEos });
+        built = buildModelBasedDeploymentYaml(ref, sel.profile.metadata.name, opts);
       }
       const nameErr = validateResourceName(built.deploymentName);
       if (nameErr) fail(nameErr);
@@ -812,7 +820,7 @@ export function buildProgram(): Command {
   const saveConfig = (cfg: any) => writePrivateFile(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
   env.command('add <name>').description('Add an environment from a kubeconfig file or base64 string')
     .option('--kubeconfig-file <path>', 'path to a kubeconfig').option('--kubeconfig-b64 <string>', 'base64-encoded kubeconfig')
-    .option('--namespace <ns>', 'namespace', 'default').option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>')
+    .option('--namespace <ns>', 'namespace', DEFAULT_NAMESPACE).option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>')
     .option('--overwrite', 'replace the kubeconfig of an existing environment').action((name, o) => {
       assertEnvName(name);
       warnKeyOnCommandLine(o);

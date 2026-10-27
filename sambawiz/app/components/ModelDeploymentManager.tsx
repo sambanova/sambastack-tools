@@ -46,6 +46,18 @@ import Tooltip from '@mui/material/Tooltip';
 import yaml from 'js-yaml';
 import DocumentationPanel from './DocumentationPanel';
 import { arePodNamesShortened } from '../utils/pod-name-limits';
+import {
+  formatConditions,
+  type DeploymentCondition,
+  type DeploymentConditionOutcome,
+} from '../utils/deployment-conditions';
+import {
+  applyDeploymentStorage,
+  deploymentStorageProblem,
+  getDeploymentStorage,
+  PLACEHOLDER_STORAGE,
+  type DeploymentStorage,
+} from '../utils/deployment-storage';
 
 /**
  * A deployed `ModelDeployment` CR summary, as returned by
@@ -119,6 +131,11 @@ const IGNORE_EOS_ENV_VARS = {
   ENABLE_IGNORE_EOS: 'true',
 } as const;
 
+/** Tooltip copy for the "Air-gapped deployment" checkbox. */
+const AIR_GAPPED_TOOLTIP =
+  'For clusters without an artifact registry: adds spec.storage so the pods mount their ' +
+  'checkpoints from local/NFS storage on the node. Leave unchecked on online installs.';
+
 /** Tooltip copy for the "Ignore EOS" checkbox. */
 const IGNORE_EOS_TOOLTIP =
   'Ignores the End-of-Sequence (EOS) token so generation always runs to a set token length ' +
@@ -131,6 +148,20 @@ const IGNORE_EOS_TOOLTIP =
  * cache), keyed by ModelProfile `metadata.name`. Only `features` is needed here.
  */
 type ModelProfileFeatures = Record<string, { features?: string[] }>;
+
+/**
+ * Key under which a deployment's air-gapped storage is remembered
+ * (`/api/deployment-storage-state`): the bundle it deploys, or the model ref
+ * for a model + profile deployment. `null` when nothing is selected.
+ */
+function deploymentSourceKey(
+  mode: 'model' | 'bundle',
+  bundle: string,
+  modelRef: string | null
+): string | null {
+  if (mode === 'model') return modelRef ? `model:${modelRef}` : null;
+  return bundle ? `bundle:${bundle}` : null;
+}
 
 /**
  * Determines the deployment status of a bundle based on its cache and default pod status.
@@ -234,6 +265,25 @@ export default function ModelDeploymentManager() {
   // "Ignore EOS" checkbox: always available (not gated by profile features).
   // Resets on each new selection and injects `ENABLE_IGNORE_EOS` when checked.
   const [ignoreEos, setIgnoreEos] = useState<boolean>(false);
+  // Air-gapped `spec.storage` last deployed for each bundle / model in the
+  // current environment, keyed by `deploymentSourceKey`. Selecting one of them
+  // again pre-fills its block (and so ticks the "Air-gapped deployment" box).
+  // YAML generation for URL-driven selections waits for `savedStorageLoaded`
+  // so the first YAML shown already carries the block.
+  const [savedStorage, setSavedStorage] = useState<Record<string, DeploymentStorage>>({});
+  const [savedStorageLoaded, setSavedStorageLoaded] = useState<boolean>(false);
+  // The environment's own block (app-config.json `kubeconfigs.<env>.storage`,
+  // the one the CLI uses): the default for bundles / models with nothing
+  // remembered. `environmentStorageError` is set when that block is invalid.
+  const [environmentStorage, setEnvironmentStorage] = useState<DeploymentStorage | null>(null);
+  const [environmentStorageError, setEnvironmentStorageError] = useState<string | null>(null);
+  // After a deploy with storage in an environment without a usable block of
+  // its own: the block offered as the environment's default, and how saving
+  // it went (`saved` / an error message).
+  const [offeredEnvironmentStorage, setOfferedEnvironmentStorage] = useState<DeploymentStorage | null>(null);
+  const [environmentStorageSave, setEnvironmentStorageSave] = useState<
+    { saving: true } | { saved: true } | { error: string } | null
+  >(null);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -259,6 +309,18 @@ export default function ModelDeploymentManager() {
     defaultPod: { ready: number; total: number; status: string } | null;
   }>({ cachePod: null, defaultPod: null });
   const [podStatusError, setPodStatusError] = useState<string | null>(null);
+  // `kubectl describe modeldeployment` of the monitored deployment. Its
+  // `status.conditions` carry the operator's verdict (e.g. Valid=False /
+  // ValidationFailed), which is the only failure signal when no pods get created.
+  const [deploymentDescribe, setDeploymentDescribe] = useState<{
+    command: string;
+    describe: string;
+    conditions: DeploymentCondition[];
+    outcome: DeploymentConditionOutcome;
+    condition: DeploymentCondition | null;
+  } | null>(null);
+  const [deploymentDescribeError, setDeploymentDescribeError] = useState<string | null>(null);
+  const [showDescribeOutput, setShowDescribeOutput] = useState<boolean>(false);
   // Actual operator-derived pod names for the monitored deployment. The operator
   // truncates+hashes long names, so these can differ from `inf-<name>-...`.
   // Resolved server-side and returned by /api/pod-status.
@@ -364,6 +426,7 @@ export default function ModelDeploymentManager() {
     fetchBundleDeployments();
     fetchBundles();
     fetchModelProfileFeatures();
+    fetchSavedStorage();
     // Skip loading saved state if a bundle (or a model+profile) is specified in
     // the URL query params — those drive the form instead of the saved state.
     if (!searchParams.get('bundle') && !hasModelParams) {
@@ -397,7 +460,7 @@ export default function ModelDeploymentManager() {
   // Handle query parameter for pre-selecting a bundle
   useEffect(() => {
     const bundleParam = searchParams.get('bundle');
-    if (bundleParam && validBundles.length > 0) {
+    if (bundleParam && validBundles.length > 0 && savedStorageLoaded) {
       // Check if the bundle from the query parameter exists in valid bundles
       const bundleExists = validBundles.some((bundle) => bundle.name === bundleParam);
       if (bundleExists) {
@@ -421,7 +484,9 @@ export default function ModelDeploymentManager() {
         setIgnoreEos(false);
 
         // Generate YAML
-        const yaml = generateDeploymentYaml(bundleParam, suggestedName);
+        const yaml = generateDeploymentYaml(
+          bundleParam, suggestedName, false, false, defaultStorageFor(`bundle:${bundleParam}`)
+        );
         setDeploymentYaml(yaml);
 
         // Clear deployment result to start fresh
@@ -429,13 +494,13 @@ export default function ModelDeploymentManager() {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, validBundles]);
+  }, [searchParams, validBundles, savedStorageLoaded]);
 
   // Handle query params for deploying an individual model + profile. When both
   // `modelPath` and `profileName` are present, generate a `spec.models` inline
   // deployment (no ModelBundle CR) and default the source selector to "model".
   useEffect(() => {
-    if (modelPath && profileName) {
+    if (modelPath && profileName && savedStorageLoaded) {
       // Reset section 3 (hide it by clearing monitoredDeployment)
       setMonitoredDeployment('');
 
@@ -452,7 +517,9 @@ export default function ModelDeploymentManager() {
 
       // Generate YAML
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+        generateModelDeploymentYaml(
+          modelPath, profileName, suggestedName, false, false, defaultStorageFor(`model:${modelPath}`)
+        )
       );
 
       // Clear deployment result to start fresh
@@ -463,7 +530,7 @@ export default function ModelDeploymentManager() {
       setShowModelDeployNotice(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelPath, profileName]);
+  }, [modelPath, profileName, savedStorageLoaded]);
 
   // Returns next poll delay based on how long the last fetch took:
   // elapsed < 6s → 6s, elapsed < 12s → 12s, else 24s
@@ -645,6 +712,50 @@ export default function ModelDeploymentManager() {
     };
   }, [monitoredDeployment]);
 
+  // Auto-refresh `kubectl describe modeldeployment` with adaptive back-off
+  useEffect(() => {
+    if (!monitoredDeployment) {
+      setDeploymentDescribe(null);
+      setDeploymentDescribeError(null);
+      return;
+    }
+
+    const active = { current: true };
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const run = async () => {
+      if (!active.current) return;
+      const start = Date.now();
+      try {
+        const response = await fetch(`/api/deployment-describe?deploymentName=${encodeURIComponent(monitoredDeployment)}`);
+        const data = await response.json();
+        if (data.success) {
+          setDeploymentDescribe({
+            command: data.command ?? '',
+            describe: data.describe ?? '',
+            conditions: Array.isArray(data.conditions) ? data.conditions : [],
+            outcome: data.outcome ?? 'pending',
+            condition: data.condition ?? null,
+          });
+          setDeploymentDescribeError(null);
+        } else {
+          setDeploymentDescribeError(data.stderr || data.message || data.error || 'Failed to describe deployment');
+        }
+      } catch {
+        setDeploymentDescribeError('Failed to connect to the server');
+      }
+      if (active.current) {
+        timeoutId = setTimeout(run, adaptiveDelay(Date.now() - start));
+      }
+    };
+
+    run();
+    return () => {
+      active.current = false;
+      clearTimeout(timeoutId);
+    };
+  }, [monitoredDeployment]);
+
   // Fetch bundles (always a fresh kubectl call — never cached)
   const fetchBundles = async () => {
     setLoadingBundles(true);
@@ -680,6 +791,33 @@ export default function ModelDeploymentManager() {
       console.error('Failed to fetch model profiles:', err);
     }
   };
+
+  // Fetch the air-gapped storage remembered per bundle / model for this
+  // environment, and the environment's own block. A failed fetch just means
+  // nothing is known: new selections then start without `spec.storage`, as on
+  // an online install.
+  const fetchSavedStorage = async () => {
+    try {
+      const response = await fetch('/api/deployment-storage-state');
+      const data = await response.json();
+      if (data.success && data.storage && typeof data.storage === 'object') {
+        setSavedStorage(data.storage);
+      }
+      if (data.success) {
+        setEnvironmentStorage(data.environmentStorage ?? null);
+        setEnvironmentStorageError(data.environmentStorageError ?? null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch saved deployment storage:', err);
+    } finally {
+      setSavedStorageLoaded(true);
+    }
+  };
+
+  // The storage a new selection starts with: the block last deployed for this
+  // bundle / model, else the environment's block, else none.
+  const defaultStorageFor = (key: string | null): DeploymentStorage | null =>
+    (key ? savedStorage[key] : undefined) ?? environmentStorage;
 
   // A ModelProfile supports prompt caching when its `features` includes
   // `prompt_caching` (see the ModelProfile example in the deployment docs).
@@ -795,6 +933,28 @@ export default function ModelDeploymentManager() {
     setDeploymentYaml((current) => applyIgnoreEos(current, checked));
   };
 
+  // Whether the YAML in the editor currently carries `spec.storage`. The
+  // air-gapped storage checkbox reads this directly (rather than keeping its own
+  // state) so it stays correct after manual edits and restored sessions.
+  const yamlHasStorage = useMemo(
+    () => getDeploymentStorage(deploymentYaml) !== null,
+    [deploymentYaml]
+  );
+
+  const sourceKey = deploymentSourceKey(deployMode, selectedBundle, modelPath);
+
+  // Why the YAML's `spec.storage` can't be deployed yet (placeholders left in,
+  // or an invalid hand edit), or null. Blocks the Deploy button.
+  const storageProblem = useMemo(() => deploymentStorageProblem(deploymentYaml), [deploymentYaml]);
+
+  // Toggle air-gapped storage: add or remove `spec.storage` in the current YAML.
+  // Adding uses the block last deployed for this bundle / model, else the
+  // environment's block, else placeholders for the user to fill in.
+  const handleToggleStorage = (checked: boolean) => {
+    const storage = defaultStorageFor(sourceKey) ?? PLACEHOLDER_STORAGE;
+    setDeploymentYaml((current) => applyDeploymentStorage(current, checked ? storage : null));
+  };
+
   /**
    * Generate a `ModelDeployment` document (replaces the old hand-built
    * `BundleDeployment` template-literal string). Serialized with `js-yaml`'s
@@ -803,7 +963,9 @@ export default function ModelDeploymentManager() {
    * Per v3plan.md Q6, SambaWiz always references the bundle by name
    * (`spec.bundle`) — never inline `spec.models`. All other deployment
    * knobs (`groups`, `owner`, `secretNames`, `engineConfig`, etc.) carry
-   * over unchanged from the V2 `BundleDeployment` defaults.
+   * over unchanged from the V2 `BundleDeployment` defaults. `storage` (the
+   * environment's air-gapped checkpoint mount) is appended as `spec.storage`
+   * only when set.
    */
   // Build the `spec.engineConfig`, prepending the prompt-caching and/or ignore-EOS
   // env vars when requested (env_vars first for readability, then the default
@@ -823,7 +985,8 @@ export default function ModelDeploymentManager() {
     bundleName: string,
     deploymentName: string,
     withPromptCaching = false,
-    withIgnoreEos = false
+    withIgnoreEos = false,
+    storage: DeploymentStorage | null = null
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -843,6 +1006,7 @@ export default function ModelDeploymentManager() {
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
         engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
+        ...(storage ? { storage } : {}),
       },
     };
 
@@ -871,7 +1035,8 @@ export default function ModelDeploymentManager() {
     profile: string,
     deploymentName: string,
     withPromptCaching = false,
-    withIgnoreEos = false
+    withIgnoreEos = false,
+    storage: DeploymentStorage | null = null
   ): string => {
     const modelDeployment = {
       apiVersion: 'sambanova.ai/v1alpha1',
@@ -898,6 +1063,7 @@ export default function ModelDeploymentManager() {
         owner: 'no-reply@sambanova.ai',
         secretNames: ['sambanova-artifact-reader'],
         engineConfig: buildEngineConfig(withPromptCaching, withIgnoreEos),
+        ...(storage ? { storage } : {}),
       },
     };
 
@@ -927,7 +1093,9 @@ export default function ModelDeploymentManager() {
       const suggestedName = deriveModelDeploymentName(modelPath);
       setDeploymentName(suggestedName);
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, suggestedName)
+        generateModelDeploymentYaml(
+          modelPath, profileName, suggestedName, false, false, defaultStorageFor(`model:${modelPath}`)
+        )
       );
     }
   };
@@ -952,7 +1120,9 @@ export default function ModelDeploymentManager() {
       setDeploymentName(suggestedName);
 
       // Generate YAML
-      const yaml = generateDeploymentYaml(bundleName, suggestedName);
+      const yaml = generateDeploymentYaml(
+        bundleName, suggestedName, false, false, defaultStorageFor(`bundle:${bundleName}`)
+      );
       setDeploymentYaml(yaml);
     } else {
       setDeploymentName('');
@@ -965,15 +1135,18 @@ export default function ModelDeploymentManager() {
     setDeploymentName(newName);
 
     // Regenerate YAML with new deployment name, preserving the prompt-caching
-    // (only meaningful when the selection supports it) and ignore-EOS choices.
+    // (only meaningful when the selection supports it), ignore-EOS and storage
+    // choices. The storage block is carried over as it is in the editor, so a
+    // hand-edited mount survives a rename.
     const withPromptCaching = enablePromptCaching && promptCachingAvailable;
     const withIgnoreEos = ignoreEos;
+    const storage = getDeploymentStorage(deploymentYaml);
     if (deployMode === 'model' && modelPath && profileName && newName) {
       setDeploymentYaml(
-        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching, withIgnoreEos)
+        generateModelDeploymentYaml(modelPath, profileName, newName, withPromptCaching, withIgnoreEos, storage)
       );
     } else if (selectedBundle && newName) {
-      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching, withIgnoreEos);
+      const yaml = generateDeploymentYaml(selectedBundle, newName, withPromptCaching, withIgnoreEos, storage);
       setDeploymentYaml(yaml);
     }
   };
@@ -1040,6 +1213,7 @@ export default function ModelDeploymentManager() {
           next.add(deploymentName);
           return next;
         });
+        rememberDeployedStorage();
         // Refresh the model deployments list
         await fetchBundleDeployments();
       } else {
@@ -1057,6 +1231,55 @@ export default function ModelDeploymentManager() {
       });
     } finally {
       setDeploying(false);
+    }
+  };
+
+  // Remember the storage block just deployed for this bundle / model (or
+  // forget it, when deployed without one) so the next selection restores it.
+  const rememberDeployedStorage = () => {
+    const storage = getDeploymentStorage(deploymentYaml);
+    // First block deployed in this environment: offer it as the default for
+    // the whole environment (and the CLI).
+    if (storage && !environmentStorage) {
+      setOfferedEnvironmentStorage(storage);
+      setEnvironmentStorageSave(null);
+    }
+    if (!sourceKey) return;
+    setSavedStorage((prev) => {
+      const next = { ...prev };
+      if (storage) next[sourceKey] = storage;
+      else delete next[sourceKey];
+      return next;
+    });
+    fetch('/api/deployment-storage-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: sourceKey, storage }),
+    }).catch((err) => console.error('Failed to save deployment storage:', err));
+  };
+
+  // Save the offered block as the environment's own storage in app-config.json.
+  const handleSaveEnvironmentStorage = async () => {
+    if (!offeredEnvironmentStorage) return;
+    setEnvironmentStorageSave({ saving: true });
+    try {
+      const response = await fetch('/api/deployment-storage-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage: offeredEnvironmentStorage }),
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setEnvironmentStorage(data.storage);
+        setEnvironmentStorageError(null);
+        setOfferedEnvironmentStorage(null);
+        setEnvironmentStorageSave({ saved: true });
+      } else {
+        setEnvironmentStorageSave({ error: data.error || 'Failed to save the environment storage' });
+      }
+    } catch (err) {
+      console.error('Failed to save environment storage:', err);
+      setEnvironmentStorageSave({ error: 'Failed to connect to the server' });
     }
   };
 
@@ -1295,6 +1518,43 @@ export default function ModelDeploymentManager() {
         </Tooltip>
       </Box>
 
+      {/* Air-gapped deployment — always available, like Ignore EOS. Checked
+          means the YAML carries `spec.storage` (read from the YAML, so it stays
+          right after hand edits). Checking it inserts the block last deployed
+          for this bundle / model, else the environment's block from
+          app-config.json, else placeholders to fill in. */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+        <FormControlLabel
+          sx={{ mr: 0 }}
+          control={
+            <Checkbox
+              checked={yamlHasStorage}
+              onChange={(e) => handleToggleStorage(e.target.checked)}
+              disabled={!deploymentYaml}
+            />
+          }
+          label="Air-gapped deployment"
+        />
+        <Tooltip title={AIR_GAPPED_TOOLTIP} arrow>
+          <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
+        </Tooltip>
+      </Box>
+      {environmentStorageError && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          The air-gapped storage for this environment in app-config.json is invalid and is not used:{' '}
+          {environmentStorageError}
+        </Alert>
+      )}
+      {yamlHasStorage && (
+        <Alert severity={storageProblem ? 'error' : 'info'} sx={{ mb: 2 }}>
+          {storageProblem ? <>{storageProblem} </> : null}
+          Set <code>spec.storage.hostPath</code> in the YAML below: <code>path</code> is the checkpoint
+          directory on the node, and <code>mountPath</code> must match the <code>local://</code>{' '}
+          substitution target of your SambaStack install. The block is remembered for this{' '}
+          {deployMode === 'model' ? 'model' : 'bundle'} once deployed.
+        </Alert>
+      )}
+
       {/* Generated YAML */}
       <Box>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -1362,6 +1622,37 @@ export default function ModelDeploymentManager() {
         </Box>
       )}
 
+      {/* Offer the deployed storage block as the environment's default */}
+      {offeredEnvironmentStorage && (
+        <Box sx={{ mt: 2 }}>
+          <Alert
+            severity={environmentStorageSave && 'error' in environmentStorageSave ? 'error' : 'info'}
+            onClose={() => setOfferedEnvironmentStorage(null)}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={handleSaveEnvironmentStorage}
+                disabled={Boolean(environmentStorageSave && 'saving' in environmentStorageSave)}
+              >
+                Save for environment
+              </Button>
+            }
+          >
+            Use this <code>spec.storage</code> mount for every deployment in this environment? It is saved
+            as <code>storage</code> in <code>app-config.json</code>, which the CLI also uses.
+            {environmentStorageSave && 'error' in environmentStorageSave && <> {environmentStorageSave.error}</>}
+          </Alert>
+        </Box>
+      )}
+      {environmentStorageSave && 'saved' in environmentStorageSave && (
+        <Box sx={{ mt: 2 }}>
+          <Alert severity="success" onClose={() => setEnvironmentStorageSave(null)}>
+            Saved as this environment&apos;s air-gapped storage in <code>app-config.json</code>.
+          </Alert>
+        </Box>
+      )}
+
       {/* Save Result */}
       {saveResult && (
         <Box sx={{ mt: 2 }}>
@@ -1392,7 +1683,7 @@ export default function ModelDeploymentManager() {
           size="large"
           startIcon={deploying ? <CircularProgress size={20} color="inherit" /> : <RocketLaunchIcon />}
           onClick={handleDeploy}
-          disabled={deploying || !deploymentYaml}
+          disabled={deploying || !deploymentYaml || Boolean(storageProblem)}
         >
           {deploying ? 'Deploying...' : 'Deploy'}
         </Button>
@@ -1612,6 +1903,117 @@ export default function ModelDeploymentManager() {
           <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 3 }}>
             3. Check Deployment Status
           </Typography>
+
+          {/* ModelDeployment conditions (kubectl describe) */}
+          <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 2 }}>
+            Deployment Conditions
+          </Typography>
+          <Box sx={{ mb: 4 }}>
+            {deploymentDescribeError ? (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                Could not describe the deployment: {deploymentDescribeError}
+              </Alert>
+            ) : !deploymentDescribe ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                <CircularProgress size={16} />
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  Describing deployment...
+                </Typography>
+              </Box>
+            ) : (
+              <>
+                {deploymentDescribe.outcome === 'failed' ? (
+                  <Alert severity="error" sx={{ mb: 2 }}>
+                    <strong>Failed</strong>
+                    {deploymentDescribe.condition?.reason ? ` (${deploymentDescribe.condition.reason})` : ''}
+                    {deploymentDescribe.condition?.message ? `: ${deploymentDescribe.condition.message}` : ''}
+                  </Alert>
+                ) : deploymentDescribe.outcome === 'ok' ? (
+                  <Alert severity="success" sx={{ mb: 2 }}>
+                    <strong>No errors reported</strong>
+                    {deploymentDescribe.condition
+                      ? ` (${deploymentDescribe.condition.type}=${deploymentDescribe.condition.status}${deploymentDescribe.condition.reason ? `, ${deploymentDescribe.condition.reason}` : ''})`
+                      : ''}
+                  </Alert>
+                ) : (
+                  <Alert severity="info" sx={{ mb: 2 }}>
+                    The operator has not reported any conditions for this deployment yet.
+                  </Alert>
+                )}
+
+                {deploymentDescribe.conditions.length > 0 && (
+                  <Box
+                    sx={{
+                      bgcolor: 'black',
+                      borderRadius: 1,
+                      p: 2,
+                      mb: 1,
+                      overflowX: 'auto',
+                      maxWidth: 'calc(100vw - 350px)',
+                      borderLeft: '4px solid',
+                      borderLeftColor: deploymentDescribe.outcome === 'failed' ? 'error.main' : 'success.main',
+                    }}
+                  >
+                    <Box
+                      component="pre"
+                      sx={{ m: 0, color: 'white', fontSize: '0.875rem', fontFamily: 'monospace', whiteSpace: 'pre' }}
+                    >
+                      {formatConditions(deploymentDescribe.conditions)}
+                    </Box>
+                  </Box>
+                )}
+
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                    '&:hover': { bgcolor: 'action.hover' },
+                    p: 1,
+                    borderRadius: 1,
+                    mb: 1,
+                  }}
+                  onClick={() => setShowDescribeOutput(!showDescribeOutput)}
+                >
+                  <IconButton size="small" sx={{ mr: 1 }}>
+                    {showDescribeOutput ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                  </IconButton>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    Show full describe output
+                  </Typography>
+                </Box>
+
+                <Collapse in={showDescribeOutput}>
+                  <Box sx={{ pl: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary', fontFamily: 'monospace', fontSize: '0.875rem' }}>
+                      $ {deploymentDescribe.command}
+                    </Typography>
+                    <Box
+                      sx={{
+                        bgcolor: 'black',
+                        borderRadius: 1,
+                        p: 2,
+                        overflowX: 'auto',
+                        overflowY: 'auto',
+                        maxHeight: '400px',
+                        maxWidth: 'calc(100vw - 350px)',
+                      }}
+                    >
+                      <Box
+                        component="pre"
+                        sx={{ m: 0, color: 'white', fontSize: '0.875rem', fontFamily: 'monospace', whiteSpace: 'pre' }}
+                      >
+                        {deploymentDescribe.describe}
+                      </Box>
+                    </Box>
+                    <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+                      Auto-refreshing every 3 seconds
+                    </Typography>
+                  </Box>
+                </Collapse>
+              </>
+            )}
+          </Box>
 
           <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 2 }}>
             Pod Status
@@ -1883,6 +2285,17 @@ export default function ModelDeploymentManager() {
               isPodProbeFailure(podStatusError) ||
               isPodProbeFailure(podLogsError) ||
               isPodProbeFailure(defaultPodLogsError);
+
+            // The operator rejected the deployment (e.g. ValidationFailed): no
+            // pods will ever come up, so report it instead of waiting forever.
+            if (deploymentDescribe?.outcome === 'failed') {
+              const c = deploymentDescribe.condition;
+              return (
+                <Alert severity="error">
+                  Deployment failed{c?.reason ? ` (${c.reason})` : ''}. See Deployment Conditions above for details.
+                </Alert>
+              );
+            }
 
             if (bothReady && !hasError) {
               return (

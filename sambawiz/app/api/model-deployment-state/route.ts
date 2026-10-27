@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { execSync } from 'child_process';
 import path from 'path';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface BundleDeploymentState {
   selectedBundle: string;
@@ -90,7 +91,7 @@ export async function GET() {
     // Environment matches, now check if the deployment still exists
     if (state.monitoredDeployment) {
       const kubeconfigFile = config.kubeconfigs[currentEnv].file;
-      const namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+      const namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
       const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
 
       if (!existsSync(kubeconfigPath)) {
