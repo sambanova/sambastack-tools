@@ -15,11 +15,13 @@ The Model Deployment page manages the deployment lifecycle of validated bundles.
 ### Section 2: Deploy a Bundle
 - Select from validated bundles
 - Auto-generate deployment YAML
-- On air-gapped environments (storage configured on the Home page), the YAML includes a `spec.storage` block that mounts the checkpoints from local/NFS storage. The **Mount air-gapped checkpoint storage** checkbox adds or removes it, and a warning appears if it is missing
+- On air-gapped clusters, check **Air-gapped deployment** to add a `spec.storage` block that mounts the checkpoints from local/NFS storage. It starts with placeholder paths: replace `path` (checkpoint directory on the node) and `mountPath` (must match the `local://` substitution target in `global.substitutions` of the install's `models-values.yaml`) in the YAML. Deploy stays disabled until both are valid paths
+- The storage block you deploy a bundle (or model) with is remembered for it in the current environment: selecting it again restores the block and checks the box. Deploying it without the block forgets it
 - Apply the deployment to your cluster
 - Monitor deployment progress automatically
 
 ### Section 3: Check Deployment Status
+- Deployment conditions from `kubectl describe modeldeployment <name>`: a verdict (failed / no errors / not reported yet) with the `Conditions:` section, plus the full describe output. A failed condition (e.g. `ValidationFailed`) is reported as a failed deployment even when no pods exist
 - Real-time pod status monitoring (cache and default pods)
 - Live log streaming from both pods
 - Progress indicators showing container readiness

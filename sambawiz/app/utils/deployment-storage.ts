@@ -3,13 +3,15 @@
  *
  * On an air-gapped SambaStack cluster there is no artifact registry, so the
  * inference pods must mount their checkpoints from a local/NFS path on the
- * node. That mount is the `spec.storage.hostPath` block, configured per
- * environment in app-config.json (`kubeconfigs.<env>.storage`). When an
- * environment has no `storage`, nothing is emitted and the generated YAML is
- * unchanged — online installs must never carry this block.
+ * node. That mount is the `spec.storage.hostPath` block. Online installs must
+ * never carry it, so it is only emitted when asked for:
  *
- * Shared by the web UI (Home settings + Model Deployment page), the
- * update-config route, and the CLI so they all validate and emit it the same way.
+ * - Web UI: the "Air-gapped deployment" checkbox on the Model Deployment page.
+ *   The block used is remembered per bundle/model and environment
+ *   (`/api/deployment-storage-state`).
+ * - CLI: per environment in app-config.json (`kubeconfigs.<env>.storage`).
+ *
+ * Shared by both so they validate and emit it the same way.
  */
 
 import yaml from 'js-yaml';
@@ -32,8 +34,21 @@ export interface DeploymentStorage {
   hostPath: HostPathMount[];
 }
 
-/** Volume name pre-filled in the settings form (the name is arbitrary, unlike the two paths). */
+/** Volume name pre-filled in new storage blocks (the name is arbitrary, unlike the two paths). */
 export const DEFAULT_STORAGE_VOLUME_NAME = 'nfs';
+
+/** Placeholder values for the two site-specific paths, which are never guessed. */
+export const STORAGE_MOUNT_PATH_PLACEHOLDER = 'CHANGE_ME_MOUNT_PATH_IN_POD';
+export const STORAGE_HOST_PATH_PLACEHOLDER = 'CHANGE_ME_HOST_PATH_ON_NODE';
+
+/**
+ * The block inserted when a deployment is first marked air-gapped: the user
+ * replaces the placeholders in the YAML. Deploying is blocked until they do
+ * (see `deploymentStorageProblem`).
+ */
+export const PLACEHOLDER_STORAGE: DeploymentStorage = {
+  hostPath: [{ name: DEFAULT_STORAGE_VOLUME_NAME, mountPath: STORAGE_MOUNT_PATH_PLACEHOLDER, path: STORAGE_HOST_PATH_PLACEHOLDER }],
+};
 
 /** Kubernetes volume names are RFC 1123 labels: lowercase alphanumerics and '-', at most 63 chars. */
 const RFC_1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
@@ -139,6 +154,26 @@ export function getDeploymentStorage(yamlStr: string): DeploymentStorage | null 
   } catch {
     return null;
   }
+}
+
+/**
+ * Why the `spec.storage` block in a deployment YAML can't be deployed, or
+ * `null` when there is none or it is valid. A leftover placeholder gets its
+ * own message, since "must be an absolute path" would not say what to do.
+ */
+export function deploymentStorageProblem(yamlStr: string): string | null {
+  const storage = getDeploymentStorage(yamlStr);
+  if (!storage) return null;
+  const mounts = Array.isArray(storage.hostPath) ? storage.hostPath : [];
+  const placeholders = mounts.flatMap((m) => [
+    ...(m?.mountPath === STORAGE_MOUNT_PATH_PLACEHOLDER ? ['mountPath'] : []),
+    ...(m?.path === STORAGE_HOST_PATH_PLACEHOLDER ? ['path'] : []),
+  ]);
+  if (placeholders.length > 0) {
+    return `Replace the placeholder ${Array.from(new Set(placeholders)).map((f) => `\`${f}\``).join(' and ')} in spec.storage with your cluster's paths.`;
+  }
+  const result = validateDeploymentStorage(storage);
+  return result.valid ? null : result.error;
 }
 
 /**

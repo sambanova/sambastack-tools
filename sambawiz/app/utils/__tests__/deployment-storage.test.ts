@@ -1,6 +1,8 @@
 import yaml from 'js-yaml';
 import {
   applyDeploymentStorage,
+  deploymentStorageProblem,
+  PLACEHOLDER_STORAGE,
   formatStorageYaml,
   getDeploymentStorage,
   readEnvironmentStorage,
@@ -152,6 +154,31 @@ describe('formatStorageYaml', () => {
         '      mountPath: /nfsdata',
         '      path: /data/sambastack-ml-data',
       ].join('\n')
+    );
+  });
+});
+
+describe('deploymentStorageProblem', () => {
+  it('is null without a storage block, or with a valid one', () => {
+    expect(deploymentStorageProblem(baseYaml)).toBeNull();
+    expect(deploymentStorageProblem(applyDeploymentStorage(baseYaml, storage))).toBeNull();
+    expect(deploymentStorageProblem('')).toBeNull();
+  });
+
+  it('names the placeholders still left in the block', () => {
+    expect(deploymentStorageProblem(applyDeploymentStorage(baseYaml, PLACEHOLDER_STORAGE))).toBe(
+      'Replace the placeholder `mountPath` and `path` in spec.storage with your cluster\'s paths.'
+    );
+    const halfDone = { hostPath: [{ ...PLACEHOLDER_STORAGE.hostPath[0], mountPath: '/nfsdata' }] };
+    expect(deploymentStorageProblem(applyDeploymentStorage(baseYaml, halfDone))).toBe(
+      'Replace the placeholder `path` in spec.storage with your cluster\'s paths.'
+    );
+  });
+
+  it('reports a hand-edited block that is invalid', () => {
+    const relative = { hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: 'data/ckpts' }] };
+    expect(deploymentStorageProblem(applyDeploymentStorage(baseYaml, relative))).toBe(
+      'Host path must be an absolute path (start with "/") with no spaces.'
     );
   });
 });
