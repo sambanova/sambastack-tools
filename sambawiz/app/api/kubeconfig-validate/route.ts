@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -67,7 +68,7 @@ export async function GET() {
     // Read app-config.json to get current configuration
     const configPath = path.join(process.cwd(), 'app-config.json');
     let kubeconfigFile = '';
-    let namespace = 'default';
+    let namespace = DEFAULT_NAMESPACE;
     let envName = '';
 
     if (fs.existsSync(configPath)) {
@@ -78,7 +79,7 @@ export async function GET() {
         const currentEnv = config.currentKubeconfig;
         if (currentEnv && config.kubeconfigs[currentEnv]) {
           kubeconfigFile = config.kubeconfigs[currentEnv].file;
-          namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+          namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
           envName = currentEnv;
         }
       } catch (parseError) {
@@ -175,7 +176,7 @@ export async function GET() {
     console.error('Kubeconfig validation error:', error);
 
     // Get the namespace for the error message
-    let namespace = 'default';
+    let namespace = DEFAULT_NAMESPACE;
     try {
       const configPath = path.join(process.cwd(), 'app-config.json');
       if (fs.existsSync(configPath)) {
@@ -183,7 +184,7 @@ export async function GET() {
         const config: AppConfig = JSON.parse(configContent);
         const currentEnv = config.currentKubeconfig;
         if (currentEnv && config.kubeconfigs[currentEnv]) {
-          namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+          namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
         }
       }
     } catch {

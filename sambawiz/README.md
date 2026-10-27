@@ -81,7 +81,7 @@ Example `app-config.json`:
   "kubeconfigs": {
     "your-environment-name": {
       "file": "kubeconfigs/your-environment.yaml",
-      "namespace": "default",
+      "namespace": "sambastack",
       "uiDomain": "https://ui-your-environment.example.com/",
       "apiDomain": "https://api-your-environment.example.com/",
       "apiKey": "your-api-key-here"
@@ -114,7 +114,7 @@ An air-gapped cluster has no artifact registry to pull checkpoints from, so the 
 ```json
 "your-airgapped-environment": {
   "file": "kubeconfigs/your-airgapped-environment.yaml",
-  "namespace": "default",
+  "namespace": "sambastack",
   "storage": {
     "hostPath": [
       { "name": "nfs", "mountPath": "/mnt/models", "path": "/path/to/checkpoints" }

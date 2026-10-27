@@ -3,6 +3,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 const execAsync = promisify(exec);
 
@@ -51,7 +52,7 @@ export async function POST(request: Request) {
     }
 
     const kubeconfigEntry = config.kubeconfigs[environment];
-    const namespace = kubeconfigEntry.namespace || 'default';
+    const namespace = kubeconfigEntry.namespace || DEFAULT_NAMESPACE;
     const kubeconfigFile = path.join(process.cwd(), kubeconfigEntry.file);
 
     if (!fs.existsSync(kubeconfigFile)) {

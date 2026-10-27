@@ -27,6 +27,7 @@ import { floatPcmToWav, extractErrorMessage, parseSpeechStream } from '../app/ut
 import { inferencePodNames } from '../app/utils/inference-pod-names';
 import { validateResourceName, bundleNameLengthWarning } from '../app/utils/resource-names';
 import { environmentStorageError, readEnvironmentStorage } from '../app/utils/deployment-storage';
+import { DEFAULT_NAMESPACE } from '../app/utils/namespace';
 import {
   CONFIG_PATH,
   DATA_DIR,
@@ -221,7 +222,7 @@ function resolveCtx(opts: any): Ctx {
   const kubeconfig = path.isAbsolute(ec.file) ? ec.file : path.join(PROJECT_ROOT, ec.file);
   if (!existsSync(kubeconfig)) fail(`Kubeconfig not found: ${kubeconfig}`);
   process.env.KUBECONFIG = kubeconfig;
-  const namespace = assertName('namespace', opts.namespace || ec.namespace || 'default');
+  const namespace = assertName('namespace', opts.namespace || ec.namespace || DEFAULT_NAMESPACE);
   return { env, kubeconfig, namespace, json: Boolean(opts.json), ec };
 }
 
@@ -436,7 +437,7 @@ export function buildProgram(): Command {
   env.command('list').description('List configured environments').option('--json', 'JSON output').action((o) => {
     const cfg = loadAppConfig();
     const rows = Object.entries<any>(cfg.kubeconfigs || {}).map(([name, e]) => ({
-      name, current: name === cfg.currentKubeconfig, kubeconfig: e.file, namespace: e.namespace || 'default',
+      name, current: name === cfg.currentKubeconfig, kubeconfig: e.file, namespace: e.namespace || DEFAULT_NAMESPACE,
     }));
     print(o, rows, () => rows.forEach((r) => say(`${r.current ? '*' : ' '} ${r.name}  ns=${r.namespace}  ${r.kubeconfig}`)));
   });
@@ -819,7 +820,7 @@ export function buildProgram(): Command {
   const saveConfig = (cfg: any) => writePrivateFile(CONFIG_PATH, JSON.stringify(cfg, null, 2) + '\n');
   env.command('add <name>').description('Add an environment from a kubeconfig file or base64 string')
     .option('--kubeconfig-file <path>', 'path to a kubeconfig').option('--kubeconfig-b64 <string>', 'base64-encoded kubeconfig')
-    .option('--namespace <ns>', 'namespace', 'default').option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>')
+    .option('--namespace <ns>', 'namespace', DEFAULT_NAMESPACE).option('--ui-domain <url>').option('--api-domain <url>').option('--api-key <key>')
     .option('--overwrite', 'replace the kubeconfig of an existing environment').action((name, o) => {
       assertEnvName(name);
       warnKeyOnCommandLine(o);

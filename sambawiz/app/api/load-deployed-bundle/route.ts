@@ -4,6 +4,7 @@ import { execSync } from 'child_process';
 import path from 'path';
 import yaml from 'js-yaml';
 import { parseModelBundleYamlContent } from '@/app/utils/parse-bundle-yaml';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -54,7 +55,7 @@ export async function GET(request: NextRequest) {
     }
 
     const kubeconfigFile = config.kubeconfigs[currentEnv].file;
-    const namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+    const namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
     const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
 
     if (!existsSync(kubeconfigPath)) {

@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import { writeFileSync, readFileSync, existsSync } from 'fs';
 import path from 'path';
 import { ensureAppDataDir } from './ensure-app-data-dir';
+import { DEFAULT_NAMESPACE } from './namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -159,7 +160,7 @@ export async function generatePefConfigs(): Promise<{ success: true; count: numb
     }
 
     const kubeconfigFile = config.kubeconfigs[currentEnv].file;
-    const namespace = config.kubeconfigs[currentEnv].namespace || 'default';
+    const namespace = config.kubeconfigs[currentEnv].namespace || DEFAULT_NAMESPACE;
 
     const kubeconfigPath = path.join(process.cwd(), kubeconfigFile);
     if (!existsSync(kubeconfigPath)) {

@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 const execAsync = promisify(exec);
 
@@ -118,7 +119,7 @@ export async function POST(request: NextRequest) {
     if (!config.kubeconfigs[environmentName]) {
       config.kubeconfigs[environmentName] = {
         file: `kubeconfigs/${environmentName}.yaml`,
-        namespace: 'default',
+        namespace: DEFAULT_NAMESPACE,
         uiDomain: '',
         apiDomain: '',
         apiKey: ''

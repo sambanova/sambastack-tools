@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import type { DeploymentStorage } from '../../utils/deployment-storage';
+import { DEFAULT_NAMESPACE } from '@/app/utils/namespace';
 
 interface KubeconfigEntry {
   file: string;
@@ -24,7 +25,7 @@ export async function GET() {
     const configPath = path.join(process.cwd(), 'app-config.json');
     let environments: string[] = [];
     let defaultEnvironment: string | null = null;
-    let defaultNamespace = 'default';
+    let defaultNamespace = DEFAULT_NAMESPACE;
     let defaultApiKey = '';
     let defaultApiDomain = '';
     let defaultUiDomain = '';
@@ -44,7 +45,7 @@ export async function GET() {
 
         // Get namespace, API key, and domains for current environment
         if (defaultEnvironment && config.kubeconfigs[defaultEnvironment]) {
-          defaultNamespace = config.kubeconfigs[defaultEnvironment].namespace || 'default';
+          defaultNamespace = config.kubeconfigs[defaultEnvironment].namespace || DEFAULT_NAMESPACE;
           defaultApiKey = config.kubeconfigs[defaultEnvironment].apiKey || '';
           defaultApiDomain = config.kubeconfigs[defaultEnvironment].apiDomain || '';
           defaultUiDomain = config.kubeconfigs[defaultEnvironment].uiDomain || '';
@@ -72,7 +73,7 @@ export async function GET() {
       error: 'Failed to fetch environments',
       environments: [],
       defaultEnvironment: null,
-      defaultNamespace: 'default',
+      defaultNamespace: DEFAULT_NAMESPACE,
       defaultApiKey: ''
     }, { status: 500 });
   }

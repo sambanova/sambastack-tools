@@ -555,7 +555,7 @@ describe('pef-config-generator', () => {
       );
     });
 
-    it('should use default namespace when not specified', async () => {
+    it('should use the sambastack namespace when not specified', async () => {
       const configWithoutNamespace = {
         ...mockAppConfig,
         kubeconfigs: {
@@ -570,7 +570,7 @@ describe('pef-config-generator', () => {
       await generatePefConfigs();
 
       expect(execSync).toHaveBeenCalledWith(
-        'kubectl -n default get pef -o json',
+        'kubectl -n sambastack get pef -o json',
         expect.any(Object)
       );
     });

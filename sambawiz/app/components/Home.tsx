@@ -32,6 +32,7 @@ import { Visibility, VisibilityOff, ContentCopy, Close, Warning } from '@mui/ico
 import AppConfigDialog from './AppConfigDialog';
 import NoKubeconfigsDialog from './NoKubeconfigsDialog';
 import DocumentationPanel from './DocumentationPanel';
+import { DEFAULT_NAMESPACE } from '../utils/namespace';
 import {
   DEFAULT_STORAGE_VOLUME_NAME,
   environmentStorageError,
@@ -377,14 +378,14 @@ export default function Home() {
 
     // Auto-populate namespace, API key, and domains from kubeconfigs
     if (envName && kubeconfigs[envName]) {
-      setNamespace(kubeconfigs[envName].namespace || 'default');
+      setNamespace(kubeconfigs[envName].namespace || DEFAULT_NAMESPACE);
       setApiKey(kubeconfigs[envName].apiKey || '');
       setApiDomain(kubeconfigs[envName].apiDomain || '');
       setUiDomain(kubeconfigs[envName].uiDomain || '');
       const enableUpdatesValue = kubeconfigs[envName].enableUpdates;
       setEnableUpdates(enableUpdatesValue !== false); // Default to true if not explicitly false
     } else {
-      setNamespace('default');
+      setNamespace(DEFAULT_NAMESPACE);
       setApiKey('');
       setApiDomain('');
       setUiDomain('');
