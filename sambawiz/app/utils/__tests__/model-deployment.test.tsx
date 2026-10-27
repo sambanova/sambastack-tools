@@ -831,12 +831,21 @@ describe('Model Deployment Manager', () => {
     };
 
     // Route fetches by URL; `/api/deployment-storage-state` returns the blocks
-    // remembered per bundle / model for this environment.
-    const mockFetchWithSavedStorage = (saved: Record<string, unknown>) => {
+    // remembered per bundle / model for this environment, and the
+    // environment's own block from app-config.json.
+    const mockFetchWithSavedStorage = (
+      saved: Record<string, unknown>,
+      env: { storage?: unknown; error?: string } = {}
+    ) => {
       (global.fetch as jest.Mock).mockImplementation((url: string) => {
         const ok = (body: unknown) => Promise.resolve({ ok: true, json: async () => body });
         if (url === '/api/deployment-storage-state') {
-          return ok({ success: true, storage: saved });
+          return ok({
+            success: true,
+            storage: saved,
+            environmentStorage: env.storage ?? null,
+            environmentStorageError: env.error ?? null,
+          });
         }
         if (url === '/api/model-bundles') {
           return ok({
@@ -956,6 +965,62 @@ describe('Model Deployment Manager', () => {
 
       await user.click(screen.getByRole('button', { name: 'Deploy' }));
       await waitFor(() => expect(storageStateWrites()).toEqual([{ key: 'bundle:gpt-oss-120b', storage: null }]));
+
+      jest.useFakeTimers();
+    });
+
+    it('starts a bundle with nothing remembered from the environment\'s storage', async () => {
+      jest.useRealTimers();
+      mockFetchWithSavedStorage({}, { storage });
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = await selectBundle(user);
+      expect(yamlField.value).toContain('path: /data/sambastack-ml-data');
+      const checkbox = await storageCheckbox();
+      expect(checkbox).toBeChecked();
+
+      // Unticking and ticking again brings back the environment's block, not placeholders.
+      await user.click(checkbox);
+      await waitFor(() => expect(yamlField.value).not.toContain('storage:'));
+      await user.click(checkbox);
+      await waitFor(() => expect(yamlField.value).toContain('path: /data/sambastack-ml-data'));
+      expect(yamlField.value).not.toContain('CHANGE_ME');
+
+      jest.useFakeTimers();
+    });
+
+    it('prefers the block remembered for a bundle over the environment\'s storage', async () => {
+      jest.useRealTimers();
+      const envStorage = { hostPath: [{ name: 'nfs', mountPath: '/env-mount', path: '/env-data' }] };
+      mockFetchWithSavedStorage({ 'bundle:gpt-oss-120b': storage }, { storage: envStorage });
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = await selectBundle(user);
+      expect(yamlField.value).toContain('path: /data/sambastack-ml-data');
+      expect(yamlField.value).not.toContain('/env-data');
+
+      jest.useFakeTimers();
+    });
+
+    it('warns about invalid environment storage and falls back to placeholders', async () => {
+      jest.useRealTimers();
+      mockFetchWithSavedStorage({}, { error: 'Mount path must be an absolute path (start with "/") with no spaces.' });
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = await selectBundle(user);
+      expect(yamlField.value).not.toContain('storage:');
+      expect(screen.getByText(/air-gapped storage for this environment in app-config.json is invalid/)).toBeInTheDocument();
+      await user.click(await storageCheckbox());
+      await waitFor(() => expect(yamlField.value).toContain('CHANGE_ME_MOUNT_PATH_IN_POD'));
 
       jest.useFakeTimers();
     });

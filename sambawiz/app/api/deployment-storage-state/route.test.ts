@@ -23,10 +23,18 @@ const appConfig = JSON.stringify({
 });
 
 /** Serve app-config.json and the state file from these contents. */
-function mockFiles(state: unknown) {
+function mockFiles(state: unknown, config: string = appConfig) {
   (fs.readFileSync as jest.Mock).mockImplementation((file: string) =>
-    String(file).endsWith('app-config.json') ? appConfig : JSON.stringify(state)
+    String(file).endsWith('app-config.json') ? config : JSON.stringify(state)
   );
+}
+
+/** app-config.json whose current environment `dev` has this `storage`. */
+function configWithStorage(envStorage: unknown) {
+  return JSON.stringify({
+    currentKubeconfig: 'dev',
+    kubeconfigs: { dev: { file: 'kubeconfigs/dev.yaml', storage: envStorage } },
+  });
 }
 
 function makeRequest(body: unknown) {
@@ -52,7 +60,26 @@ describe('deployment-storage-state route', () => {
   it('returns only the current environment\'s remembered blocks', async () => {
     mockFiles({ dev: { 'bundle:b1': storage }, prod: { 'bundle:b2': storage } });
     const data = await (await GET()).json();
-    expect(data).toEqual({ success: true, storage: { 'bundle:b1': storage } });
+    expect(data).toEqual({
+      success: true,
+      storage: { 'bundle:b1': storage },
+      environmentStorage: null,
+      environmentStorageError: null,
+    });
+  });
+
+  it('returns the current environment\'s own storage from app-config.json', async () => {
+    mockFiles({}, configWithStorage(storage));
+    const data = await (await GET()).json();
+    expect(data.environmentStorage).toEqual(storage);
+    expect(data.environmentStorageError).toBeNull();
+  });
+
+  it('reports an invalid environment storage instead of returning it', async () => {
+    mockFiles({}, configWithStorage({ hostPath: [{ name: 'nfs', mountPath: 'relative', path: '/data' }] }));
+    const data = await (await GET()).json();
+    expect(data.environmentStorage).toBeNull();
+    expect(data.environmentStorageError).toMatch(/Mount path/);
   });
 
   it('saves a block for a bundle without touching other environments', async () => {

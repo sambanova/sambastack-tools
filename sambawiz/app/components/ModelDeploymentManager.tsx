@@ -272,6 +272,11 @@ export default function ModelDeploymentManager() {
   // so the first YAML shown already carries the block.
   const [savedStorage, setSavedStorage] = useState<Record<string, DeploymentStorage>>({});
   const [savedStorageLoaded, setSavedStorageLoaded] = useState<boolean>(false);
+  // The environment's own block (app-config.json `kubeconfigs.<env>.storage`,
+  // the one the CLI uses): the default for bundles / models with nothing
+  // remembered. `environmentStorageError` is set when that block is invalid.
+  const [environmentStorage, setEnvironmentStorage] = useState<DeploymentStorage | null>(null);
+  const [environmentStorageError, setEnvironmentStorageError] = useState<string | null>(null);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -473,7 +478,7 @@ export default function ModelDeploymentManager() {
 
         // Generate YAML
         const yaml = generateDeploymentYaml(
-          bundleParam, suggestedName, false, false, savedStorage[`bundle:${bundleParam}`] ?? null
+          bundleParam, suggestedName, false, false, defaultStorageFor(`bundle:${bundleParam}`)
         );
         setDeploymentYaml(yaml);
 
@@ -506,7 +511,7 @@ export default function ModelDeploymentManager() {
       // Generate YAML
       setDeploymentYaml(
         generateModelDeploymentYaml(
-          modelPath, profileName, suggestedName, false, false, savedStorage[`model:${modelPath}`] ?? null
+          modelPath, profileName, suggestedName, false, false, defaultStorageFor(`model:${modelPath}`)
         )
       );
 
@@ -781,8 +786,9 @@ export default function ModelDeploymentManager() {
   };
 
   // Fetch the air-gapped storage remembered per bundle / model for this
-  // environment. A failed fetch just means nothing is remembered: new
-  // selections then start without `spec.storage`, as on an online install.
+  // environment, and the environment's own block. A failed fetch just means
+  // nothing is known: new selections then start without `spec.storage`, as on
+  // an online install.
   const fetchSavedStorage = async () => {
     try {
       const response = await fetch('/api/deployment-storage-state');
@@ -790,12 +796,21 @@ export default function ModelDeploymentManager() {
       if (data.success && data.storage && typeof data.storage === 'object') {
         setSavedStorage(data.storage);
       }
+      if (data.success) {
+        setEnvironmentStorage(data.environmentStorage ?? null);
+        setEnvironmentStorageError(data.environmentStorageError ?? null);
+      }
     } catch (err) {
       console.error('Failed to fetch saved deployment storage:', err);
     } finally {
       setSavedStorageLoaded(true);
     }
   };
+
+  // The storage a new selection starts with: the block last deployed for this
+  // bundle / model, else the environment's block, else none.
+  const defaultStorageFor = (key: string | null): DeploymentStorage | null =>
+    (key ? savedStorage[key] : undefined) ?? environmentStorage;
 
   // A ModelProfile supports prompt caching when its `features` includes
   // `prompt_caching` (see the ModelProfile example in the deployment docs).
@@ -926,10 +941,10 @@ export default function ModelDeploymentManager() {
   const storageProblem = useMemo(() => deploymentStorageProblem(deploymentYaml), [deploymentYaml]);
 
   // Toggle air-gapped storage: add or remove `spec.storage` in the current YAML.
-  // Adding uses the block last deployed for this bundle / model, else
-  // placeholders for the user to fill in.
+  // Adding uses the block last deployed for this bundle / model, else the
+  // environment's block, else placeholders for the user to fill in.
   const handleToggleStorage = (checked: boolean) => {
-    const storage = (sourceKey && savedStorage[sourceKey]) || PLACEHOLDER_STORAGE;
+    const storage = defaultStorageFor(sourceKey) ?? PLACEHOLDER_STORAGE;
     setDeploymentYaml((current) => applyDeploymentStorage(current, checked ? storage : null));
   };
 
@@ -1072,7 +1087,7 @@ export default function ModelDeploymentManager() {
       setDeploymentName(suggestedName);
       setDeploymentYaml(
         generateModelDeploymentYaml(
-          modelPath, profileName, suggestedName, false, false, savedStorage[`model:${modelPath}`] ?? null
+          modelPath, profileName, suggestedName, false, false, defaultStorageFor(`model:${modelPath}`)
         )
       );
     }
@@ -1099,7 +1114,7 @@ export default function ModelDeploymentManager() {
 
       // Generate YAML
       const yaml = generateDeploymentYaml(
-        bundleName, suggestedName, false, false, savedStorage[`bundle:${bundleName}`] ?? null
+        bundleName, suggestedName, false, false, defaultStorageFor(`bundle:${bundleName}`)
       );
       setDeploymentYaml(yaml);
     } else {
@@ -1468,7 +1483,8 @@ export default function ModelDeploymentManager() {
       {/* Air-gapped deployment — always available, like Ignore EOS. Checked
           means the YAML carries `spec.storage` (read from the YAML, so it stays
           right after hand edits). Checking it inserts the block last deployed
-          for this bundle / model, else placeholders to fill in. */}
+          for this bundle / model, else the environment's block from
+          app-config.json, else placeholders to fill in. */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
         <FormControlLabel
           sx={{ mr: 0 }}
@@ -1485,6 +1501,12 @@ export default function ModelDeploymentManager() {
           <HelpOutlineIcon sx={{ fontSize: 16, color: 'text.secondary', cursor: 'help' }} />
         </Tooltip>
       </Box>
+      {environmentStorageError && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          The air-gapped storage for this environment in app-config.json is invalid and is not used:{' '}
+          {environmentStorageError}
+        </Alert>
+      )}
       {yamlHasStorage && (
         <Alert severity={storageProblem ? 'error' : 'info'} sx={{ mb: 2 }}>
           {storageProblem ? <>{storageProblem} </> : null}

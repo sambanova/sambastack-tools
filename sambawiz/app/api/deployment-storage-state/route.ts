@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
-import { validateDeploymentStorage, type DeploymentStorage } from '@/app/utils/deployment-storage';
+import {
+  environmentStorageError,
+  readEnvironmentStorage,
+  validateDeploymentStorage,
+  type DeploymentStorage,
+} from '@/app/utils/deployment-storage';
 
 interface AppConfig {
   currentKubeconfig: string;
-  kubeconfigs: Record<string, unknown>;
+  kubeconfigs: Record<string, { storage?: unknown }>;
 }
 
 /**
@@ -19,13 +24,19 @@ type StorageState = Record<string, Record<string, DeploymentStorage>>;
 
 const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'deployment-storage-state.json');
 
-/** The active environment from app-config.json, or null when there is none. */
-function currentEnvironment(): string | null {
+/** The active environment's name and app-config.json entry, or null when there is none. */
+function currentEnvironmentEntry(): { env: string; entry: { storage?: unknown } } | null {
   const configPath = path.join(process.cwd(), 'app-config.json');
   if (!existsSync(configPath)) return null;
   const config: AppConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
   const env = config.currentKubeconfig;
-  return env && config.kubeconfigs?.[env] ? env : null;
+  const entry = env ? config.kubeconfigs?.[env] : undefined;
+  return env && entry ? { env, entry } : null;
+}
+
+/** The active environment from app-config.json, or null when there is none. */
+function currentEnvironment(): string | null {
+  return currentEnvironmentEntry()?.env ?? null;
 }
 
 function readState(): StorageState {
@@ -40,15 +51,24 @@ function readState(): StorageState {
 }
 
 /**
- * GET - The remembered storage blocks for the current environment
+ * GET - The remembered storage blocks for the current environment, plus the
+ * environment's own `storage` from app-config.json (`kubeconfigs.<env>.storage`,
+ * the block the CLI uses). The page falls back to the latter for bundles /
+ * models with nothing remembered. An invalid environment block is reported
+ * in `environmentStorageError` and never returned.
  */
 export async function GET() {
   try {
-    const env = currentEnvironment();
-    if (!env) {
-      return NextResponse.json({ success: true, storage: {} });
+    const current = currentEnvironmentEntry();
+    if (!current) {
+      return NextResponse.json({ success: true, storage: {}, environmentStorage: null, environmentStorageError: null });
     }
-    return NextResponse.json({ success: true, storage: readState()[env] ?? {} });
+    return NextResponse.json({
+      success: true,
+      storage: readState()[current.env] ?? {},
+      environmentStorage: readEnvironmentStorage(current.entry),
+      environmentStorageError: environmentStorageError(current.entry),
+    });
   } catch (error) {
     console.error('Error loading deployment storage state:', error);
     return NextResponse.json(
