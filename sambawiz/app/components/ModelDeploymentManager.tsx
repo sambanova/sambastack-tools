@@ -277,6 +277,13 @@ export default function ModelDeploymentManager() {
   // remembered. `environmentStorageError` is set when that block is invalid.
   const [environmentStorage, setEnvironmentStorage] = useState<DeploymentStorage | null>(null);
   const [environmentStorageError, setEnvironmentStorageError] = useState<string | null>(null);
+  // After a deploy with storage in an environment without a usable block of
+  // its own: the block offered as the environment's default, and how saving
+  // it went (`saved` / an error message).
+  const [offeredEnvironmentStorage, setOfferedEnvironmentStorage] = useState<DeploymentStorage | null>(null);
+  const [environmentStorageSave, setEnvironmentStorageSave] = useState<
+    { saving: true } | { saved: true } | { error: string } | null
+  >(null);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
   const [deploymentResult, setDeploymentResult] = useState<{
@@ -1230,8 +1237,14 @@ export default function ModelDeploymentManager() {
   // Remember the storage block just deployed for this bundle / model (or
   // forget it, when deployed without one) so the next selection restores it.
   const rememberDeployedStorage = () => {
-    if (!sourceKey) return;
     const storage = getDeploymentStorage(deploymentYaml);
+    // First block deployed in this environment: offer it as the default for
+    // the whole environment (and the CLI).
+    if (storage && !environmentStorage) {
+      setOfferedEnvironmentStorage(storage);
+      setEnvironmentStorageSave(null);
+    }
+    if (!sourceKey) return;
     setSavedStorage((prev) => {
       const next = { ...prev };
       if (storage) next[sourceKey] = storage;
@@ -1243,6 +1256,31 @@ export default function ModelDeploymentManager() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: sourceKey, storage }),
     }).catch((err) => console.error('Failed to save deployment storage:', err));
+  };
+
+  // Save the offered block as the environment's own storage in app-config.json.
+  const handleSaveEnvironmentStorage = async () => {
+    if (!offeredEnvironmentStorage) return;
+    setEnvironmentStorageSave({ saving: true });
+    try {
+      const response = await fetch('/api/deployment-storage-state', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage: offeredEnvironmentStorage }),
+      });
+      const data = await response.json();
+      if (response.ok && data.success) {
+        setEnvironmentStorage(data.storage);
+        setEnvironmentStorageError(null);
+        setOfferedEnvironmentStorage(null);
+        setEnvironmentStorageSave({ saved: true });
+      } else {
+        setEnvironmentStorageSave({ error: data.error || 'Failed to save the environment storage' });
+      }
+    } catch (err) {
+      console.error('Failed to save environment storage:', err);
+      setEnvironmentStorageSave({ error: 'Failed to connect to the server' });
+    }
   };
 
   // Open delete confirmation dialog for a specific deployment
@@ -1580,6 +1618,37 @@ export default function ModelDeploymentManager() {
                 {deploymentResult.output}
               </Box>
             )}
+          </Alert>
+        </Box>
+      )}
+
+      {/* Offer the deployed storage block as the environment's default */}
+      {offeredEnvironmentStorage && (
+        <Box sx={{ mt: 2 }}>
+          <Alert
+            severity={environmentStorageSave && 'error' in environmentStorageSave ? 'error' : 'info'}
+            onClose={() => setOfferedEnvironmentStorage(null)}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={handleSaveEnvironmentStorage}
+                disabled={Boolean(environmentStorageSave && 'saving' in environmentStorageSave)}
+              >
+                Save for environment
+              </Button>
+            }
+          >
+            Use this <code>spec.storage</code> mount for every deployment in this environment? It is saved
+            as <code>storage</code> in <code>app-config.json</code>, which the CLI also uses.
+            {environmentStorageSave && 'error' in environmentStorageSave && <> {environmentStorageSave.error}</>}
+          </Alert>
+        </Box>
+      )}
+      {environmentStorageSave && 'saved' in environmentStorageSave && (
+        <Box sx={{ mt: 2 }}>
+          <Alert severity="success" onClose={() => setEnvironmentStorageSave(null)}>
+            Saved as this environment&apos;s air-gapped storage in <code>app-config.json</code>.
           </Alert>
         </Box>
       )}

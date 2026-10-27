@@ -1263,11 +1263,9 @@ data:
             (spec.storage); a default per environment lives in app-config.json,
             which this page does not edit. */}
         <Alert severity="info" sx={{ mb: 3 }}>
-          <strong>Air-gapped environment?</strong> No setup is needed here. When you deploy a model or
-          bundle on the <strong>Model Deployment</strong> page, check <strong>Air-gapped deployment</strong>{' '}
-          and set the local/NFS checkpoint mount (<code>spec.storage</code>) in the deployment YAML. To
-          use the same mount for every deployment in this environment, from the web UI and the CLI, set{' '}
-          <code>storage</code> for it in <code>app-config.json</code>.
+          <strong>Air-gapped environment?</strong> Check <strong>Air-gapped deployment</strong> on the{' '}
+          <strong>Model Deployment</strong> page, or set <code>storage</code> for this environment in{' '}
+          <code>app-config.json</code> to use it everywhere.
         </Alert>
 
         {/* Success/Error Messages */}

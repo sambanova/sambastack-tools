@@ -18,6 +18,7 @@ The Model Deployment page manages the deployment lifecycle of validated bundles.
 - On air-gapped clusters, check **Air-gapped deployment** to add a `spec.storage` block that mounts the checkpoints from local/NFS storage. When the environment has `storage` in `app-config.json`, that block is used; otherwise it starts with placeholder paths: replace `path` (checkpoint directory on the node) and `mountPath` (must match the `local://` substitution target in `global.substitutions` of the install's `models-values.yaml`) in the YAML. Deploy stays disabled until both are valid paths
 - The storage block you deploy a bundle (or model) with is remembered for it in the current environment: selecting it again restores the block and checks the box. Deploying it without the block forgets it
 - A bundle or model with no block remembered starts with the environment's `storage` from `app-config.json` when there is one (box checked), the same block the CLI uses. If that block is invalid, a warning says why and it is not used
+- After deploying with a storage block in an environment that has no `storage` of its own, **Save for environment** saves that block to `app-config.json`, so every bundle and model here and the CLI use it
 - Apply the deployment to your cluster
 - Monitor deployment progress automatically
 

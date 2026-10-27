@@ -837,8 +837,11 @@ describe('Model Deployment Manager', () => {
       saved: Record<string, unknown>,
       env: { storage?: unknown; error?: string } = {}
     ) => {
-      (global.fetch as jest.Mock).mockImplementation((url: string) => {
+      (global.fetch as jest.Mock).mockImplementation((url: string, init?: { method?: string; body?: string }) => {
         const ok = (body: unknown) => Promise.resolve({ ok: true, json: async () => body });
+        if (url === '/api/deployment-storage-state' && init?.method === 'PUT') {
+          return ok({ success: true, environment: 'dev', storage: JSON.parse(init.body ?? '{}').storage });
+        }
         if (url === '/api/deployment-storage-state') {
           return ok({
             success: true,
@@ -873,6 +876,10 @@ describe('Model Deployment Manager', () => {
     };
 
     const storageCheckbox = () => screen.findByRole('checkbox', { name: 'Air-gapped deployment' });
+    const environmentStorageWrites = () =>
+      (global.fetch as jest.Mock).mock.calls
+        .filter(([url, init]) => url === '/api/deployment-storage-state' && init?.method === 'PUT')
+        .map(([, init]) => JSON.parse(init.body));
     const storageStateWrites = () =>
       (global.fetch as jest.Mock).mock.calls
         .filter(([url, init]) => url === '/api/deployment-storage-state' && init?.method === 'POST')
@@ -1021,6 +1028,51 @@ describe('Model Deployment Manager', () => {
       expect(screen.getByText(/air-gapped storage for this environment in app-config.json is invalid/)).toBeInTheDocument();
       await user.click(await storageCheckbox());
       await waitFor(() => expect(yamlField.value).toContain('CHANGE_ME_MOUNT_PATH_IN_POD'));
+
+      jest.useFakeTimers();
+    });
+
+    it('offers to save the deployed block as the environment\'s storage', async () => {
+      jest.useRealTimers();
+      mockFetchWithSavedStorage({});
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      const yamlField = await selectBundle(user);
+      await user.click(await storageCheckbox());
+      await waitFor(() => expect(yamlField.value).toContain('CHANGE_ME_MOUNT_PATH_IN_POD'));
+      fireEvent.change(yamlField, {
+        target: {
+          value: yamlField.value
+            .replace('CHANGE_ME_MOUNT_PATH_IN_POD', '/nfsdata')
+            .replace('CHANGE_ME_HOST_PATH_ON_NODE', '/data/sambastack-ml-data'),
+        },
+      });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled());
+      await user.click(screen.getByRole('button', { name: 'Deploy' }));
+
+      await user.click(await screen.findByRole('button', { name: 'Save for environment' }));
+      await waitFor(() => expect(environmentStorageWrites()).toEqual([{ storage }]));
+      expect(await screen.findByText(/Saved as this environment/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Save for environment' })).not.toBeInTheDocument();
+
+      jest.useFakeTimers();
+    });
+
+    it('does not offer to save when the environment already has storage', async () => {
+      jest.useRealTimers();
+      mockFetchWithSavedStorage({}, { storage });
+      const user = userEvent.setup();
+      await act(async () => {
+        renderWithProviders(<ModelDeploymentManager />);
+      });
+
+      await selectBundle(user);
+      await user.click(screen.getByRole('button', { name: 'Deploy' }));
+      await waitFor(() => expect(storageStateWrites()).toEqual([{ key: 'bundle:gpt-oss-120b', storage }]));
+      expect(screen.queryByRole('button', { name: 'Save for environment' })).not.toBeInTheDocument();
 
       jest.useFakeTimers();
     });

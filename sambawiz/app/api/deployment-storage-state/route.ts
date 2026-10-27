@@ -13,6 +13,8 @@ interface AppConfig {
   kubeconfigs: Record<string, { storage?: unknown }>;
 }
 
+const CONFIG_PATH = path.join(process.cwd(), 'app-config.json');
+
 /**
  * The air-gapped `spec.storage` last deployed for each bundle / model, per
  * environment: `{ [env]: { [sourceKey]: DeploymentStorage } }`. The source key
@@ -26,9 +28,8 @@ const STATE_FILE_PATH = path.join(process.cwd(), 'temp', 'deployment-storage-sta
 
 /** The active environment's name and app-config.json entry, or null when there is none. */
 function currentEnvironmentEntry(): { env: string; entry: { storage?: unknown } } | null {
-  const configPath = path.join(process.cwd(), 'app-config.json');
-  if (!existsSync(configPath)) return null;
-  const config: AppConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
+  if (!existsSync(CONFIG_PATH)) return null;
+  const config: AppConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
   const env = config.currentKubeconfig;
   const entry = env ? config.kubeconfigs?.[env] : undefined;
   return env && entry ? { env, entry } : null;
@@ -133,6 +134,55 @@ export async function POST(request: NextRequest) {
       {
         success: false,
         error: 'Failed to save deployment storage state',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * PUT - Save `storage` as the current environment's own block in
+ * app-config.json (`kubeconfigs.<env>.storage`), so the CLI and every bundle /
+ * model on the page use it. Only that field is changed.
+ */
+export async function PUT(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const result = validateDeploymentStorage(body?.storage);
+    if (!result.valid) {
+      return NextResponse.json(
+        { success: false, error: `Invalid air-gapped storage: ${result.error}` },
+        { status: 400 }
+      );
+    }
+
+    if (!existsSync(CONFIG_PATH)) {
+      return NextResponse.json(
+        { success: false, error: 'No active environment configured. Please select an environment first.' },
+        { status: 400 }
+      );
+    }
+    const config: AppConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'));
+    const env = config.currentKubeconfig;
+    const entry = env ? config.kubeconfigs?.[env] : undefined;
+    if (!entry) {
+      return NextResponse.json(
+        { success: false, error: 'No active environment configured. Please select an environment first.' },
+        { status: 400 }
+      );
+    }
+
+    entry.storage = result.storage;
+    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+
+    return NextResponse.json({ success: true, environment: env, storage: result.storage });
+  } catch (error) {
+    console.error('Error saving environment storage:', error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: 'Failed to save environment storage',
         message: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }

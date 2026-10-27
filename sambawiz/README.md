@@ -111,7 +111,7 @@ Example `app-config.json`:
 
 An air-gapped cluster has no artifact registry to pull checkpoints from, so the inference pods must mount them from a local/NFS path on the nodes. Without that mount the operator rejects the deployment (`Valid=False`, `ValidationFailed`: *uses local:// artifact sources but no storage configuration with HostPath volumes is defined*) and no pods are created.
 
-**Web UI:** set the mount per deployment on the Model Deployment page. Check **Air-gapped deployment** and a `spec.storage` block with placeholder paths is added to the YAML; replace them with your paths (Deploy stays disabled until you do). The block you deploy a bundle or model with is remembered for that bundle or model in the current environment, and restored (box checked) the next time you select it. If the environment has `storage` in `app-config.json` (below), bundles and models with nothing remembered start with that block instead of placeholders.
+**Web UI:** set the mount per deployment on the Model Deployment page. Check **Air-gapped deployment** and a `spec.storage` block with placeholder paths is added to the YAML; replace them with your paths (Deploy stays disabled until you do). The block you deploy a bundle or model with is remembered for that bundle or model in the current environment, and restored (box checked) the next time you select it. If the environment has `storage` in `app-config.json` (below), bundles and models with nothing remembered start with that block instead of placeholders. If it has none, the first deploy with a storage block offers **Save for environment**, which writes that block there.
 
 **CLI (and web UI default):** configure the mount once per environment in `app-config.json`:
 

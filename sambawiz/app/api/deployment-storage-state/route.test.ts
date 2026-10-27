@@ -1,7 +1,7 @@
 /**
  * @jest-environment node
  */
-import { GET, POST } from './route';
+import { GET, POST, PUT } from './route';
 import fs from 'fs';
 import type { NextRequest } from 'next/server';
 
@@ -37,9 +37,9 @@ function configWithStorage(envStorage: unknown) {
   });
 }
 
-function makeRequest(body: unknown) {
+function makeRequest(body: unknown, method = 'POST') {
   return new Request('http://localhost/api/deployment-storage-state', {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }) as unknown as NextRequest;
@@ -101,5 +101,41 @@ describe('deployment-storage-state route', () => {
     expect((await POST(makeRequest({ key: 'bundle:b1', storage: placeholder }))).status).toBe(400);
     expect((await POST(makeRequest({ key: 'b1', storage }))).status).toBe(400);
     expect(fs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  describe('PUT (environment default)', () => {
+    /** The app-config.json content from the last write. */
+    const lastWrittenConfig = () => {
+      const calls = (fs.writeFileSync as jest.Mock).mock.calls;
+      return JSON.parse(calls[calls.length - 1][1]);
+    };
+
+    it('saves the block as the current environment\'s storage, leaving the rest of app-config.json as it was', async () => {
+      mockFiles({});
+      const response = await PUT(makeRequest({ storage }, 'PUT'));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ success: true, environment: 'dev', storage });
+      expect(lastWrittenConfig()).toEqual({
+        currentKubeconfig: 'dev',
+        kubeconfigs: {
+          dev: { file: 'kubeconfigs/dev.yaml', namespace: 'default', storage },
+          prod: { file: 'kubeconfigs/prod.yaml' },
+        },
+      });
+    });
+
+    it('replaces an invalid environment block', async () => {
+      mockFiles({}, configWithStorage({ hostPath: [] }));
+      await PUT(makeRequest({ storage }, 'PUT'));
+      expect(lastWrittenConfig().kubeconfigs.dev.storage).toEqual(storage);
+    });
+
+    it('rejects an invalid block with 400 before writing anything', async () => {
+      mockFiles({});
+      const placeholder = { hostPath: [{ name: 'nfs', mountPath: 'CHANGE_ME_MOUNT_PATH_IN_POD', path: '/data' }] };
+      expect((await PUT(makeRequest({ storage: placeholder }, 'PUT'))).status).toBe(400);
+      expect((await PUT(makeRequest({}, 'PUT'))).status).toBe(400);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
   });
 });
