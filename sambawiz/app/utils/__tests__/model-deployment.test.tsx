@@ -825,7 +825,7 @@ describe('Model Deployment Manager', () => {
     jest.useFakeTimers();
   });
 
-  describe('air-gapped storage (spec.storage, CUSTEI-1560)', () => {
+  describe('air-gapped storage (spec.storage)', () => {
     const storage = {
       hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }],
     };

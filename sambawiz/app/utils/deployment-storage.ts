@@ -1,5 +1,5 @@
 /**
- * Optional `spec.storage` for a `ModelDeployment` (CUSTEI-1560).
+ * Optional `spec.storage` for a `ModelDeployment`.
  *
  * On an air-gapped SambaStack cluster there is no artifact registry, so the
  * inference pods must mount their checkpoints from a local/NFS path on the

@@ -678,7 +678,7 @@ describe('deploy', () => {
     for (const v of ['ENABLE_KV_CACHE_MANAGER', 'KV_CACHE_INCLUDE_STATS_IN_RESPONSE', 'ENABLE_IGNORE_EOS']) expect(r.out).toContain(`${v}: "true"`);
     expect(r.out).toContain('name: my-dep');
   });
-  it('create adds spec.storage for an air-gapped environment, only for that environment (CUSTEI-1560)', async () => {
+  it('create adds spec.storage for an air-gapped environment, only for that environment', async () => {
     const storage = { hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }] };
     expect(ok(await run(['deploy', 'create', '--bundle', 'bg', '--dry-run'])).out).not.toContain('storage:');
     const cfg = readConfig();

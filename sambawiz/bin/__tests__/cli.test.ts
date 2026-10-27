@@ -260,7 +260,7 @@ describe('buildModelDeploymentYaml', () => {
     expect(buildModelDeploymentYaml('my-bundle', { storage: null }).yaml).toBe(yaml);
   });
 
-  it('appends spec.storage for an air-gapped environment (CUSTEI-1560)', () => {
+  it('appends spec.storage for an air-gapped environment', () => {
     const storage = {
       hostPath: [{ name: 'nfs', mountPath: '/nfsdata', path: '/data/sambastack-ml-data' }],
     };

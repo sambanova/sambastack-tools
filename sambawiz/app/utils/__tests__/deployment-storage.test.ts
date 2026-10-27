@@ -13,7 +13,7 @@ import {
 } from '../deployment-storage';
 
 /**
- * Tests for the air-gapped `spec.storage` helpers (CUSTEI-1560): validation of
+ * Tests for the air-gapped `spec.storage` helpers: validation of
  * the app-config.json block, and adding/removing it in deployment YAML.
  */
 
